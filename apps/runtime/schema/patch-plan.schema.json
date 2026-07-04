@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["approvedToApply", "securityStatus", "baseSha", "operations"],
+  "properties": {
+    "approvedToApply": { "const": true },
+    "securityStatus": { "const": "cleared" },
+    "baseSha": { "type": "string" },
+    "operations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "operation", "expectedPreimage"],
+        "properties": {
+          "path": { "type": "string" },
+          "operation": { "enum": ["replace", "create", "delete"] },
+          "expectedPreimage": { "type": "string" },
+          "replacement": { "type": "string" }
+        }
+      }
+    }
+  }
+}

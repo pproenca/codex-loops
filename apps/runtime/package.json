@@ -1,0 +1,67 @@
+{
+  "name": "agent-loops",
+  "version": "0.2.7",
+  "type": "module",
+  "packageManager": "pnpm@11.4.0",
+  "description": "Codex Loops dynamic workflow runner CLI for Codex.",
+  "license": "MIT",
+  "author": "Pedro Proenca",
+  "homepage": "https://github.com/pproenca/codex-loops/tree/master/apps/runtime#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pproenca/codex-loops.git",
+    "directory": "apps/runtime"
+  },
+  "bugs": {
+    "url": "https://github.com/pproenca/codex-loops/issues"
+  },
+  "keywords": [
+    "codex",
+    "agents",
+    "workflow",
+    "cli"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "boundary": "node scripts/check-boundaries.mjs",
+    "build": "node scripts/build.mjs",
+    "check": "pnpm run typecheck && pnpm run help:check && pnpm run boundary && pnpm run test",
+    "gen-help": "node scripts/gen-help.mjs",
+    "help:check": "node scripts/gen-help.mjs --check",
+    "test": "node scripts/build.mjs && node --test tests/*.test.ts",
+    "typecheck": "tsc --noEmit",
+    "prepack": "pnpm run build"
+  },
+  "bin": {
+    "agent-loops": "dist/cli.js"
+  },
+  "files": [
+    "dist/",
+    "schema/",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@openai/codex-sdk": "^0.137.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "acorn": "^8.16.0",
+    "esbuild": "^0.25.0",
+    "typescript": "^5.8.0",
+    "yaml": "^2.0.0"
+  }
+}

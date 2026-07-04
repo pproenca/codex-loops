@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "scopeKind",
+    "batchable",
+    "runCompleteness",
+    "basis"
+  ],
+  "properties": {
+    "scopeKind": { "enum": ["bounded", "repo-wide", "unknown"] },
+    "expectedInputItems": { "type": "number" },
+    "maxCandidateItems": { "type": "number" },
+    "maxMutationFilesPerRun": { "type": "number" },
+    "maxMutationFilesPerAgent": { "type": "number" },
+    "maxPromptBytesPerAgent": { "type": "number" },
+    "batchable": { "type": "boolean" },
+    "runCompleteness": { "enum": ["full", "partial", "plan-only"] },
+    "basis": { "type": "string" }
+  }
+}

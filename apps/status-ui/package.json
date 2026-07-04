@@ -1,0 +1,63 @@
+{
+  "name": "agent-loops-ui",
+  "version": "0.2.7",
+  "type": "module",
+  "packageManager": "pnpm@11.4.0",
+  "description": "Static TanStack status UI for Codex Loops workflow runs.",
+  "license": "MIT",
+  "author": "Pedro Proenca",
+  "homepage": "https://github.com/pproenca/codex-loops/tree/master/apps/status-ui#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/pproenca/codex-loops.git",
+    "directory": "apps/status-ui"
+  },
+  "bugs": {
+    "url": "https://github.com/pproenca/codex-loops/issues"
+  },
+  "keywords": [
+    "codex-loops",
+    "workflow",
+    "status",
+    "tanstack",
+    "ui"
+  ],
+  "scripts": {
+    "build": "vite build",
+    "test": "pnpm run build && node --test tests/*.test.mjs",
+    "typecheck": "tsc --noEmit",
+    "dev": "vite --host 127.0.0.1",
+    "prepack": "pnpm run build"
+  },
+  "bin": {
+    "agent-loops-ui": "bin/agent-loops-ui.mjs"
+  },
+  "files": [
+    "bin/",
+    "dist/",
+    "server/",
+    "README.md"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.90.12",
+    "@tanstack/react-router": "^1.139.8",
+    "react": "^19.2.1",
+    "react-dom": "^19.2.1",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/vite": "^4.1.18",
+    "@types/react": "^19.2.7",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.2",
+    "tailwindcss": "^4.1.18",
+    "typescript": "^5.8.0",
+    "vite": "^7.2.7"
+  }
+}

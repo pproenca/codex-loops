@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "exitCode", "message"],
+  "properties": {
+    "code": {
+      "enum": ["usage", "provider-config", "validation", "malformed-output", "killed", "runtime"]
+    },
+    "exitCode": { "enum": [1, 2, 4, 6, 8, 130] },
+    "message": { "type": "string" },
+    "hint": { "type": "string" },
+    "details": {}
+  }
+}

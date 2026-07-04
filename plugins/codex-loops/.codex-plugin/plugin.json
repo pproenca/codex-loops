@@ -1,0 +1,28 @@
+{
+  "name": "codex-loops",
+  "version": "0.2.6+codex.20260614190037",
+  "description": "Use when a user explicitly asks for Codex Loops or path-first dynamic workflow orchestration through the Codex SDK.",
+  "author": {
+    "name": "Pedro Proenca"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Codex Loops",
+    "shortDescription": "Author, test, and execute deterministic workflow files.",
+    "longDescription": "Codex Loops packages one opt-in skill for the published codex-loops package. It authors path-first workflow files, tests them with the selected provider, and runs live workflows through the Codex SDK when requested. The installed CLI command remains agent-loops for compatibility.",
+    "developerName": "Pedro Proenca",
+    "category": "Productivity",
+    "websiteURL": "https://github.com/pproenca/codex-loops/tree/master/plugins/codex-loops",
+    "privacyPolicyURL": "https://github.com/pproenca/codex-loops/tree/master/plugins/codex-loops#privacy",
+    "termsOfServiceURL": "https://github.com/pproenca/codex-loops/tree/master/plugins/codex-loops#terms",
+    "capabilities": [
+      "Write",
+      "Automation"
+    ],
+    "defaultPrompt": [
+      "Turn this task into a Codex Loops workflow file.",
+      "Test this workflow script with bounded args first.",
+      "Execute this tested Codex Loops workflow."
+    ]
+  }
+}

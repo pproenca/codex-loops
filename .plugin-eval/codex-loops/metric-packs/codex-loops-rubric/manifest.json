@@ -1,0 +1,6 @@
+{
+  "name": "codex-loops-rubric",
+  "version": "1.0.0",
+  "supportedTargetKinds": ["plugin"],
+  "command": ["node", "./emit-codex-loops-rubric.js"]
+}

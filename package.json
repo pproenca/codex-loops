@@ -1,0 +1,23 @@
+{
+  "name": "codex-loops-repo",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "packageManager": "pnpm@11.4.0",
+  "publishConfig": {
+    "directory": "apps/runtime"
+  },
+  "scripts": {
+    "prepublishOnly": "node scripts/publish-status-ui.mjs",
+    "test": "pnpm run test:status-ui && pnpm run test:runtime",
+    "check": "pnpm run check:status-ui && pnpm run check:runtime",
+    "test:runtime": "pnpm -C apps/runtime test",
+    "check:runtime": "pnpm -C apps/runtime check",
+    "test:status-ui": "pnpm -C apps/status-ui test",
+    "check:status-ui": "pnpm -C apps/status-ui typecheck && pnpm -C apps/status-ui test",
+    "pack:runtime": "pnpm -C apps/runtime pack --dry-run",
+    "pack:status-ui": "pnpm -C apps/status-ui pack --dry-run",
+    "pack:packages": "pnpm run pack:status-ui && pnpm run pack:runtime",
+    "publish:dry-run": "pnpm publish --dry-run --no-git-checks"
+  }
+}

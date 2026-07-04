@@ -1,0 +1,515 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "t",
+        "schema",
+        "runId",
+        "workflowName",
+        "scriptPath",
+        "scriptSha256",
+        "args",
+        "provider",
+        "budgetPlan",
+        "limits",
+        "runtimeContract"
+      ],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "run_opened" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "schema": { "const": "agent-loops/journal@2" },
+        "runId": { "type": "string" },
+        "workflowName": { "type": "string" },
+        "scriptPath": { "type": "string" },
+        "scriptSha256": { "type": "string" },
+        "args": {},
+        "provider": { "enum": ["sdk", "mock"] },
+        "budgetPlan": { "$ref": "#/$defs/budgetPlan" },
+        "limits": { "$ref": "#/$defs/limits" },
+        "runtimeContract": { "$ref": "#/$defs/runtimeContract" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "pid", "mode", "cliVersion"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "runner_attached" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "pid": { "type": "number" },
+        "startedAt": { "type": "string" },
+        "mode": { "enum": ["fresh", "resume"] },
+        "cliVersion": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "pid"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "runner_heartbeat" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "pid": { "type": "number" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "reason"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "runner_detached" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "reason": { "const": "stale-takeover" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "phase", "title"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "phase_entered" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "phase": { "type": "number" },
+        "title": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "message"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "log_emitted" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "message": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "t",
+        "node",
+        "label",
+        "attempt",
+        "promptHash",
+        "optionsHash",
+        "promptPreview",
+        "effort"
+      ],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "agent_scheduled" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "node": { "$ref": "#/$defs/hash32" },
+        "label": { "type": "string" },
+        "phase": { "type": "number" },
+        "phaseTitle": { "type": "string" },
+        "attempt": { "type": "number" },
+        "promptHash": { "$ref": "#/$defs/hash32" },
+        "schemaHash": { "$ref": "#/$defs/hash32" },
+        "optionsHash": { "$ref": "#/$defs/hash32" },
+        "promptPreview": { "type": "string", "maxLength": 180 },
+        "promptFull": { "type": "string" },
+        "model": { "type": "string" },
+        "effort": { "enum": ["medium", "high", "xhigh"] },
+        "routeReason": { "type": "string" },
+        "agentType": { "type": "string" },
+        "agentDefinitionSha": { "type": "string" },
+        "isolation": { "type": "string" },
+        "risk": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "node", "attempt"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "agent_started" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "node": { "$ref": "#/$defs/hash32" },
+        "attempt": { "type": "number" },
+        "threadId": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "node", "attempt"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "agent_progress" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "node": { "$ref": "#/$defs/hash32" },
+        "attempt": { "type": "number" },
+        "tokens": { "type": "number" },
+        "toolCalls": { "type": "number" },
+        "lastToolName": { "type": "string" },
+        "lastToolSummary": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "node", "attempt", "reason", "errors"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "agent_retried" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "node": { "$ref": "#/$defs/hash32" },
+        "attempt": { "type": "number" },
+        "reason": { "enum": ["schema-invalid", "output-unparseable"] },
+        "errors": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "seq",
+        "t",
+        "node",
+        "attempt",
+        "result",
+        "tokens",
+        "toolCalls",
+        "durationMs",
+        "source"
+      ],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "agent_completed" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "node": { "$ref": "#/$defs/hash32" },
+        "attempt": { "type": "number" },
+        "threadId": { "type": "string" },
+        "result": {},
+        "tokens": { "type": "number" },
+        "toolCalls": { "type": "number" },
+        "durationMs": { "type": "number" },
+        "source": { "enum": ["provider-schema", "text", "mock"] }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "node", "attempt", "error"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "agent_failed" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "node": { "$ref": "#/$defs/hash32" },
+        "attempt": { "type": "number" },
+        "error": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "kind", "message"],
+          "properties": {
+            "name": { "type": "string" },
+            "kind": { "enum": ["config", "malformed-output", "budget", "aborted", "provider"] },
+            "message": { "type": "string" }
+          }
+        },
+        "tokens": { "type": "number" },
+        "toolCalls": { "type": "number" },
+        "durationMs": { "type": "number" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "node", "attempt"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "agent_replayed" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "node": { "$ref": "#/$defs/hash32" },
+        "attempt": { "type": "number" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "w", "name"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "child_started" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "name": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "w", "status"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "child_finished" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "status": { "enum": ["done", "failed", "killed"] },
+        "result": {}
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "scriptSha256"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "script_changed" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "scriptSha256": { "type": "string" }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seq", "t", "status", "totalTokens", "totalToolCalls", "durationMs"],
+      "properties": {
+        "seq": { "type": "integer", "minimum": 1 },
+        "t": { "const": "run_finished" },
+        "ts": { "type": "string" },
+        "w": { "type": "string" },
+        "status": { "enum": ["done", "failed", "killed"] },
+        "result": {},
+        "error": { "type": "string" },
+        "totalTokens": { "type": "number" },
+        "totalToolCalls": { "type": "number" },
+        "durationMs": { "type": "number" }
+      }
+    }
+  ],
+  "$defs": {
+    "hash32": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "maxAgents",
+        "maxConcurrentAgents",
+        "schemaRetryLimit",
+        "maxWorkItemsPerAgent",
+        "maxInventoryItemsReturned",
+        "maxPromptBytesPerAgent",
+        "maxMutationFilesPerAgent",
+        "maxMutationFilesPerRun",
+        "maxParallelItems",
+        "maxPipelineItems"
+      ],
+      "properties": {
+        "maxAgents": { "type": "number" },
+        "maxConcurrentAgents": { "type": "number" },
+        "schemaRetryLimit": { "type": "number" },
+        "maxWorkItemsPerAgent": { "type": "number" },
+        "maxInventoryItemsReturned": { "type": "number" },
+        "maxPromptBytesPerAgent": { "type": "number" },
+        "maxMutationFilesPerAgent": { "type": "number" },
+        "maxMutationFilesPerRun": { "type": "number" },
+        "maxParallelItems": { "type": "number" },
+        "maxPipelineItems": { "type": "number" },
+        "maxToolCallsPerAgent": { "type": "number" },
+        "maxToolCallsPerRun": { "type": "number" },
+        "taskBudgetTokens": { "type": "number" },
+        "minRemainingTokensForAgent": { "type": "number" }
+      }
+    },
+    "workloadPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scopeKind", "batchable", "runCompleteness", "basis"],
+      "properties": {
+        "scopeKind": { "enum": ["bounded", "repo-wide", "unknown"] },
+        "expectedInputItems": { "type": "number" },
+        "maxCandidateItems": { "type": "number" },
+        "maxMutationFilesPerRun": { "type": "number" },
+        "maxMutationFilesPerAgent": { "type": "number" },
+        "maxPromptBytesPerAgent": { "type": "number" },
+        "batchable": { "type": "boolean" },
+        "runCompleteness": { "enum": ["full", "partial", "plan-only"] },
+        "basis": { "type": "string" }
+      }
+    },
+    "budgetPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider",
+        "limits",
+        "expectedAgents",
+        "workload",
+        "modelPolicySummary",
+        "writeScope",
+        "tokenWarning"
+      ],
+      "properties": {
+        "provider": { "enum": ["sdk", "mock"] },
+        "limits": { "$ref": "#/$defs/limits" },
+        "expectedAgents": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["minimum", "maximum", "basis"],
+          "properties": {
+            "minimum": { "type": "number" },
+            "maximum": { "type": "number" },
+            "basis": { "type": "string" }
+          }
+        },
+        "workload": { "$ref": "#/$defs/workloadPlan" },
+        "modelPolicySummary": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["defaultEffort", "minEffort", "maxEffort", "disallowedEfforts"],
+          "properties": {
+            "defaultModel": { "type": "string" },
+            "defaultEffort": { "type": "string" },
+            "minEffort": { "type": "string" },
+            "maxEffort": { "type": "string" },
+            "disallowedEfforts": { "type": "array", "items": { "type": "string" } }
+          }
+        },
+        "writeScope": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["posture", "summary"],
+          "properties": {
+            "posture": { "enum": ["read-only", "workspace-write", "mixed", "full-access"] },
+            "summary": { "type": "string" }
+          }
+        },
+        "tokenWarning": { "type": "string" },
+        "dollarEstimate": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "reason"],
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "reason": { "type": "string" }
+          }
+        }
+      }
+    },
+    "runtimeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "activation",
+        "permission",
+        "structuredOutput",
+        "scheduling",
+        "budgeting",
+        "resume",
+        "remote"
+      ],
+      "properties": {
+        "activation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["allowed", "source", "command", "reason"],
+          "properties": {
+            "allowed": { "type": "boolean" },
+            "source": { "enum": ["cli-command", "programmatic-api", "runner-api"] },
+            "command": { "type": "string" },
+            "reason": { "type": "string" }
+          }
+        },
+        "permission": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["decision", "source", "autoDenied", "ruleText"],
+          "properties": {
+            "decision": { "enum": ["allow", "caller-owned", "deny"] },
+            "source": { "type": "string" },
+            "autoDenied": { "type": "boolean" },
+            "ruleText": { "type": "string" },
+            "targetSettingsSource": { "type": "string" }
+          }
+        },
+        "structuredOutput": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "failClosed", "schemaRetryLimit"],
+          "properties": {
+            "mode": { "const": "provider-schema" },
+            "failClosed": { "const": true },
+            "schemaRetryLimit": { "type": "number" }
+          }
+        },
+        "scheduling": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "maxAgents",
+            "maxConcurrentAgents",
+            "queueExcessAgents",
+            "queueStateVisible",
+            "releaseSlotsOnTerminalState"
+          ],
+          "properties": {
+            "maxAgents": { "type": "number" },
+            "maxConcurrentAgents": { "type": "number" },
+            "queueExcessAgents": { "const": true },
+            "queueStateVisible": { "const": true },
+            "releaseSlotsOnTerminalState": { "const": true }
+          }
+        },
+        "budgeting": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["accountingFields", "thresholdPolicy"],
+          "properties": {
+            "taskBudgetTokens": { "type": "number" },
+            "minRemainingTokensForAgent": { "type": "number" },
+            "accountingFields": { "type": "array", "items": { "type": "string" } },
+            "thresholdPolicy": { "type": "string" }
+          }
+        },
+        "resume": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["cacheKey", "completedNodesReplayFromJournal"],
+          "properties": {
+            "journalPath": { "type": "string" },
+            "cacheKey": { "const": "runId+phaseTitle+label+promptHash+schemaHash+optionsHash" },
+            "completedNodesReplayFromJournal": { "const": true }
+          }
+        },
+        "remote": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["supported", "reason"],
+          "properties": {
+            "supported": { "const": false },
+            "reason": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

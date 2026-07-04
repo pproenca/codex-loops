@@ -1,0 +1,33 @@
+{
+  "ignore": {
+    "rules": [
+      "await-thenable",
+      "consistent-type-definitions",
+      "enable-exact-optional-property-types",
+      "enable-no-unchecked-indexed-access",
+      "explicit-member-accessibility",
+      "no-array-constructor",
+      "no-assertion-on-json-parse",
+      "no-await-in-loop",
+      "no-cast-after-guard",
+      "no-cast-in-return",
+      "no-error-message-matching",
+      "no-json-parse-stringify-clone",
+      "no-non-null-assertion",
+      "no-record-string-unknown",
+      "no-unknown-return",
+      "no-unnecessary-template-literal",
+      "no-unnecessary-typeof",
+      "no-unsafe-argument",
+      "no-unsafe-call",
+      "no-unsafe-member-access",
+      "no-unsafe-object-assertion",
+      "no-unsafe-return",
+      "no-unused-exports",
+      "prefer-array-methods",
+      "prefer-interface-for-large-object-type",
+      "prefer-nullish-coalescing",
+      "require-await"
+    ]
+  }
+}

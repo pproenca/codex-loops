@@ -167,7 +167,7 @@ defmodule Workflow.CompilerTest do
         assert_raise Workflow.CompileError, fn -> parse(~s|frobnicate("boom")\nreturn(:ok)|) end
 
       assert err.message =~ "unknown combinator `frobnicate`"
-      assert err.message =~ "expected one of: agent, log, phase, return"
+      assert err.message =~ "expected one of: agent, log, phase, parallel, pipeline, return"
     end
   end
 

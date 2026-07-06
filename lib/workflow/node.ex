@@ -58,3 +58,49 @@ defmodule Workflow.Node.Return do
 
   @type t :: %__MODULE__{address: Workflow.Node.address(), value: term()}
 end
+
+defmodule Workflow.Node.Parallel do
+  @moduledoc """
+  Static barrier fan-out: run every branch **concurrently** under a bounded
+  concurrency cap, then join (barrier) before the run continues. Each branch is one
+  inert `%Workflow.Node.Agent{}` with its own stable address `parent ++ [branch]`,
+  so every branch's paid turn is journaled and keyed for exactly-once independently.
+
+  Fan-out width is bounded by the branch list — a compile-time constant — so there
+  is no unbounded or linked task explosion. `max_concurrency` may cap it further;
+  `nil` means "all branches at once" (still bounded by the static width).
+  """
+  @enforce_keys [:address, :branches]
+  defstruct [:address, :branches, max_concurrency: nil]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          branches: [Workflow.Node.Agent.t()],
+          max_concurrency: pos_integer() | nil
+        }
+end
+
+defmodule Workflow.Node.Pipeline do
+  @moduledoc """
+  Static per-item fan-out: run each `item` through the ordered `stages`
+  independently. Item lanes run **concurrently** under the cap, and within a lane
+  the stages run **sequentially** — there is no cross-item barrier, so stage `k` of
+  one item never waits on stage `k` of another (the distinction from `parallel`).
+
+  The lanes are fully expanded at compile time into inert, pre-addressed agents:
+  `lanes[i]` is item `i`'s ordered `[%Agent{}]`, each stage at the stable address
+  `parent ++ [item_index, stage_index]`. `items` is retained (a literal list) so the
+  journal records which item each lane processed. Everything is serialisable data —
+  no closure, no runtime expansion. Fan-out width is `length(items)`, a compile-time
+  constant, so the fan-out stays bounded.
+  """
+  @enforce_keys [:address, :items, :lanes]
+  defstruct [:address, :items, :lanes, max_concurrency: nil]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          items: [term()],
+          lanes: [[Workflow.Node.Agent.t()]],
+          max_concurrency: pos_integer() | nil
+        }
+end

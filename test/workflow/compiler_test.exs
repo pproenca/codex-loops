@@ -46,6 +46,76 @@ defmodule Workflow.CompilerTest do
       {:ok, tree} = parse(~s|agent("go")\nreturn(:ok)|)
       refute contains_function?(tree)
     end
+
+    test "a schemaless agent carries a nil schema and the default retry budget" do
+      {:ok, tree} = parse(~s|agent("go")\nreturn(:ok)|)
+      assert [%Agent{schema: nil, retries: 2}, %Return{}] = tree.nodes
+    end
+  end
+
+  describe "schema-backed agent options" do
+    test "materializes a nested JSON-schema map literal into inert data" do
+      body =
+        quote do
+          agent("classify",
+            schema: %{
+              "type" => "object",
+              "required" => ["label"],
+              "properties" => %{"label" => %{"type" => "string"}}
+            }
+          )
+
+          return(:ok)
+        end
+
+      assert {:ok, tree} = Compiler.parse(body, env())
+      assert [%Agent{address: [0], prompt: "classify", schema: schema, retries: 2}, %Return{}] = tree.nodes
+
+      # The stored schema is a real map, not a fragment of AST, and holds no closures.
+      assert schema == %{
+               "type" => "object",
+               "required" => ["label"],
+               "properties" => %{"label" => %{"type" => "string"}}
+             }
+
+      refute contains_function?(tree)
+    end
+
+    test "an explicit retries budget overrides the default" do
+      body = quote do
+        agent("go", schema: %{"type" => "object"}, retries: 5)
+        return(:ok)
+      end
+
+      assert {:ok, tree} = Compiler.parse(body, env())
+      assert [%Agent{retries: 5}, %Return{}] = tree.nodes
+    end
+
+    test "agent options with no schema fail closed (located finding)" do
+      assert {:error, %Finding{line: 1} = f} = parse("agent(\"go\", retries: 2)\nreturn(:ok)")
+      assert f.message =~ "requires a `schema:`"
+    end
+
+    test "a non-literal / non-map schema is a located finding" do
+      assert {:error, %Finding{line: 1} = f} = parse("agent(\"go\", schema: build_schema())\nreturn(:ok)")
+      assert f.message =~ "schema must be a literal map"
+
+      assert {:error, %Finding{}} = parse(~s|agent("go", schema: "not a map")\nreturn(:ok)|)
+    end
+
+    test "an unknown agent option is rejected" do
+      assert {:error, %Finding{} = f} =
+               parse(~s|agent("go", schema: %{"type" => "object"}, bogus: 1)\nreturn(:ok)|)
+
+      assert f.message =~ "invalid arguments"
+    end
+
+    test "a non-integer retries budget is a located finding" do
+      assert {:error, %Finding{} = f} =
+               parse(~s|agent("go", schema: %{"type" => "object"}, retries: -1)\nreturn(:ok)|)
+
+      assert f.message =~ "non-negative integer"
+    end
   end
 
   describe "forbidden-form catalog (raises, located)" do

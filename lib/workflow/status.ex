@@ -16,6 +16,8 @@ defmodule Workflow.Status do
             phase: nil,
             logs: [],
             agents: [],
+            rejected: [],
+            failure: nil,
             result: nil,
             usage: %Usage{},
             event_count: 0
@@ -52,6 +54,16 @@ defmodule Workflow.Status do
     }
 
     %{s | agents: s.agents ++ [agent], usage: Usage.add(s.usage, p.usage)} |> tick()
+  end
+
+  defp apply_event(%Event{type: :agent_attempt_rejected, payload: p}, s) do
+    rejection = %{address: p.address, attempt: p.attempt, reason: p.reason}
+    %{s | rejected: s.rejected ++ [rejection], usage: Usage.add(s.usage, p.usage)} |> tick()
+  end
+
+  defp apply_event(%Event{type: :agent_failed, payload: p}, s) do
+    failure = %{address: p.address, attempts: p.attempts, reason: p.reason}
+    %{s | state: :failed, failure: failure} |> tick()
   end
 
   defp apply_event(%Event{type: :run_completed, payload: p}, s) do

@@ -33,7 +33,8 @@ Supported:
 - path-first workflow scripts from explicit paths, `.codex/workflows`, or
   `~/.codex/workflows`;
 - local background launch;
-- optional local status UI pages from `npx -y agent-loops-ui <journal.jsonl>`;
+- optional local status UI pages from `agent-loops serve` or
+  `npx -y agent-loops-ui [run-id|latest]`;
 - mock provider tests;
 - live execution through the TypeScript `@openai/codex-sdk` package;
 - journal-backed resume and inspection.

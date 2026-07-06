@@ -13,16 +13,16 @@ The generated command block is the authoritative user-facing command surface:
 
 ```bash
 agent-loops draft --goal '<goal>' [--name name] [--output .codex/workflows/name.ts] [--json]
-agent-loops validate <script-or-name> --args '<json>' [--journal <path>] [--json] [--no-input]
-agent-loops test <script-or-name> --args '<json>' [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops validate <script-or-name> --args '<json>' [--json] [--no-input]
+agent-loops test <script-or-name> --args '<json>' [--run-id <id>] [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
+agent-loops workflow <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
 agent-loops workflow <script-or-name> --args '<json>' --background [--status-server] [--json] [--no-input]
-agent-loops run <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops resume [--journal <path>] [--provider sdk|mock] [--approved] [--json] [--no-input]
-agent-loops inspect [--journal <path>] [--json]
-agent-loops status [--journal <path>] [--event-limit 5] [--json]
-agent-loops list [--journal-root .agent-loops-runs] [--limit 20] [--event-limit 5] [--json]
-agent-loops serve [--journal <path>] [--host 127.0.0.1] [--port 0] [--json]
+agent-loops run <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops resume [--run-id <id>] [--provider sdk|mock] [--approved] [--json] [--no-input]
+agent-loops inspect [--run-id <id>] [--json]
+agent-loops status [--run-id <id>] [--event-limit 5] [--json]
+agent-loops list [--limit 20] [--event-limit 5] [--json]
+agent-loops serve [--run-id <id>] [--host 127.0.0.1] [--port 0] [--json]
 agent-loops help
 ```
 
@@ -33,8 +33,14 @@ agent-loops help
 - `validate` runs the compatibility gate.
 - `test` defaults to the mock provider.
 - `workflow` defaults to the SDK provider.
-- `resume`, `inspect`, `status`, and `serve` use the latest journal when
-  `--journal` is omitted.
+- New `test`, `workflow`, and `run` commands use `--run-id` when a stable run
+  identifier is needed.
+- `resume`, `inspect`, `status`, and `serve` use the latest run when
+  `--run-id` is omitted. Pass `--run-id <id>` to select a specific run.
+- `--journal` is removed on every command and fails with
+  `--journal was removed; use --run-id`.
+- Run data is stored in `~/.codex/workflows/runs_1.sqlite`. JSON envelopes
+  include `runId` and `databasePath` where run storage is surfaced.
 - `serve` is read-only and binds to `127.0.0.1` by default.
 
 ## JSON Output Discipline

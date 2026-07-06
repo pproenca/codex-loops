@@ -5,7 +5,7 @@ import type { CliRequest, ServeCommandRequest } from "../domain/contracts.ts"
 import { CliUsageError } from "./cli-error.ts"
 import { proven } from "./proven.ts"
 
-const DEFAULT_JOURNAL_PATH = ".agent-loops-runs/latest.json"
+const DEFAULT_RUN_ID = "latest"
 const SERVE_EVENT_LIMIT = 40
 const SERVE_LIVE_POLL_MS = 250
 const flagValueSchema = z.union([z.string(), z.boolean()])
@@ -13,9 +13,10 @@ const flagValueSchema = z.union([z.string(), z.boolean()])
 export function parseServeCliRequest(input: Proven<CliRequest>): Proven<ServeCommandRequest> {
   const command = z.literal("serve").parse(input.command)
   const flags = z.record(z.string(), flagValueSchema).parse(input.flags)
+  rejectRemovedJournal(flags["journal"])
   return proven({
     command,
-    journalPath: parseJournalPath(flags["journal"]),
+    runId: parseRunId(flags["run-id"]),
     host: parseHost(flags["host"]),
     port: parsePort(flags["port"]),
     eventLimit: SERVE_EVENT_LIMIT,
@@ -25,10 +26,16 @@ export function parseServeCliRequest(input: Proven<CliRequest>): Proven<ServeCom
   })
 }
 
-function parseJournalPath(value: string | boolean | undefined): string {
-  if (value === undefined) return DEFAULT_JOURNAL_PATH
-  if (typeof value === "string" && value.length > 0) return value
-  throw new CliUsageError("--journal must be a non-empty string")
+function parseRunId(value: string | boolean | undefined): string {
+  if (value === undefined) return DEFAULT_RUN_ID
+  if (typeof value === "string" && value.length > 0) {
+    return value
+  }
+  throw new CliUsageError("--run-id must be a non-empty string")
+}
+
+function rejectRemovedJournal(value: string | boolean | undefined): void {
+  if (value !== undefined) throw new CliUsageError("--journal was removed; use --run-id")
 }
 
 function parseHost(value: string | boolean | undefined): string {

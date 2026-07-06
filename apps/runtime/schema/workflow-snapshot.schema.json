@@ -8,7 +8,7 @@
     "workflowName",
     "status",
     "scriptPath",
-    "journalPath",
+    "databasePath",
     "args",
     "phases",
     "logs",
@@ -33,7 +33,7 @@
     },
     "scriptPath": { "type": "string" },
     "scriptSha256": { "type": "string" },
-    "journalPath": { "type": "string" },
+    "databasePath": { "type": "string" },
     "args": {},
     "phases": { "type": "array", "items": { "$ref": "#/$defs/phase" } },
     "logs": { "type": "array", "items": { "type": "string" } },
@@ -47,8 +47,7 @@
     "limits": { "$ref": "#/$defs/limits" },
     "runtimeContract": { "$ref": "#/$defs/runtimeContract" },
     "lastSeq": { "type": "integer", "minimum": 0 },
-    "truncatedTail": { "type": "boolean" },
-    "legacy": { "type": "boolean" }
+    "truncatedTail": { "type": "boolean" }
   },
   "$defs": {
     "phase": {
@@ -293,7 +292,6 @@
           "additionalProperties": false,
           "required": ["cacheKey", "completedNodesReplayFromJournal"],
           "properties": {
-            "journalPath": { "type": "string" },
             "cacheKey": { "const": "runId+phaseTitle+label+promptHash+schemaHash+optionsHash" },
             "completedNodesReplayFromJournal": { "const": true }
           }

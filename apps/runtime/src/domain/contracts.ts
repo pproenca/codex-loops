@@ -1,4 +1,3 @@
-import type { Branded } from "./brand.ts"
 import type { JsonValue } from "./json.ts"
 
 export type CommandName =
@@ -44,8 +43,8 @@ export type BackgroundStatusServerMode =
     readonly t: "enabled"
     readonly host: string
     readonly port: number
-    readonly portfilePollMs: number
-    readonly portfileMaxPolls: number
+    readonly sessionPollMs: number
+    readonly sessionMaxPolls: number
   }
 
 export type BackgroundLaunchMode =
@@ -66,7 +65,6 @@ export type WorkflowCommandRequest = {
   readonly provider: ProviderSelection
   readonly approval: ApprovalPosture
   readonly requestedRunId: RequestedRunId
-  readonly journal: { readonly t: "none" } | { readonly t: "requested"; readonly path: string }
   readonly noInput: boolean
   readonly quiet: boolean
   readonly background: BackgroundLaunchMode
@@ -75,12 +73,11 @@ export type WorkflowCommandRequest = {
 }
 
 export type JournalQueryRequest =
-  | { readonly command: "inspect"; readonly journalPath: string; readonly json: boolean }
-  | { readonly command: "status"; readonly journalPath: string; readonly eventLimit: number; readonly json: boolean }
+  | { readonly command: "inspect"; readonly runId: string; readonly json: boolean }
+  | { readonly command: "status"; readonly runId: string; readonly eventLimit: number; readonly json: boolean }
 
 export type JournalListRequest = {
   readonly command: "list"
-  readonly journalRoot: string
   readonly limit: number
   readonly eventLimit: number
   readonly json: boolean
@@ -88,7 +85,7 @@ export type JournalListRequest = {
 
 export type ResumeCommandRequest = {
   readonly command: "resume"
-  readonly journalPath: string
+  readonly runId: string
   readonly provider: ProviderSelection
   readonly approval: ApprovalPosture
   readonly noInput: boolean
@@ -101,7 +98,7 @@ export type ResumeCommandRequest = {
 
 export type ServeCommandRequest = {
   readonly command: "serve"
-  readonly journalPath: string
+  readonly runId: string
   readonly host: string
   readonly port: number
   readonly eventLimit: number
@@ -110,8 +107,8 @@ export type ServeCommandRequest = {
   readonly quiet: boolean
 }
 
-export type ServePortfileRecord = {
-  readonly portfilePath: string
+export type ServeSessionRecord = {
+  readonly runId: string
   readonly url: string
   readonly pid: number
 }
@@ -132,12 +129,6 @@ export type DraftWorkflowPlan = {
   readonly script: string
   readonly nextSteps: readonly string[]
 }
-
-export type JournalPointerTarget = Branded<string, "journal-pointer-target">
-
-export type JournalPointerText =
-  | { readonly t: "content" }
-  | { readonly t: "pointer"; readonly target: JournalPointerTarget }
 
 export type ProcessExecutionResult = {
   readonly exitCode: number | null
@@ -320,6 +311,7 @@ export type WorkflowLimits = {
 export type WorkflowPreparationFacts = {
   readonly runId: string
   readonly cwd: string
+  readonly databasePath: string
   readonly scriptSha256: string
 }
 
@@ -329,15 +321,13 @@ export type PreparedWorkflowRun = {
   readonly workflowName: string
   readonly scriptPath: string
   readonly scriptSha256: string
-  readonly journalPath: string
+  readonly databasePath: string
   readonly args: JsonValue
   readonly provider: WorkflowProvider
   readonly budgetPlan: JsonValue
   readonly limits: WorkflowLimits
   readonly runtimeContract: JsonValue
   readonly requestedRunId: RequestedRunId
-  readonly pointerPath?: string | undefined
-  readonly pointerTarget?: string | undefined
 }
 
 export type WorkflowExecutionOutcome =
@@ -452,7 +442,7 @@ export type WorkflowSnapshot = {
   readonly runner?: RunnerProjection | undefined
   readonly scriptPath: string
   readonly scriptSha256: string
-  readonly journalPath: string
+  readonly databasePath: string
   readonly args: JsonValue
   readonly phases: readonly WorkflowPhaseProjection[]
   readonly logs: readonly string[]
@@ -473,6 +463,7 @@ export type WorkflowStatusSummary = {
   readonly workflowName: string
   readonly status: WorkflowRunStatus
   readonly scriptPath: string
+  readonly databasePath: string
   readonly phaseCount: number
   readonly phases: readonly WorkflowPhaseProjection[]
   readonly nodeCounts: Readonly<Record<AgentNodeState, number>>
@@ -490,13 +481,15 @@ export type WorkflowStatusSummary = {
 }
 
 export type WorkflowListEntry = Partial<WorkflowStatusSummary> & {
-  readonly journalPath: string
+  readonly runId: string
+  readonly databasePath: string
   readonly updatedAt: string
   readonly error?: string | undefined
 }
 
-export type JournalFileCandidate = {
-  readonly path: string
+export type JournalRunCandidate = {
+  readonly runId: string
+  readonly databasePath: string
   readonly updatedAt: string
 }
 
@@ -800,7 +793,7 @@ export type WorkflowApiResult =
     readonly command: WorkflowRunnableCommand
     readonly snapshot: WorkflowSnapshot
     readonly budgetPlan: JsonValue
-    readonly journalPath: string
+    readonly databasePath: string
     readonly scriptPath: string
   }
   | { readonly status: "inspected"; readonly snapshot: WorkflowSnapshot }
@@ -812,7 +805,7 @@ export type WorkflowApiResult =
     readonly workflowName: string
     readonly pid: number
     readonly runId: string
-    readonly journalPath: string
+    readonly databasePath: string
     readonly scriptPath: string
     readonly statusUrl?: string | undefined
     readonly statusServerPid?: number | undefined

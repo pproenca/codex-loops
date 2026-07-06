@@ -21,7 +21,8 @@ const phaseSchema = z.object({
 }).passthrough()
 
 export const statusPayloadSchema = z.object({
-  journalPath: z.string(),
+  runId: z.string().optional(),
+  databasePath: z.string().optional(),
   status: z.object({
     runId: z.string().optional(),
     workflowName: z.string().optional(),

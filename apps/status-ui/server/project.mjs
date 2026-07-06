@@ -1,7 +1,8 @@
 export function buildStatusPayload(input) {
   const state = foldEvents(input.events)
   return {
-    journalPath: input.journalPath,
+    runId: input.runId,
+    databasePath: input.databasePath,
     status: {
       runId: state.runId,
       workflowName: state.workflowName,

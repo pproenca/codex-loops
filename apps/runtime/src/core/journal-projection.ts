@@ -90,7 +90,7 @@ export function applyJournalEvent(input: { readonly state: RunProjectionState; r
   }
 }
 
-export function toWorkflowSnapshot(input: { readonly state: RunProjectionState; readonly journalPath: string }): WorkflowSnapshot {
+export function toWorkflowSnapshot(input: { readonly state: RunProjectionState; readonly databasePath: string }): WorkflowSnapshot {
   return {
     schemaVersion: "workflow-snapshot/v2",
     runId: input.state.runId,
@@ -99,7 +99,7 @@ export function toWorkflowSnapshot(input: { readonly state: RunProjectionState; 
     runner: input.state.runner,
     scriptPath: input.state.scriptPath,
     scriptSha256: input.state.scriptSha256,
-    journalPath: input.journalPath,
+    databasePath: input.databasePath,
     args: input.state.args,
     phases: phaseSnapshots(input.state),
     logs: input.state.logs,
@@ -118,6 +118,7 @@ export function toWorkflowSnapshot(input: { readonly state: RunProjectionState; 
 
 export function toWorkflowStatusSummary(input: {
   readonly state: RunProjectionState
+  readonly databasePath: string
   readonly tailEvents: readonly JournalEvent[]
   readonly eventLimit: number
 }): WorkflowStatusSummary {
@@ -127,6 +128,7 @@ export function toWorkflowStatusSummary(input: {
     workflowName: input.state.workflowName,
     status: input.state.status,
     scriptPath: input.state.scriptPath,
+    databasePath: input.databasePath,
     phaseCount: input.state.phases.length,
     phases,
     nodeCounts: countNodeStates(input.state.nodes),

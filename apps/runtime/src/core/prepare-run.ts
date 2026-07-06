@@ -11,27 +11,20 @@ export type PrepareWorkflowRunInput = {
 
 export function prepareWorkflowRun(input: PrepareWorkflowRunInput): PreparedWorkflowRun {
   const limits = input.request.options.limits
-  const journalPlan = journalPathOf({
-    request: input.request,
-    workflowName: input.script.meta.name,
-    runId: input.facts.runId,
-    cwd: input.facts.cwd,
-  })
+  const runId = runIdOf(input.request.requestedRunId, input.facts.runId)
   return {
     command: input.request.command,
-    runId: input.facts.runId,
+    runId,
     workflowName: input.script.meta.name,
     scriptPath: input.scriptPath,
     scriptSha256: input.facts.scriptSha256,
-    journalPath: journalPlan.journalPath,
+    databasePath: input.facts.databasePath,
     args: input.request.args,
     provider: input.provider,
     budgetPlan: budgetPlan({ provider: input.provider, limits }),
     limits,
     runtimeContract: runtimeContract({ command: input.request.command, limits }),
     requestedRunId: input.request.requestedRunId,
-    pointerPath: journalPlan.pointerPath,
-    pointerTarget: journalPlan.pointerTarget,
   }
 }
 
@@ -68,41 +61,13 @@ export function runnerAttachMode(command: WorkflowRunnableCommand): "fresh" | "r
   }
 }
 
-function journalPathOf(input: {
-  readonly request: WorkflowCommandRequest
-  readonly workflowName: string
-  readonly runId: string
-  readonly cwd: string
-}): {
-  readonly journalPath: string
-  readonly pointerPath?: string | undefined
-  readonly pointerTarget?: string | undefined
-} {
-  switch (input.request.journal.t) {
+function runIdOf(requested: WorkflowCommandRequest["requestedRunId"], generated: string): string {
+  switch (requested.t) {
     case "none":
-      {
-        const root = ".agent-loops-runs"
-        const fileName = `${safeFileName(input.workflowName)}-${input.runId.slice(0, 8)}.jsonl`
-        return {
-          journalPath: absolutePath(input.cwd, root, fileName),
-          pointerPath: absolutePath(input.cwd, root, "latest.json"),
-          pointerTarget: fileName,
-        }
-      }
+      return generated
     case "requested":
-      return { journalPath: absolutePath(input.cwd, input.request.journal.path) }
+      return requested.value
   }
-}
-
-function absolutePath(cwd: string, first: string, second?: string | undefined): string {
-  const path = second === undefined ? first : `${first}/${second}`
-  if (path.startsWith("/")) return path
-  return `${cwd}/${path}`
-}
-
-function safeFileName(value: string): string {
-  const safe = value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "")
-  return safe.length === 0 ? "workflow" : safe
 }
 
 function budgetPlan(input: { readonly provider: WorkflowProvider; readonly limits: WorkflowLimits }): JsonValue {

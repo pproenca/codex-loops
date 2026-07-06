@@ -4,15 +4,15 @@ import { fileURLToPath } from "node:url"
 import { IsolatedWorkflowExecutor } from "./app/isolated-workflow-executor.ts"
 import { runServeCommandApp, runWorkflowApp } from "./app/workflow-runner.ts"
 import { FileDraftWorkflowStore } from "./consistency/draft-workflow-store.ts"
-import { FileJournalStoreFactory } from "./consistency/file-journal-store.ts"
-import { FileServePortfileStore } from "./consistency/serve-portfile-store.ts"
+import { SqliteJournalStoreFactory } from "./consistency/sqlite-journal-store.ts"
+import { SqliteServeSessionStore } from "./consistency/sqlite-serve-session-store.ts"
 import { COMMANDS } from "./domain/cli-contract.ts"
 import { isCliEntrypoint, NodeBackgroundProcessLauncher } from "./effects/node/background-launcher.ts"
-import { FileJournalDirectory } from "./effects/node/file-journal-directory.ts"
-import { FileJournalReader } from "./effects/node/file-journal-reader.ts"
 import { NodeProcessPort } from "./effects/node/process.ts"
 import { NodeRunnerHeartbeatPort } from "./effects/node/runner-heartbeat.ts"
+import { SqliteJournalDirectory, SqliteJournalReader } from "./effects/node/sqlite-journal-reader.ts"
 import { NodeStatusServerPort } from "./effects/node/status-server.ts"
+import { defaultWorkflowDatabasePath } from "./effects/node/workflow-database.ts"
 import { NodeWorkflowScriptSourceStore } from "./effects/node/workflow-script-source-store.ts"
 import { NodeWorkflowChildResolver, NodeWorkflowPreparer, NodeWorkflowScriptLocator } from "./effects/node/workflow-preparer.ts"
 import { SdkProviderAgentTurnPort } from "./effects/sdk/provider-turn.ts"
@@ -47,11 +47,12 @@ export async function main(argv: readonly string[]): Promise<number> {
   }
   if (request.command === "serve") {
     const processPort = new NodeProcessPort()
+    const databasePath = defaultWorkflowDatabasePath()
     const statusUiRootDirectory = fileURLToPath(new URL("../dist/status-ui/", import.meta.url))
     const serve = await runServeCommandApp(parseServeCliRequest(request), {
-      journalReader: new FileJournalReader(),
+      journalReader: new SqliteJournalReader(databasePath),
       processPort,
-      servePortfileStore: new FileServePortfileStore(),
+      serveSessionStore: new SqliteServeSessionStore(databasePath),
       statusServer: new NodeStatusServerPort(),
       statusUiRootDirectory,
       workflowScriptSourceStore: new NodeWorkflowScriptSourceStore(),
@@ -63,11 +64,12 @@ export async function main(argv: readonly string[]): Promise<number> {
     await serve.close()
     return 0
   }
+  const databasePath = defaultWorkflowDatabasePath()
   const result = await runWorkflowApp(request, {
-    journalReader: new FileJournalReader(),
-    journalDirectory: new FileJournalDirectory(),
-    journalStoreFactory: new FileJournalStoreFactory(new NodeProcessPort()),
-    servePortfileStore: new FileServePortfileStore(),
+    journalReader: new SqliteJournalReader(databasePath),
+    journalDirectory: new SqliteJournalDirectory(databasePath),
+    journalStoreFactory: new SqliteJournalStoreFactory(databasePath, new NodeProcessPort()),
+    serveSessionStore: new SqliteServeSessionStore(databasePath),
     draftWorkflowStore: new FileDraftWorkflowStore(),
     processPort: new NodeProcessPort(),
     workflowScriptLocator: new NodeWorkflowScriptLocator(),
@@ -95,9 +97,9 @@ export async function main(argv: readonly string[]): Promise<number> {
       command: result.command,
       snapshot: result.snapshot,
       budgetPlan: result.budgetPlan,
-      journalPath: result.journalPath,
+      databasePath: result.databasePath,
       scriptPath: result.scriptPath,
-    }, `Workflow ${result.snapshot.status}. Journal: ${result.journalPath}`)
+    }, `Workflow ${result.snapshot.status}. Run: ${result.snapshot.runId}`)
     return 0
   }
   if (result.status === "validated") {
@@ -114,7 +116,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     return 0
   }
   if (result.status === "async_launched") {
-    writeResult(json, result, `Launched workflow "${result.workflowName}" in the background. Journal: ${result.journalPath}${result.statusUrl === undefined ? "" : ` Status: ${result.statusUrl}`}`)
+    writeResult(json, result, `Launched workflow "${result.workflowName}" in the background. Run: ${result.runId}${result.statusUrl === undefined ? "" : ` Status: ${result.statusUrl}`}`)
     return 0
   }
   if (result.status === "drafted") {

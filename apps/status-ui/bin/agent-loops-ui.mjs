@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { fileURLToPath } from "node:url"
 
-import { readText, startStatusServer } from "../server/effects.mjs"
+import { startStatusServer } from "../server/effects.mjs"
 import { buildStatusPayload } from "../server/project.mjs"
-import { parseCliArgs, parseJournalText, parseRoute } from "../server/trust.mjs"
+import { defaultWorkflowDatabasePath, readRunEvents, resolveRun } from "../server/sqlite.mjs"
+import { parseCliArgs, parseRoute } from "../server/trust.mjs"
 
 const help = `agent-loops-ui
 
 Usage:
-  agent-loops-ui <journal.jsonl> [--host 127.0.0.1] [--port 0] [--json]
+  agent-loops-ui [run-id|latest] [--host 127.0.0.1] [--port 0] [--json]
 
 Options:
   --host <host>              Host to bind. Defaults to 127.0.0.1.
@@ -25,9 +26,10 @@ try {
     process.exit(0)
   }
   const uiRoot = fileURLToPath(new URL("../dist/", import.meta.url))
+  const databasePath = defaultWorkflowDatabasePath()
   const loadPayload = async () => {
-    const events = parseJournalText(await readText(request.journalPath))
-    const payload = buildStatusPayload({ journalPath: request.journalPath, events, eventLimit: request.eventLimit })
+    const run = readRunEvents({ databasePath, selector: request.selector })
+    const payload = buildStatusPayload({ databasePath: run.databasePath, runId: run.runId, events: run.events, eventLimit: request.eventLimit })
     return { compactPayload: JSON.stringify(payload), prettyPayload: JSON.stringify(payload, null, 2) }
   }
   const server = await startStatusServer({
@@ -41,7 +43,8 @@ try {
   const address = server.address
   const port = typeof address === "object" && address !== null ? address.port : request.port
   const url = `http://${request.host}:${port}/`
-  process.stdout.write(request.json ? `${JSON.stringify({ command: "serve", journalPath: request.journalPath, url })}\n` : `Serving Codex Loops UI at ${url}\n`)
+  const run = resolveRun({ databasePath, selector: request.selector })
+  process.stdout.write(request.json ? `${JSON.stringify({ command: "serve", runId: run.runId, databasePath: run.databasePath, url })}\n` : `Serving Codex Loops UI at ${url}\n`)
   await waitForShutdown()
   await server.close()
 } catch (error) {

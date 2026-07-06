@@ -22,16 +22,16 @@ CLI commands:
 <!-- gen:commands -->
 ```bash
 agent-loops draft --goal '<goal>' [--name name] [--output .codex/workflows/name.ts] [--json]
-agent-loops validate <script-or-name> --args '<json>' [--journal <path>] [--json] [--no-input]
-agent-loops test <script-or-name> --args '<json>' [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops validate <script-or-name> --args '<json>' [--json] [--no-input]
+agent-loops test <script-or-name> --args '<json>' [--run-id <id>] [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
+agent-loops workflow <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
 agent-loops workflow <script-or-name> --args '<json>' --background [--status-server] [--json] [--no-input]
-agent-loops run <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops resume [--journal <path>] [--provider sdk|mock] [--approved] [--json] [--no-input]
-agent-loops inspect [--journal <path>] [--json]
-agent-loops status [--journal <path>] [--event-limit 5] [--json]
-agent-loops list [--journal-root .agent-loops-runs] [--limit 20] [--event-limit 5] [--json]
-agent-loops serve [--journal <path>] [--host 127.0.0.1] [--port 0] [--json]
+agent-loops run <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops resume [--run-id <id>] [--provider sdk|mock] [--approved] [--json] [--no-input]
+agent-loops inspect [--run-id <id>] [--json]
+agent-loops status [--run-id <id>] [--event-limit 5] [--json]
+agent-loops list [--limit 20] [--event-limit 5] [--json]
+agent-loops serve [--run-id <id>] [--host 127.0.0.1] [--port 0] [--json]
 agent-loops help
 ```
 <!-- /gen:commands -->
@@ -67,22 +67,23 @@ replace the SDK module itself.
 
 ## Journal And Snapshot
 
-The journal is an append-only JSONL event log (`agent-loops/journal@2`) and the
-only persistent run artifact. `status`, `inspect`, `list`, `resume`, and `serve`
-are pure folds over it; completed nodes replay from the journal on resume.
+Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`. The journal
+format remains `agent-loops/journal@2`, with canonical committed event payloads
+stored as `event_json` rows keyed by `(run_id, seq)`. `status`, `inspect`,
+`list`, `resume`, and `serve` are pure folds over those rows; completed nodes
+replay from the journal on resume.
 
-When no `--journal` is passed, runs write per-run files under
-`.agent-loops-runs/` and maintain `.agent-loops-runs/latest.json` as a
-`{"$pointer": ...}` file, so the default journal path still names the latest
-run for bare `status`/`inspect`/`resume`/`serve`.
+Commands use `--run-id` when they need a stable durable run identifier or an
+explicit run selection. `resume`, `inspect`, `status`, and `serve` use the
+latest run id from SQLite when `--run-id` is omitted. `--journal` is removed on
+every command and fails with `--journal was removed; use --run-id`. JSON
+envelopes expose `runId` and `databasePath`.
 
 Snapshots are derived projections with
 `schemaVersion: "workflow-snapshot/v2"`: one canonical `phases[]` progress
 representation with embedded node summaries
 (`queued|running|done|failed|killed`), `scriptPath` + `scriptSha256` instead of
-embedded script text, and the `runtimeContract`. Legacy v1 snapshot journals
-are readable by `inspect`/`status`/`list` only; `resume` and `serve` reject
-them.
+embedded script text, and the `runtimeContract`.
 
 ## DSL Requirements
 
@@ -139,7 +140,7 @@ inspectable:
 - structured-output fail-closed policy
 - scheduling caps and queue-state visibility
 - task-budget/accounting threshold policy
-- resume cache key and journal path
+- resume cache key
 - hosted-service support set to `false`
 
 Status and inspect commands must surface this contract without rerunning the
@@ -156,7 +157,7 @@ the caller authorizes live execution.
 The skill must report:
 
 - workflow path
-- journal path
+- run id and database path
 - budget plan and explicit caps
 - runtime contract, including permission and hosted-service support
 - test result and failed node diagnostics, if any
@@ -174,7 +175,7 @@ skill launches one integrated CLI envelope:
 ```bash
 npx -y agent-loops workflow <script-or-name> \
   --args '<json>' \
-  --journal .agent-loops-runs/<name>.jsonl \
+  --run-id <id> \
   --provider sdk \
   --budget <small|standard|deep> \
   --approved \
@@ -184,16 +185,16 @@ npx -y agent-loops workflow <script-or-name> \
   --no-input
 ```
 
-It parses the `async_launched` JSON envelope and relays both `journalPath` and
-`statusUrl`. After a live or background run starts without an explicit UI
-request, the skill must report the journal path and ask whether the user wants a
+It parses the `async_launched` JSON envelope and relays `runId`, `databasePath`,
+and `statusUrl`. After a live or background run starts without an explicit UI
+request, the skill must report the run id and ask whether the user wants a
 visual UI. Unless the current user request explicitly asked to serve or open the
 UI, the skill must wait for the user's yes/no answer before starting a server.
 When accepted for an already-running workflow, the skill launches the integrated
 status server with:
 
 ```bash
-npx -y agent-loops serve --journal <journal.jsonl> --json
+npx -y agent-loops serve --run-id <id> --json
 ```
 
 It then relays the JSON envelope URL and keeps the server process alive while
@@ -216,15 +217,14 @@ prose diagnostics.
 - Plugin text explicitly says the skill asks before starting the visual status
   UI, uses `workflow --background --status-server --json` when the current
   request asks to launch with UI, and uses
-  `npx -y agent-loops serve --journal <journal.jsonl> --json` for an existing
-  run.
+  `npx -y agent-loops serve --run-id <id> --json` for an existing run.
 - Plugin text distinguishes executable workflow scripts from reusable Codex
   skills and includes the artifact clarification question.
 - Skill-saving requests are documented as `SKILL.md` authoring requests that do
   not call Codex Loops execution or validation commands unless an executable
   script is also requested.
 - `agent-loops status`, `inspect`, `list`, `validate`, and `resume` work against
-  local journals.
+  the local SQLite run database.
 - The app ships exactly these schemas: `agent-result.schema.json`,
   `cli-error.schema.json`, `journal-event.schema.json`,
   `patch-plan.schema.json`, `workflow-command.schema.json`,

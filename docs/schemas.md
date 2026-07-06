@@ -32,11 +32,11 @@ Sources:
 
 ## Journal And Snapshot
 - `journal-event.schema.json` describes the variant event envelope for the
-  `agent-loops/journal@2` JSONL log. The schema is variant-based rather than a
-  single object shape.
+  `agent-loops/journal@2` event payload stored in SQLite `event_json` rows. The
+  schema is variant-based rather than a single object shape.
 - `workflow-snapshot.schema.json` describes projected snapshots with required
-  schema version, run id, workflow name, status, script path, journal path, args,
-  phases, logs, agent count, token totals, and tool-call totals.
+  schema version, run id, workflow name, status, script path, database path,
+  args, phases, logs, agent count, token totals, and tool-call totals.
 
 ## Workflow Authoring
 - `workflow-command.schema.json` describes reusable command metadata, including

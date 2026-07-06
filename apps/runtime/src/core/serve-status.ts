@@ -8,13 +8,13 @@ export type ServeStatusPayload = {
 
 export function buildServeStatusPayload(input: {
   readonly read: JournalReadResult
-  readonly journalPath: string
+  readonly databasePath: string
   readonly eventLimit: number
   readonly agentGoals?: Readonly<Record<string, string>> | undefined
 }): ServeStatusPayload {
   const state = foldJournal(input.read)
-  const status = toWorkflowStatusSummary({ state, tailEvents: input.read.events, eventLimit: input.eventLimit })
-  const payload = { journalPath: input.journalPath, status: enrichAgentGoals(status, input.agentGoals) }
+  const status = toWorkflowStatusSummary({ state, databasePath: input.databasePath, tailEvents: input.read.events, eventLimit: input.eventLimit })
+  const payload = { runId: state.runId, databasePath: input.databasePath, status: enrichAgentGoals(status, input.agentGoals) }
   return {
     compactPayload: JSON.stringify(payload),
     prettyPayload: JSON.stringify(payload, null, 2),

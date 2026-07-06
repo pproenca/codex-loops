@@ -205,16 +205,16 @@ function inspectSyntax(file, layer, source, importInfo) {
     if (layer !== "consistency" && ts.isClassDeclaration(node) && hasClassMember(node, "commit") && hasClassMember(node, "initializeRun")) {
       failAt(file, source, node, "JournalStore-shaped classes are only allowed in consistency/*")
     }
-    if (layer !== "effects" && ts.isClassDeclaration(node) && hasClassMember(node, "readText") && hasClassMember(node, "readPointerTarget")) {
+    if (layer !== "effects" && ts.isClassDeclaration(node) && hasClassMember(node, "resolveRun") && hasClassMember(node, "readText")) {
       failAt(file, source, node, "JournalReader-shaped classes are only allowed in effects/*")
     }
-    if (layer !== "effects" && ts.isObjectLiteralExpression(node) && hasProperty(node, "readText") && hasProperty(node, "readPointerTarget")) {
+    if (layer !== "effects" && ts.isObjectLiteralExpression(node) && hasProperty(node, "resolveRun") && hasProperty(node, "readText")) {
       failAt(file, source, node, "JournalReader-shaped object literals are only allowed in effects/*")
     }
-    if (layer !== "effects" && ts.isClassDeclaration(node) && hasClassMember(node, "listJournalFiles")) {
+    if (layer !== "effects" && ts.isClassDeclaration(node) && hasClassMember(node, "listRuns")) {
       failAt(file, source, node, "JournalDirectory-shaped classes are only allowed in effects/*")
     }
-    if (layer !== "effects" && ts.isObjectLiteralExpression(node) && hasProperty(node, "listJournalFiles")) {
+    if (layer !== "effects" && ts.isObjectLiteralExpression(node) && hasProperty(node, "listRuns")) {
       failAt(file, source, node, "JournalDirectory-shaped object literals are only allowed in effects/*")
     }
     ts.forEachChild(node, (child) => visit(child, insideContainedOperation))

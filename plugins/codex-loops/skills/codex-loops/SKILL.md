@@ -13,11 +13,13 @@ captures a workflow-shaped operating procedure.
 
 The runner is local and journal-backed. The journal is an append-only event
 log; `status`, `inspect`, `list`, `serve`, and `resume` read it directly.
-When no `--journal` is passed, commands follow the
-`.agent-loops-runs/latest.json` pointer to the latest per-run journal, so bare
-`status`/`resume` mean "the latest run". The runner supports local background
-launch and a live status UI. It does not implement hosted workflow services,
-external workflow UIs, or per-agent skip/retry controls in this package.
+Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite`. New
+`test`, `workflow`, and `run` commands use `--run-id` for stable identity and
+`status`, `inspect`, `resume`, and `serve` use `--run-id` for explicit run
+selection. Omitted `--run-id` means the latest run. `--journal` is removed on
+every command. The runner supports local background launch and a live status UI. It
+does not implement hosted workflow services, external workflow UIs, or
+per-agent skip/retry controls in this package.
 
 Live SDK execution must use the TypeScript `@openai/codex-sdk` package.
 `--codex-path-override` may point that SDK at a local Codex executable; do not
@@ -28,24 +30,24 @@ Use the published CLI surface:
 <!-- gen:commands -->
 ```bash
 agent-loops draft --goal '<goal>' [--name name] [--output .codex/workflows/name.ts] [--json]
-agent-loops validate <script-or-name> --args '<json>' [--journal <path>] [--json] [--no-input]
-agent-loops test <script-or-name> --args '<json>' [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops validate <script-or-name> --args '<json>' [--json] [--no-input]
+agent-loops test <script-or-name> --args '<json>' [--run-id <id>] [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
+agent-loops workflow <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
 agent-loops workflow <script-or-name> --args '<json>' --background [--status-server] [--json] [--no-input]
-agent-loops run <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops resume [--journal <path>] [--provider sdk|mock] [--approved] [--json] [--no-input]
-agent-loops inspect [--journal <path>] [--json]
-agent-loops status [--journal <path>] [--event-limit 5] [--json]
-agent-loops list [--journal-root .agent-loops-runs] [--limit 20] [--event-limit 5] [--json]
-agent-loops serve [--journal <path>] [--host 127.0.0.1] [--port 0] [--json]
+agent-loops run <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops resume [--run-id <id>] [--provider sdk|mock] [--approved] [--json] [--no-input]
+agent-loops inspect [--run-id <id>] [--json]
+agent-loops status [--run-id <id>] [--event-limit 5] [--json]
+agent-loops list [--limit 20] [--event-limit 5] [--json]
+agent-loops serve [--run-id <id>] [--host 127.0.0.1] [--port 0] [--json]
 agent-loops help
 ```
 <!-- /gen:commands -->
 
 Invoke via `npx -y agent-loops <command> ...`, or via
 `agent-loops <command> ...` when the package binary is already installed. `run`
-is an alias for `workflow`. `list --journal-root .agent-loops-runs --json` summarizes known
-journals. `draft` writes a deterministic scaffold (no LLM), runs the
+is an alias for `workflow`. `list --json` summarizes known runs from SQLite.
+`draft` writes a deterministic scaffold (no LLM), runs the
 compatibility validation gate, and returns `nextSteps`. It does not execute a
 mock workflow; run `test --provider mock` explicitly before live SDK execution.
 
@@ -142,7 +144,7 @@ Every run journal records a `runtimeContract` with:
 - structured-output fail-closed policy
 - scheduling limits and visible queued/running/done/failed/killed states
 - task-budget/accounting policy
-- resume cache key and journal path
+- resume cache key
 - hosted-service support set to `false`
 
 Use `status` or `inspect` to relay those fields when the user asks what is
@@ -156,8 +158,9 @@ Before live SDK execution:
 2. Read the JSON result, especially `snapshot.status`, `budgetPlan`,
    `runtimeContract`, `snapshot.phases` node summaries, and any failed node
    errors.
-3. If mutation is possible, report the workflow path, journal path, exact args,
-   budget preset and caps, intended write scope, and verification command.
+3. If mutation is possible, report the workflow path, run id, `databasePath`,
+   exact args, budget preset and caps, intended write scope, and verification
+   command.
 4. Ask for or rely on explicit caller approval before live SDK execution. Pass
    `--approved` only after that approval exists.
 
@@ -175,7 +178,7 @@ Run live workflows only after the testing gate is satisfied:
 ```bash
 npx -y agent-loops workflow .codex/workflows/<name>.ts \
   --args '<json>' \
-  --journal .agent-loops-runs/<name>.jsonl \
+  --run-id <id> \
   --provider sdk \
   --budget small \
   --approved \
@@ -186,11 +189,11 @@ npx -y agent-loops workflow .codex/workflows/<name>.ts \
 After launch, use:
 
 ```bash
-npx -y agent-loops status --journal .agent-loops-runs/<name>.jsonl --json
-npx -y agent-loops inspect --journal .agent-loops-runs/<name>.jsonl --json
+npx -y agent-loops status --run-id <id> --json
+npx -y agent-loops inspect --run-id <id> --json
 ```
 
-Omit `--journal` to target the latest run via the `latest.json` pointer.
+Omit `--run-id` to target the latest run stored in SQLite.
 
 For local async launch, add `--background`. If the current request also
 explicitly asks to start, serve, show, or open the UI, launch the workflow and
@@ -199,7 +202,7 @@ integrated status server in one command:
 ```bash
 npx -y agent-loops workflow <script-or-name> \
   --args '<json>' \
-  --journal .agent-loops-runs/<name>.jsonl \
+  --run-id <id> \
   --provider sdk \
   --budget <small|standard|deep> \
   --approved \
@@ -209,25 +212,25 @@ npx -y agent-loops workflow <script-or-name> \
   --no-input
 ```
 
-Parse the `async_launched` JSON envelope and relay both `journalPath` and
-`statusUrl`. Background worker output lands in `<journal>.worker.log`.
+Parse the `async_launched` JSON envelope and relay `runId`, `databasePath`, and
+`statusUrl`.
 
 ## Visual Status UI
 
-After a live or background launch, report the journal path and ask whether the
+After a live or background launch, report the run id and ask whether the
 user wants the visual status UI started. Do not start a UI server implicitly
 unless the user's current request explicitly asked to start, serve, or open the
 UI. A concise prompt is enough:
 
 ```text
-Do you want me to start the Codex Loops status UI for <journal-path>?
+Do you want me to start the Codex Loops status UI for <run-id>?
 ```
 
 If the user says yes for an already-running workflow, start the integrated
-status server from the journal with:
+status server from the SQLite run with:
 
 ```bash
-npx -y agent-loops serve --journal <journal-path> --json
+npx -y agent-loops serve --run-id <id> --json
 ```
 
 Keep that process running while the user needs the page, parse the JSON startup
@@ -237,10 +240,9 @@ When the user says no, continue with `status`/`inspect` text updates only.
 `agent-loops-ui` remains available for standalone package testing, but it is
 not the default operator path for this skill.
 
-Use `resume --journal ...` when a run failed, was killed, or went stale: it
+Use `resume --run-id ...` when a run failed, was killed, or went stale: it
 replays the event log, reuses completed nodes from the journal (an identical
 re-run makes zero provider calls), and re-runs only failed or changed nodes.
 If the script or args changed in a way that invalidates prior node cache keys,
-the changed calls re-run and a `script_changed` notice is recorded. Legacy
-pre-0.2 snapshot journals are readable by `inspect`/`status`/`list` only;
-`resume` and `serve` reject them.
+the changed calls re-run and a `script_changed` notice is recorded. Filesystem
+run artifacts are not read by this version.

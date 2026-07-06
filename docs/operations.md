@@ -34,7 +34,7 @@ Run live SDK execution only after the gate passes and approval exists:
 agent-loops workflow <script-or-name> --args '<json>' --provider sdk --budget small --approved --json --no-input
 ```
 
-Use an explicit `--journal <path>` when the run needs a stable named artifact.
+Use an explicit `--run-id <id>` when the run needs a stable durable identifier.
 
 ## Background Runs
 `--background` initializes the journal, then launches a detached resume worker.
@@ -43,36 +43,37 @@ Use an explicit `--journal <path>` when the run needs a stable named artifact.
 agent-loops workflow <script-or-name> --args '<json>' --background --json --no-input
 ```
 
-The launch result includes the workflow name, pid, run id, journal path, and
-script path. Worker output is written next to the journal.
+The launch result includes the workflow name, pid, run id, `databasePath`, and
+script path.
 
 ## Status And Inspect
 ```sh
-agent-loops status --journal <path> --event-limit 5 --json
-agent-loops inspect --journal <path> --json
-agent-loops list --journal-root .agent-loops-runs --limit 20 --event-limit 5 --json
+agent-loops status --run-id <id> --event-limit 5 --json
+agent-loops inspect --run-id <id> --json
+agent-loops list --limit 20 --event-limit 5 --json
 ```
 
-Omit `--journal` to follow `.agent-loops-runs/latest.json` to the latest run.
+Omit `--run-id` to read the latest run id from
+`~/.codex/workflows/runs_1.sqlite`.
 
 ## Serve
 ```sh
-npx -y agent-loops-ui <journal.jsonl> --json
+npx -y agent-loops serve --run-id <id> --json
 ```
 
 The Codex Loops plugin should not start this visual status UI implicitly after a
-run. It should report the journal path, ask whether the user wants the UI, and
-only run `npx -y agent-loops-ui <journal.jsonl> --json` after the user accepts.
+run. It should report the run id, ask whether the user wants the UI, and only
+run `agent-loops serve --run-id <id> --json` after the user accepts.
 The JSON envelope includes the local URL. The server exposes `GET /status.json`,
-a local dashboard, and SSE updates derived from the journal.
+a local dashboard, and SSE updates derived from SQLite run events.
 
 ## Resume
 ```sh
-agent-loops resume --journal <path> --provider sdk --approved --json --no-input
+agent-loops resume --run-id <id> --provider sdk --approved --json --no-input
 ```
 
 Resume folds the journal, reuses completed nodes, and re-runs failed or changed
-nodes. Legacy v1 snapshot journals are inspectable but not resumable.
+nodes.
 
 ## Failure Parsing
 For `--json` commands, parse the final stderr line as a JSON error object. Do not
@@ -80,7 +81,6 @@ scrape earlier human diagnostics for automation.
 
 ## Operational Artifacts
 Treat these as generated runtime artifacts rather than source docs:
-- `.agent-loops-runs/`
-- `<journal>.worker.log`
-- `<journal>.serve.json`
-- `<journal>.mutations.jsonl`
+- `~/.codex/workflows/runs_1.sqlite`
+- `~/.codex/workflows/runs_1.sqlite-wal`
+- `~/.codex/workflows/runs_1.sqlite-shm`

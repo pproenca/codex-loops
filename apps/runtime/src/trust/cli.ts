@@ -86,7 +86,7 @@ const snapshotSchema = z.object({
   runner: runnerSchema.optional(),
   scriptPath: z.string(),
   scriptSha256: z.string(),
-  journalPath: z.string(),
+  databasePath: z.string(),
   args: jsonValueSchema,
   phases: z.array(phaseSchema),
   logs: z.array(z.string()),
@@ -106,6 +106,7 @@ const statusSummarySchema = z.object({
   workflowName: z.string(),
   status: runStatusSchema,
   scriptPath: z.string(),
+  databasePath: z.string(),
   phaseCount: z.number().int().nonnegative(),
   phases: z.array(phaseSchema),
   nodeCounts: z.record(z.string(), z.number().int().nonnegative()),
@@ -122,7 +123,8 @@ const statusSummarySchema = z.object({
   truncatedTail: z.boolean().optional(),
 }).strict()
 const workflowListEntrySchema = statusSummarySchema.partial().extend({
-  journalPath: z.string(),
+  runId: z.string(),
+  databasePath: z.string(),
   updatedAt: z.string(),
   error: z.string().optional(),
 }).strict()
@@ -149,7 +151,7 @@ const internalWorkflowApiResultSchema = z.discriminatedUnion("status", [
     command: z.enum(["resume", "run", "test", "validate", "workflow"]),
     snapshot: snapshotSchema,
     budgetPlan: jsonValueSchema,
-    journalPath: z.string(),
+    databasePath: z.string(),
     scriptPath: z.string(),
   }).strict(),
   z.object({ status: z.literal("inspected"), snapshot: snapshotSchema }).strict(),
@@ -161,7 +163,7 @@ const internalWorkflowApiResultSchema = z.discriminatedUnion("status", [
     workflowName: z.string(),
     pid: z.number().int().nonnegative(),
     runId: z.string(),
-    journalPath: z.string(),
+    databasePath: z.string(),
     scriptPath: z.string(),
     statusUrl: z.string().url().optional(),
     statusServerPid: z.number().int().nonnegative().optional(),
@@ -172,7 +174,7 @@ const cliEnvelopeSchema = z.union([
     command: z.enum(["resume", "run", "test", "workflow"]),
     snapshot: snapshotSchema,
     budgetPlan: jsonValueSchema,
-    journalPath: z.string(),
+    databasePath: z.string(),
     scriptPath: z.string(),
   }).strict(),
   z.object({
@@ -191,14 +193,14 @@ const cliEnvelopeSchema = z.union([
   z.object({ command: z.literal("inspect"), snapshot: snapshotSchema }).strict(),
   z.object({ command: z.literal("status"), status: statusSummarySchema }).strict(),
   z.object({ command: z.literal("list"), workflows: z.array(workflowListEntrySchema) }).strict(),
-  z.object({ command: z.literal("serve"), journalPath: z.string(), url: z.string().url() }).strict(),
+  z.object({ command: z.literal("serve"), runId: z.string(), databasePath: z.string(), url: z.string().url() }).strict(),
   z.object({
     command: z.enum(["resume", "run", "test", "validate", "workflow"]),
     status: z.literal("async_launched"),
     workflowName: z.string(),
     pid: z.number().int().nonnegative(),
     runId: z.string(),
-    journalPath: z.string(),
+    databasePath: z.string(),
     scriptPath: z.string(),
     statusUrl: z.string().url().optional(),
     statusServerPid: z.number().int().nonnegative().optional(),
@@ -218,6 +220,7 @@ export function parseCliRequest(input: unknown): Proven<CliRequest> {
     throw new CliUsageError(`${request.command} accepts at most ${spec.maxPositionals} positional argument(s)`)
   }
   for (const [name, value] of Object.entries(request.flags)) {
+    if (name === "journal") throw new CliUsageError("--journal was removed; use --run-id")
     if (!spec.flags.includes(name)) throw new CliUsageError(`${request.command} does not accept --${name}`)
     const expected = FLAG_TYPES.get(name)
     if (expected === undefined) throw new CliUsageError(`unknown flag type for --${name}`)

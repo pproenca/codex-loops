@@ -1,23 +1,22 @@
 import type { Proven } from "../domain/brand.ts"
-import type { BackgroundStatusServerMode, CliRequest, DraftCommandRequest, JournalEventDraft, JournalFileCandidate, JournalListRequest, JournalMutationRecord, JournalQueryRequest, JournalReadResult, ResumeCommandRequest, ServeCommandRequest, WorkflowApiResult, WorkflowCommandRequest, WorkflowExecutionOutcome, WorkflowListEntry } from "../domain/contracts.ts"
+import type { BackgroundStatusServerMode, CliRequest, DraftCommandRequest, JournalEventDraft, JournalRunCandidate, JournalListRequest, JournalMutationRecord, JournalQueryRequest, JournalReadResult, ResumeCommandRequest, ServeCommandRequest, WorkflowApiResult, WorkflowCommandRequest, WorkflowExecutionOutcome, WorkflowListEntry } from "../domain/contracts.ts"
 import { planDraftWorkflow } from "../core/draft-workflow.ts"
 import { foldJournal, toWorkflowSnapshot, toWorkflowStatusSummary } from "../core/journal-projection.ts"
 import { prepareWorkflowRun, runnerAttachMode, selectResumeWorkflowProvider, selectWorkflowProvider } from "../core/prepare-run.ts"
 import { decideResumeFromJournal, hasRunnerAttached, prepareWorkflowResumeRun } from "../core/resume-journal.ts"
 import { buildServeStatusPayload, extractStaticAgentGoals } from "../core/serve-status.ts"
 import { CLI_VERSION } from "../domain/cli-contract.ts"
-import type { BackgroundProcessLauncher, DraftWorkflowStore, JournalDirectoryPort, JournalReader, JournalStore, JournalStoreFactory, ProcessPort, RunnerHeartbeatPort, ServePortfileStore, StatusServerPort, WorkflowExecutor, WorkflowRunPreparer, WorkflowScriptLocator, WorkflowScriptSourceStore } from "../ports/index.ts"
+import type { BackgroundProcessLauncher, DraftWorkflowStore, JournalDirectoryPort, JournalReader, JournalStore, JournalStoreFactory, ProcessPort, RunnerHeartbeatPort, ServeSessionStore, StatusServerPort, WorkflowExecutor, WorkflowRunPreparer, WorkflowScriptLocator, WorkflowScriptSourceStore } from "../ports/index.ts"
 import { parseErrorMessage } from "../trust/cli-error.ts"
 import { parseDraftCliRequest } from "../trust/draft-command.ts"
 import { parseJournalText } from "../trust/journal-event.ts"
 import { parseJournalMutationText } from "../trust/journal-mutations.ts"
-import { parseJournalPointerText } from "../trust/journal-pointer.ts"
 import { parseJournalListCliRequest, parseJournalQueryCliRequest } from "../trust/journal-query.ts"
 import { parseNodeErrorFacts } from "../trust/node-error.ts"
 import { parseResumeCliRequest } from "../trust/resume-command.ts"
 import { parseServerAddress } from "../trust/server-address.ts"
 import { parseServeCliRequest } from "../trust/serve-command.ts"
-import { parseServePortfileText } from "../trust/serve-portfile.ts"
+import { parseServeSessionText } from "../trust/serve-session.ts"
 import { parseStatusServerRoute } from "../trust/status-server-route.ts"
 import { parseWorkflowCommandCliRequest } from "../trust/workflow-command.ts"
 import { parseCompatibleWorkflowScriptSource } from "../trust/workflow-script.ts"
@@ -26,7 +25,7 @@ export type WorkflowAppEnvironment = {
   readonly journalReader: JournalReader
   readonly journalDirectory: JournalDirectoryPort
   readonly journalStoreFactory: JournalStoreFactory
-  readonly servePortfileStore: ServePortfileStore
+  readonly serveSessionStore: ServeSessionStore
   readonly draftWorkflowStore: DraftWorkflowStore
   readonly processPort: ProcessPort
   readonly workflowScriptLocator: WorkflowScriptLocator
@@ -43,14 +42,14 @@ export type JournalQueryEnvironment = {
 
 export type ServeAppEnvironment = JournalQueryEnvironment & {
   readonly processPort: ProcessPort
-  readonly servePortfileStore: ServePortfileStore
+  readonly serveSessionStore: ServeSessionStore
   readonly statusServer: StatusServerPort
   readonly statusUiRootDirectory: string
   readonly workflowScriptSourceStore: WorkflowScriptSourceStore
 }
 
 export type ServeAppResult = {
-  readonly envelope: { readonly command: "serve"; readonly journalPath: string; readonly url: string }
+  readonly envelope: { readonly command: "serve"; readonly runId: string; readonly databasePath: string; readonly url: string }
   readonly close: () => Promise<void>
 }
 
@@ -78,28 +77,27 @@ export async function runWorkflowApp(request: Proven<CliRequest>, env: WorkflowA
 }
 
 export async function runServeCommandApp(request: Proven<ServeCommandRequest>, env: ServeAppEnvironment): Promise<ServeAppResult> {
-  const resolved = await readJournalPath(request.journalPath, env)
+  const resolved = await readRun(request.runId, env)
   const server = await env.statusServer.start({
     host: request.host,
     port: request.port,
     livePollMs: request.livePollMs,
     loadPayload: async () => {
-      const latest = await readJournalPath(resolved.journalPath, env)
+      const latest = await readRun(resolved.runId, env)
       const latestGoals = await readStaticAgentGoals(latest.read, env)
-      const latestPayload = buildServeStatusPayload({ read: latest.read, journalPath: latest.journalPath, eventLimit: request.eventLimit, agentGoals: latestGoals })
+      const latestPayload = buildServeStatusPayload({ read: latest.read, databasePath: latest.databasePath, eventLimit: request.eventLimit, agentGoals: latestGoals })
       return { compactPayload: latestPayload.compactPayload, prettyPayload: latestPayload.prettyPayload }
     },
     parseRoute: parseStatusServerRoute,
     ui: { rootDirectory: env.statusUiRootDirectory },
   })
   const address = parseServerAddress(server.address)
-  const portfilePath = `${resolved.journalPath}.serve.json`
-  await env.servePortfileStore.writePortfile({ portfilePath, url: address.url, pid: env.processPort.pid() })
+  await env.serveSessionStore.writeSession({ runId: resolved.runId, url: address.url, pid: env.processPort.pid() })
   return {
-    envelope: { command: request.command, journalPath: resolved.journalPath, url: address.url },
+    envelope: { command: request.command, runId: resolved.runId, databasePath: resolved.databasePath, url: address.url },
     async close() {
       await server.close()
-      await env.servePortfileStore.removePortfile(portfilePath)
+      await env.serveSessionStore.removeSession(resolved.runId)
     },
   }
 }
@@ -120,9 +118,9 @@ export function parseServeCliCommand(request: Proven<CliRequest>): Proven<ServeC
 }
 
 export async function runResumeCommandApp(request: Proven<ResumeCommandRequest>, env: WorkflowAppEnvironment): Promise<WorkflowApiResult> {
-  const resolved = await readJournalPath(request.journalPath, env)
-  const mutationFiles = await readJournalMutationFiles(resolved.journalPath, env)
-  const decision = decideResumeFromJournal({ request, read: resolved.read, journalPath: resolved.journalPath, mutationFiles })
+  const resolved = await readRun(request.runId, env)
+  const mutationFiles = await readRunMutationFiles(resolved.runId, env)
+  const decision = decideResumeFromJournal({ request, read: resolved.read, databasePath: resolved.databasePath, mutationFiles })
   switch (decision.t) {
     case "completed":
       return decision.result
@@ -130,14 +128,14 @@ export async function runResumeCommandApp(request: Proven<ResumeCommandRequest>,
       {
         switch (request.background.t) {
           case "launch":
-            return launchExistingBackgroundWorkflow({ request, read: resolved.read, journalPath: resolved.journalPath, env })
+            return launchExistingBackgroundWorkflow({ request, read: resolved.read, databasePath: resolved.databasePath, runId: resolved.runId, env })
           case "foreground":
             break
         }
         const script = parseCompatibleWorkflowScriptSource(await env.workflowScriptSourceStore.read(resolved.read.opened.scriptPath))
         const facts = await env.workflowPreparer.prepare({ script })
         const provider = selectResumeWorkflowProvider({ selection: request.provider, recordedProvider: resolved.read.opened.provider })
-        const prepared = prepareWorkflowResumeRun({ read: resolved.read, journalPath: resolved.journalPath, scriptSha256: facts.scriptSha256, provider })
+        const prepared = prepareWorkflowResumeRun({ read: resolved.read, databasePath: resolved.databasePath, scriptSha256: facts.scriptSha256, provider })
         const journalStore = env.journalStoreFactory.open(prepared)
         try {
           const committedEvents = [...resolved.read.events]
@@ -331,14 +329,14 @@ async function launchBackgroundWorkflow(input: {
       {
         const status = await launchBackgroundStatusServer({
           mode: input.request.background.statusServer,
-          journalPath: input.prepared.journalPath,
+          runId: input.prepared.runId,
           env: input.env,
         })
-        const launched = await input.env.backgroundLauncher.launchResumeWorker({ journalPath: input.prepared.journalPath })
+        const launched = await input.env.backgroundLauncher.launchResumeWorker({ runId: input.prepared.runId })
         try {
           for (let poll = 0; poll < input.request.background.handshakeMaxPolls; poll += 1) {
             await input.env.backgroundLauncher.wait({ ms: input.request.background.handshakePollMs })
-            const read = parseJournalText(await input.env.journalReader.readText(input.prepared.journalPath))
+            const read = parseJournalText(await input.env.journalReader.readText(input.prepared.runId))
             if (hasRunnerAttached({ read, pid: launched.pid })) {
               return {
                 status: "async_launched",
@@ -346,7 +344,7 @@ async function launchBackgroundWorkflow(input: {
                 workflowName: input.prepared.workflowName,
                 pid: launched.pid,
                 runId: input.prepared.runId,
-                journalPath: input.prepared.journalPath,
+                databasePath: input.prepared.databasePath,
                 scriptPath: input.prepared.scriptPath,
                 ...(status.t === "enabled" ? { statusUrl: status.url, statusServerPid: status.pid } : {}),
               }
@@ -364,7 +362,8 @@ async function launchBackgroundWorkflow(input: {
 async function launchExistingBackgroundWorkflow(input: {
   readonly request: Proven<ResumeCommandRequest>
   readonly read: Proven<JournalReadResult>
-  readonly journalPath: string
+  readonly databasePath: string
+  readonly runId: string
   readonly env: WorkflowAppEnvironment
 }): Promise<Extract<WorkflowApiResult, { readonly status: "async_launched" }>> {
   switch (input.request.provider.t) {
@@ -383,14 +382,14 @@ async function launchExistingBackgroundWorkflow(input: {
       {
         const status = await launchBackgroundStatusServer({
           mode: input.request.background.statusServer,
-          journalPath: input.journalPath,
+          runId: input.runId,
           env: input.env,
         })
-        const launched = await input.env.backgroundLauncher.launchResumeWorker({ journalPath: input.journalPath })
+        const launched = await input.env.backgroundLauncher.launchResumeWorker({ runId: input.runId })
         try {
           for (let poll = 0; poll < input.request.background.handshakeMaxPolls; poll += 1) {
             await input.env.backgroundLauncher.wait({ ms: input.request.background.handshakePollMs })
-            const read = parseJournalText(await input.env.journalReader.readText(input.journalPath))
+            const read = parseJournalText(await input.env.journalReader.readText(input.runId))
             if (hasRunnerAttached({ read, pid: launched.pid })) {
               return {
                 status: "async_launched",
@@ -398,7 +397,7 @@ async function launchExistingBackgroundWorkflow(input: {
                 workflowName: input.read.opened.workflowName,
                 pid: launched.pid,
                 runId: input.read.opened.runId,
-                journalPath: input.journalPath,
+                databasePath: input.databasePath,
                 scriptPath: input.read.opened.scriptPath,
                 ...(status.t === "enabled" ? { statusUrl: status.url, statusServerPid: status.pid } : {}),
               }
@@ -419,7 +418,7 @@ type BackgroundStatusResult =
 
 async function launchBackgroundStatusServer(input: {
   readonly mode: BackgroundStatusServerMode
-  readonly journalPath: string
+  readonly runId: string
   readonly env: WorkflowAppEnvironment
 }): Promise<BackgroundStatusResult> {
   switch (input.mode.t) {
@@ -427,23 +426,22 @@ async function launchBackgroundStatusServer(input: {
       return { t: "disabled" }
     case "enabled":
       {
-        const portfilePath = `${input.journalPath}.serve.json`
-        await input.env.servePortfileStore.removePortfile(portfilePath)
+        await input.env.serveSessionStore.removeSession(input.runId)
         const launched = await input.env.backgroundLauncher.launchStatusServer({
-          journalPath: input.journalPath,
+          runId: input.runId,
           host: input.mode.host,
           port: input.mode.port,
         })
-        for (let poll = 0; poll < input.mode.portfileMaxPolls; poll += 1) {
-          await input.env.backgroundLauncher.wait({ ms: input.mode.portfilePollMs })
+        for (let poll = 0; poll < input.mode.sessionMaxPolls; poll += 1) {
+          await input.env.backgroundLauncher.wait({ ms: input.mode.sessionPollMs })
           try {
-            const record = parseServePortfileText(await input.env.servePortfileStore.readPortfile(portfilePath))
+            const record = parseServeSessionText(await input.env.serveSessionStore.readSession(input.runId))
             return { t: "enabled", url: record.url, pid: record.pid }
           } catch {
           }
         }
         await input.env.backgroundLauncher.terminate({ pid: launched.pid })
-        throw new Error(`status server pid ${launched.pid} did not publish a portfile before handshake timeout`)
+        throw new Error(`status server pid ${launched.pid} did not publish a serve session before handshake timeout`)
       }
   }
 }
@@ -496,44 +494,41 @@ function failedRunFinishedEvent(input: {
 }
 
 export async function runJournalQueryApp(request: Proven<JournalQueryRequest>, env: JournalQueryEnvironment): Promise<WorkflowApiResult> {
-  const resolved = await readJournalPath(request.journalPath, env)
+  const resolved = await readRun(request.runId, env)
   const read = resolved.read
   const state = foldJournal(read)
   if (request.command === "inspect") {
-    return { status: "inspected", snapshot: toWorkflowSnapshot({ state, journalPath: resolved.journalPath }) }
+    return { status: "inspected", snapshot: toWorkflowSnapshot({ state, databasePath: resolved.databasePath }) }
   }
   return {
     status: "summarized",
-    summary: toWorkflowStatusSummary({ state, tailEvents: read.events, eventLimit: request.eventLimit }),
+    summary: toWorkflowStatusSummary({ state, databasePath: resolved.databasePath, tailEvents: read.events, eventLimit: request.eventLimit }),
   }
 }
 
 export async function runJournalListApp(request: Proven<JournalListRequest>, env: WorkflowAppEnvironment): Promise<WorkflowApiResult> {
-  const candidates = await listJournalFiles(request.journalRoot, env)
+  const candidates = await listRuns(env)
   const entries: WorkflowListEntry[] = []
   for (const candidate of candidates) {
-    if (candidate.path.endsWith(".jsonl")) {
-      try {
-        const resolved = await readJournalPath(candidate.path, env)
-        const read = resolved.read
-        const state = foldJournal(read)
-        entries.push({
-          journalPath: resolved.journalPath,
-          updatedAt: candidate.updatedAt,
-          ...toWorkflowStatusSummary({ state, tailEvents: read.events, eventLimit: request.eventLimit }),
-        })
-      } catch (error) {
-        entries.push({ journalPath: candidate.path, updatedAt: candidate.updatedAt, error: parseErrorMessage(error) })
-      }
+    try {
+      const resolved = await readRun(candidate.runId, env)
+      const read = resolved.read
+      const state = foldJournal(read)
+      entries.push({
+        ...toWorkflowStatusSummary({ state, databasePath: resolved.databasePath, tailEvents: read.events, eventLimit: request.eventLimit }),
+        updatedAt: candidate.updatedAt,
+      })
+    } catch (error) {
+      entries.push({ runId: candidate.runId, databasePath: candidate.databasePath, updatedAt: candidate.updatedAt, error: parseErrorMessage(error) })
     }
   }
   entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
   return { status: "listed", workflows: entries.slice(0, request.limit) }
 }
 
-async function listJournalFiles(root: string, env: WorkflowAppEnvironment): Promise<readonly JournalFileCandidate[]> {
+async function listRuns(env: WorkflowAppEnvironment): Promise<readonly JournalRunCandidate[]> {
   try {
-    return await env.journalDirectory.listJournalFiles(root)
+    return await env.journalDirectory.listRuns()
   } catch (error) {
     const facts = parseNodeErrorFacts(error)
     switch (facts.t) {
@@ -546,23 +541,15 @@ async function listJournalFiles(root: string, env: WorkflowAppEnvironment): Prom
   }
 }
 
-export async function readJournalPath(path: string, env: JournalQueryEnvironment): Promise<{ readonly journalPath: string; readonly read: Proven<JournalReadResult> }> {
-  const text = await env.journalReader.readText(path)
-  const pointer = parseJournalPointerText(text)
-  switch (pointer.t) {
-    case "content":
-      return { journalPath: path, read: parseJournalText(text) }
-    case "pointer":
-      {
-        const target = await env.journalReader.readPointerTarget({ sourcePath: path, target: pointer.target })
-        return { journalPath: target.path, read: parseJournalText(target.text) }
-      }
-  }
+export async function readRun(runId: string, env: JournalQueryEnvironment): Promise<{ readonly runId: string; readonly databasePath: string; readonly read: Proven<JournalReadResult> }> {
+  const resolved = await env.journalReader.resolveRun({ runId })
+  const text = await env.journalReader.readText(resolved.runId)
+  return { ...resolved, read: parseJournalText(text) }
 }
 
-async function readJournalMutationFiles(journalPath: string, env: WorkflowAppEnvironment): Promise<readonly string[]> {
+async function readRunMutationFiles(runId: string, env: WorkflowAppEnvironment): Promise<readonly string[]> {
   try {
-    return parseJournalMutationText(await env.journalReader.readMutationText(journalPath))
+    return parseJournalMutationText(await env.journalReader.readMutationText(runId))
   } catch (error) {
     const facts = parseNodeErrorFacts(error)
     switch (facts.t) {
@@ -601,9 +588,9 @@ function workflowResult(input: {
   return {
     status: "completed",
     command: input.request.command,
-    snapshot: toWorkflowSnapshot({ state, journalPath: input.prepared.journalPath }),
+    snapshot: toWorkflowSnapshot({ state, databasePath: input.prepared.databasePath }),
     budgetPlan: input.prepared.budgetPlan,
-    journalPath: input.prepared.journalPath,
+    databasePath: input.prepared.databasePath,
     scriptPath: input.prepared.scriptPath,
   }
 }
@@ -645,7 +632,6 @@ function resumeAsWorkflowRequest(request: Proven<ResumeCommandRequest>, prepared
     provider: { t: "explicit", provider: prepared.provider },
     approval: request.approval,
     requestedRunId: prepared.requestedRunId,
-    journal: { t: "requested", path: prepared.journalPath },
     noInput: request.noInput,
     quiet: request.quiet,
     background: { t: "foreground" },

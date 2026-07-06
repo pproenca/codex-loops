@@ -107,7 +107,6 @@ const runtimeContractSchema = z.object({
     thresholdPolicy: z.string(),
   }).strict(),
   resume: z.object({
-    journalPath: z.string().optional(),
     cacheKey: z.literal("runId+phaseTitle+label+promptHash+schemaHash+optionsHash"),
     completedNodesReplayFromJournal: z.literal(true),
   }).strict(),

@@ -5,7 +5,7 @@ import type { CliRequest, ResumeCommandRequest } from "../domain/contracts.ts"
 import { proven } from "./proven.ts"
 import { parseWorkflowCommandCliRequest } from "./workflow-command.ts"
 
-const DEFAULT_JOURNAL_PATH = ".agent-loops-runs/latest.json"
+const DEFAULT_RUN_ID = "latest"
 const flagValueSchema = z.union([z.string(), z.boolean()])
 
 export function parseResumeCliRequest(input: Proven<CliRequest>): Proven<ResumeCommandRequest> {
@@ -14,7 +14,7 @@ export function parseResumeCliRequest(input: Proven<CliRequest>): Proven<ResumeC
   const flags = z.record(z.string(), flagValueSchema).parse(input.flags)
   return proven({
     command,
-    journalPath: parseJournalPath(workflow),
+    runId: parseRunId(workflow.requestedRunId),
     provider: workflow.provider,
     approval: workflow.approval,
     noInput: workflow.noInput,
@@ -26,11 +26,11 @@ export function parseResumeCliRequest(input: Proven<CliRequest>): Proven<ResumeC
   })
 }
 
-function parseJournalPath(value: Pick<ReturnType<typeof parseWorkflowCommandCliRequest>, "journal">): string {
-  switch (value.journal.t) {
+function parseRunId(value: Pick<ReturnType<typeof parseWorkflowCommandCliRequest>, "requestedRunId">["requestedRunId"]): string {
+  switch (value.t) {
     case "none":
-      return DEFAULT_JOURNAL_PATH
+      return DEFAULT_RUN_ID
     case "requested":
-      return value.journal.path
+      return value.value
   }
 }

@@ -42,16 +42,16 @@ The plugin exposes the local journal-backed lifecycle surface:
 <!-- gen:commands -->
 ```bash
 agent-loops draft --goal '<goal>' [--name name] [--output .codex/workflows/name.ts] [--json]
-agent-loops validate <script-or-name> --args '<json>' [--journal <path>] [--json] [--no-input]
-agent-loops test <script-or-name> --args '<json>' [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops validate <script-or-name> --args '<json>' [--json] [--no-input]
+agent-loops test <script-or-name> --args '<json>' [--run-id <id>] [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
+agent-loops workflow <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
 agent-loops workflow <script-or-name> --args '<json>' --background [--status-server] [--json] [--no-input]
-agent-loops run <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops resume [--journal <path>] [--provider sdk|mock] [--approved] [--json] [--no-input]
-agent-loops inspect [--journal <path>] [--json]
-agent-loops status [--journal <path>] [--event-limit 5] [--json]
-agent-loops list [--journal-root .agent-loops-runs] [--limit 20] [--event-limit 5] [--json]
-agent-loops serve [--journal <path>] [--host 127.0.0.1] [--port 0] [--json]
+agent-loops run <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
+agent-loops resume [--run-id <id>] [--provider sdk|mock] [--approved] [--json] [--no-input]
+agent-loops inspect [--run-id <id>] [--json]
+agent-loops status [--run-id <id>] [--event-limit 5] [--json]
+agent-loops list [--limit 20] [--event-limit 5] [--json]
+agent-loops serve [--run-id <id>] [--host 127.0.0.1] [--port 0] [--json]
 agent-loops help
 ```
 <!-- /gen:commands -->
@@ -69,12 +69,12 @@ schemas, caps, and halt conditions. Mutating workflows should include
 adversarial verification plus a final build or test gate before completion.
 
 This package is local-only: background launch and live status UI pages are
-supported through local journals. Hosted workflow services, external workflow
-UIs, and per-agent skip/retry controls are not implemented.
-Journals are append-only event logs (`agent-loops/journal@2`) and the single
-source of truth for status, inspection, stale-run detection, and resume; when
-no `--journal` is passed, `.agent-loops-runs/latest.json` points at the latest
-per-run journal.
+supported through the local SQLite run database. Hosted workflow services,
+external workflow UIs, and per-agent skip/retry controls are not implemented.
+Journals are append-only event payloads (`agent-loops/journal@2`) and the
+single source of truth for status, inspection, stale-run detection, and resume.
+Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite`; commands use
+`--run-id` when a stable identity or explicit run selection is needed.
 Live SDK execution uses the TypeScript `@openai/codex-sdk` package only.
 `codexPathOverride` may select the Codex executable behind that SDK; it must not
 be used to swap in another TypeScript SDK implementation.
@@ -86,7 +86,7 @@ in one envelope:
 ```bash
 npx -y agent-loops workflow <script-or-name> \
   --args '<json>' \
-  --journal .agent-loops-runs/<name>.jsonl \
+  --run-id <id> \
   --provider sdk \
   --budget <small|standard|deep> \
   --approved \
@@ -96,12 +96,12 @@ npx -y agent-loops workflow <script-or-name> \
   --no-input
 ```
 
-The `async_launched` JSON envelope supplies both `journalPath` and `statusUrl`.
-For an existing run, the skill reports the journal path, asks whether the user
-wants the UI, and only then launches:
+The `async_launched` JSON envelope supplies `runId`, `databasePath`, and
+`statusUrl`. For an existing run, the skill reports the run id, asks whether the
+user wants the UI, and only then launches:
 
 ```bash
-npx -y agent-loops serve --journal <journal.jsonl> --json
+npx -y agent-loops serve --run-id <id> --json
 ```
 
 The JSON startup envelope supplies the local URL to open. The standalone

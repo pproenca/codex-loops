@@ -4,6 +4,7 @@ import { resolve } from "node:path"
 
 import type { WorkflowChildPlan, WorkflowCommandRequest, WorkflowPreparationFacts } from "../../domain/contracts.ts"
 import type { WorkflowChildResolver, WorkflowRunPreparer, WorkflowScriptLocator } from "../../ports/index.ts"
+import { defaultWorkflowDatabasePath } from "./workflow-database.ts"
 
 export class NodeWorkflowScriptLocator implements WorkflowScriptLocator {
   async locate(request: Parameters<WorkflowScriptLocator["locate"]>[0]): Promise<string> {
@@ -16,6 +17,7 @@ export class NodeWorkflowPreparer implements WorkflowRunPreparer {
     return {
       runId: randomUUID(),
       cwd: process.cwd(),
+      databasePath: defaultWorkflowDatabasePath(),
       scriptSha256: sha256(input.script.source),
     }
   }

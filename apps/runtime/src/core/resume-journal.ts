@@ -8,7 +8,7 @@ export type ResumeJournalDecision =
 export function decideResumeFromJournal(input: {
   readonly request: ResumeCommandRequest
   readonly read: JournalReadResult
-  readonly journalPath: string
+  readonly databasePath: string
   readonly mutationFiles: readonly string[]
 }): ResumeJournalDecision {
   const state = foldJournal(input.read)
@@ -21,9 +21,9 @@ export function decideResumeFromJournal(input: {
         result: {
           status: "completed",
           command: input.request.command,
-          snapshot: toWorkflowSnapshot({ state, journalPath: input.journalPath }),
+          snapshot: toWorkflowSnapshot({ state, databasePath: input.databasePath }),
           budgetPlan: input.read.opened.budgetPlan,
-          journalPath: input.journalPath,
+          databasePath: input.databasePath,
           scriptPath: input.read.opened.scriptPath,
         },
       }
@@ -35,7 +35,7 @@ export function decideResumeFromJournal(input: {
 
 export function prepareWorkflowResumeRun(input: {
   readonly read: JournalReadResult
-  readonly journalPath: string
+  readonly databasePath: string
   readonly scriptSha256: string
   readonly provider: PreparedWorkflowRun["provider"]
 }): PreparedWorkflowRun {
@@ -45,7 +45,7 @@ export function prepareWorkflowResumeRun(input: {
     workflowName: input.read.opened.workflowName,
     scriptPath: input.read.opened.scriptPath,
     scriptSha256: input.scriptSha256,
-    journalPath: input.journalPath,
+    databasePath: input.databasePath,
     args: input.read.opened.args,
     provider: input.provider,
     budgetPlan: input.read.opened.budgetPlan,

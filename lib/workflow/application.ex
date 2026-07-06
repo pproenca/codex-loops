@@ -9,6 +9,9 @@ defmodule Workflow.Application do
     * `Workflow.PubSub` — post-commit broadcast bus for live read surfaces.
     * `Workflow.Journal` — owner of the append-only event-log ETS table.
     * `Workflow.Run.Supervisor` — dynamic supervisor for per-run writer processes.
+    * `Workflow.Web.Endpoint` — the Phoenix endpoint serving the journal-projecting
+      LiveView. Started after `Workflow.PubSub` (its `pubsub_server`), and holding no
+      run state of its own.
   """
   use Application
 
@@ -18,7 +21,8 @@ defmodule Workflow.Application do
       {Registry, keys: :unique, name: Workflow.Run.Registry},
       {Phoenix.PubSub, name: Workflow.PubSub},
       Workflow.Journal,
-      {DynamicSupervisor, name: Workflow.Run.Supervisor, strategy: :one_for_one}
+      {DynamicSupervisor, name: Workflow.Run.Supervisor, strategy: :one_for_one},
+      Workflow.Web.Endpoint
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Workflow.Supervisor)

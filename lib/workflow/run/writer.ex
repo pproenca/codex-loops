@@ -94,17 +94,21 @@ defmodule Workflow.Run.Writer do
         {:error, {:malformed_output, failure.address, failure.reason}}
 
       %Status{} ->
-        run_tree(run_id, tree, provider, prior, Map.get(state, :budget))
+        run_tree(run_id, tree, provider, prior, Map.get(state, :budget), Map.get(state, :script_path))
     end
   end
 
-  defp run_tree(run_id, tree, provider, prior, budget) do
+  defp run_tree(run_id, tree, provider, prior, budget, script_path) do
     seq = Journal.last_seq(run_id) + 1
 
-    # A fresh run gets its start marker (carrying the budget target); a resume
-    # already carries one, so appending another would falsely re-mark the folded
-    # run as `:running` and re-declare a target the ledger already folded.
-    seq = if prior == [], do: commit(run_id, seq, Event.run_started(tree, budget)), else: seq
+    # A fresh run gets its start marker (carrying the budget target and the source
+    # path); a resume already carries one, so appending another would falsely
+    # re-mark the folded run as `:running` and re-declare a target the ledger
+    # already folded.
+    seq =
+      if prior == [],
+        do: commit(run_id, seq, Event.run_started(tree, budget, script_path)),
+        else: seq
 
     ctx = %{seq: seq, return: nil, last_result: nil, iteration: 0, seen_by: []}
 

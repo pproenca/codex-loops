@@ -16,3 +16,10 @@ tmp/
 .env
 .env.*
 !.env.example
+
+# Elixir build artifacts
+_build/
+deps/
+*.beam
+erl_crash.dump
+.elixir_ls/

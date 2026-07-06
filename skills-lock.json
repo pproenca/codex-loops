@@ -1,6 +1,18 @@
 {
   "version": 1,
   "skills": {
+    "adversarial-elixir": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/adversarial-elixir/SKILL.md",
+      "computedHash": "c5d9629d776c0437420fa057c100c8ca0364f9e614d0117d9332c0631e8084a6"
+    },
+    "elixir-meta-programming": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/elixir-meta-programming/SKILL.md",
+      "computedHash": "4fb09b9cab28414f198fbe67ce4791916f62a518aeff2adf7df850e66ed61859"
+    },
     "grill-me": {
       "source": "mattpocock/skills",
       "sourceType": "github",
@@ -13,11 +25,23 @@
       "skillPath": "skills/engineering/setup-matt-pocock-skills/SKILL.md",
       "computedHash": "a7d798f49081ea5b2606e8bcafa3bc2b34177cfaa24d71c2ddf2d433f4006a4a"
     },
+    "staff-level-elixir": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/staff-level-elixir/SKILL.md",
+      "computedHash": "195a0dafa9d61957ea97680bdeb50e6e98519f976eae4f606fe455f34ba27672"
+    },
     "tdd": {
       "source": "mattpocock/skills",
       "sourceType": "github",
       "skillPath": "skills/engineering/tdd/SKILL.md",
       "computedHash": "c9326b88419cfba1d54dd713b7ddb23020e6a93f4b0d13aea58cebba58cda2ee"
+    },
+    "to-issues": {
+      "source": "mattpocock/skills",
+      "sourceType": "github",
+      "skillPath": "skills/engineering/to-issues/SKILL.md",
+      "computedHash": "4e2a11d35f018490d42a79234432f779d7131b9920373ef24cfbc68229bfef6c"
     },
     "to-prd": {
       "source": "mattpocock/skills",

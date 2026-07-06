@@ -25,13 +25,20 @@ defmodule Workflow.Event do
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema
 
-  def run_started(%Workflow.Tree{} = tree) do
+  @doc """
+  The run's start marker. `budget` is the per-run token target the ledger folds
+  against, or `nil` for an unbounded run. Recording it here (not in process state)
+  keeps the ledger a pure fold and survives resume: the target is read back from
+  this journaled event rather than re-supplied.
+  """
+  def run_started(%Workflow.Tree{} = tree, budget \\ nil) do
     %__MODULE__{
       type: :run_started,
       payload: %{
         tree_name: tree.name,
         tree_version: tree.version,
-        node_count: length(tree.nodes)
+        node_count: length(tree.nodes),
+        budget: budget
       }
     }
   end

@@ -36,7 +36,7 @@ defmodule Workflow.Run.Writer do
     {:stop, :normal, state}
   end
 
-  defp execute(%{run_id: run_id, tree: tree, provider: provider}) do
+  defp execute(%{run_id: run_id, tree: tree, provider: provider} = state) do
     prior = Journal.fold(run_id)
 
     # Resume is a pure fold. If the journal already folds to a terminal state, that
@@ -50,16 +50,17 @@ defmodule Workflow.Run.Writer do
         {:error, {:malformed_output, failure.address, failure.reason}}
 
       %Status{} ->
-        run_tree(run_id, tree, provider, prior)
+        run_tree(run_id, tree, provider, prior, Map.get(state, :budget))
     end
   end
 
-  defp run_tree(run_id, tree, provider, prior) do
+  defp run_tree(run_id, tree, provider, prior, budget) do
     seq = Journal.last_seq(run_id) + 1
 
-    # A fresh run gets its start marker; a resume already carries one, so appending
-    # another would falsely re-mark the folded run as `:running`.
-    seq = if prior == [], do: commit(run_id, seq, Event.run_started(tree)), else: seq
+    # A fresh run gets its start marker (carrying the budget target); a resume
+    # already carries one, so appending another would falsely re-mark the folded
+    # run as `:running` and re-declare a target the ledger already folded.
+    seq = if prior == [], do: commit(run_id, seq, Event.run_started(tree, budget)), else: seq
 
     outcome =
       Enum.reduce_while(tree.nodes, {seq, nil}, fn node, {seq, return_value} ->

@@ -12,15 +12,20 @@ defmodule Workflow.Run do
 
   alias Workflow.{Tree, Run}
 
-  @type option :: {:run_id, String.t()} | {:provider, {module(), term()}}
+  @type option ::
+          {:run_id, String.t()}
+          | {:provider, {module(), term()}}
+          | {:budget, non_neg_integer()}
 
   @spec start(Tree.t() | module(), [option()]) ::
           {:ok, String.t(), pid()} | {:error, term()}
   def start(%Tree{} = tree, opts) do
     run_id = Keyword.get(opts, :run_id) || generate_run_id()
     provider = Keyword.fetch!(opts, :provider)
+    budget = Keyword.get(opts, :budget)
 
-    spec = {Run.Writer, run_id: run_id, tree: tree, provider: provider, parent: self()}
+    spec =
+      {Run.Writer, run_id: run_id, tree: tree, provider: provider, budget: budget, parent: self()}
 
     case DynamicSupervisor.start_child(Workflow.Run.Supervisor, spec) do
       {:ok, pid} -> {:ok, run_id, pid}

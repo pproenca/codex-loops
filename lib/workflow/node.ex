@@ -33,12 +33,13 @@ defmodule Workflow.Node.Agent do
   An agent turn. The prompt is a static literal; execution is a paid effect keyed
   for exactly-once by `(run_id, address, iteration)`.
 
-  `schema` is an inert, raw JSON-schema **map literal** (or `nil` for a schemaless
-  turn). When present the turn is **fail-closed**: the provider's output is
-  validated against the schema, invalid output is retried on-thread up to
-  `retries` times, and exhausting the budget fails the node. `schema`/`retries`
-  are compile-time constants materialized from literals, so the node stays inert
-  and serializable — no closure is ever captured.
+  `schema` is an inert, raw JSON-schema **map** (or `nil` for a schemaless turn),
+  materialized at compile time from either a map literal or a `schema … do … end`
+  module built by `Workflow.Schema.DSL`. When present the turn is **fail-closed**:
+  the provider's output is validated against the schema, invalid output is retried
+  on-thread up to `retries` times, and exhausting the budget fails the node.
+  `schema`/`retries` are compile-time constants, so the node stays inert and
+  serializable — no closure is ever captured.
   """
   @enforce_keys [:address, :prompt]
   defstruct [:address, :prompt, schema: nil, retries: 2]

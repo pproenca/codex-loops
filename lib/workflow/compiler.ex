@@ -388,14 +388,41 @@ defmodule Workflow.Compiler do
           {:error, schema_finding(form, env)}
         end
 
+      # A schema module built by `Workflow.Schema.DSL`: resolve the alias and lift
+      # its inert JSON-schema map into the node, so `schema: Bugs` is identical to
+      # passing that map literally — the node still carries plain, serializable data.
+      {:ok, {:__aliases__, _, _} = alias_ast} ->
+        schema_from_module(Macro.expand(alias_ast, env), form, env)
+
       {:ok, _not_a_map_literal} ->
         {:error, schema_finding(form, env)}
 
       :error ->
         {:error,
          Finding.at(env, form, "`agent` with options requires a `schema:`",
-           hint: "schema-backed agents fail closed; give schema: %{...}"
+           hint: "schema-backed agents fail closed; give schema: %{...} or a schema module"
          )}
+    end
+  end
+
+  # Reflect the compiled schema map out of a `schema … do … end` module. The remote
+  # call establishes a compile-time dependency, so the schema module is compiled
+  # before this workflow; a module that is not a schema is a located finding.
+  defp schema_from_module(module, form, env) when is_atom(module) do
+    case Code.ensure_compiled(module) do
+      {:module, ^module} ->
+        if function_exported?(module, :__schema__, 1) do
+          {:ok, module.__schema__(:json)}
+        else
+          {:error,
+           Finding.at(env, form, "`schema:` module #{inspect(module)} is not a schema",
+             hint: "define it with `schema #{inspect(module)} do ... end`"
+           )}
+        end
+
+      {:error, _reason} ->
+        {:error,
+         Finding.at(env, form, "`schema:` references an unknown module #{inspect(module)}")}
     end
   end
 

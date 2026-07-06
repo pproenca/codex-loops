@@ -10,12 +10,13 @@ defmodule Workflow.Run do
       `{:ok, run_id}`. Read state back with `Workflow.Status.of/1`.
   """
 
-  alias Workflow.{Tree, Run}
+  alias Workflow.{Tree, Run, Journal}
 
   @type option ::
           {:run_id, String.t()}
           | {:provider, {module(), term()}}
           | {:budget, non_neg_integer()}
+          | {:script_path, String.t()}
 
   @spec start(Tree.t() | module(), [option()]) ::
           {:ok, String.t(), pid()} | {:error, term()}
@@ -58,9 +59,20 @@ defmodule Workflow.Run do
     run_id = Keyword.get(opts, :run_id) || generate_run_id()
     provider = Keyword.fetch!(opts, :provider)
     budget = Keyword.get(opts, :budget)
+    script_path = Keyword.get(opts, :script_path)
+
+    # Index the run at its creation point so read commands can enumerate it and
+    # select the latest. Idempotent, so a resume of an existing run is a no-op.
+    :ok = Journal.register_run(run_id)
 
     spec =
-      {Run.Writer, run_id: run_id, tree: tree, provider: provider, budget: budget, parent: self()}
+      {Run.Writer,
+       run_id: run_id,
+       tree: tree,
+       provider: provider,
+       budget: budget,
+       script_path: script_path,
+       parent: self()}
 
     case DynamicSupervisor.start_child(Workflow.Run.Supervisor, spec) do
       {:ok, pid} -> {:ok, run_id, pid}

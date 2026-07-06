@@ -9,12 +9,19 @@ defmodule Workflow.Journal do
   writer (one per run via the run registry), so `seq` needs no global counter and
   ordered iteration yields events in commit order.
 
-  This process is only the table's owner/heir under supervision; it holds no run
+  A second `:set` table is a lightweight **run index**: `run_id -> creation order`
+  (a strictly-monotonic integer). It is not run *state* — every authoritative read
+  still folds the event log — it only lets `list` enumerate runs and the read
+  commands select the latest one when `--run-id` is omitted, since run ids are
+  random and carry no order themselves.
+
+  This process is only the tables' owner/heir under supervision; it holds no run
   state of its own.
   """
   use GenServer
 
   @table __MODULE__
+  @runs Module.concat(__MODULE__, Runs)
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -41,9 +48,38 @@ defmodule Workflow.Journal do
     end
   end
 
+  @doc """
+  Record `run_id` in the run index at its creation order. Idempotent — a resume of
+  an already-indexed run is a no-op — so it may be called on every `Run` entry.
+  """
+  @spec register_run(String.t()) :: :ok
+  def register_run(run_id) do
+    :ets.insert_new(@runs, {run_id, System.unique_integer([:monotonic, :positive])})
+    :ok
+  end
+
+  @doc "Every known `run_id`, oldest-created first."
+  @spec run_ids() :: [String.t()]
+  def run_ids do
+    @runs
+    |> :ets.tab2list()
+    |> Enum.sort_by(&elem(&1, 1))
+    |> Enum.map(&elem(&1, 0))
+  end
+
+  @doc "The most recently created `run_id`, or `nil` when no run has ever started."
+  @spec latest_run_id() :: String.t() | nil
+  def latest_run_id do
+    case run_ids() do
+      [] -> nil
+      ids -> List.last(ids)
+    end
+  end
+
   @impl true
   def init(:ok) do
     :ets.new(@table, [:named_table, :ordered_set, :public, read_concurrency: true])
+    :ets.new(@runs, [:named_table, :set, :public, read_concurrency: true])
     {:ok, %{}}
   end
 end

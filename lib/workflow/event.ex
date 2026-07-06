@@ -30,15 +30,22 @@ defmodule Workflow.Event do
   against, or `nil` for an unbounded run. Recording it here (not in process state)
   keeps the ledger a pure fold and survives resume: the target is read back from
   this journaled event rather than re-supplied.
+
+  `script_path` is the on-disk source the tree was compiled from (or `nil` when a
+  tree was supplied directly). Journaling it lets `resume` recover the workflow
+  from the run alone — recompiling the same path — so the read command surface
+  needs no separate script argument. The field is additive; older runs fold to
+  `nil` and stay resumable by re-supplying the tree.
   """
-  def run_started(%Workflow.Tree{} = tree, budget \\ nil) do
+  def run_started(%Workflow.Tree{} = tree, budget \\ nil, script_path \\ nil) do
     %__MODULE__{
       type: :run_started,
       payload: %{
         tree_name: tree.name,
         tree_version: tree.version,
         node_count: length(tree.nodes),
-        budget: budget
+        budget: budget,
+        script_path: script_path
       }
     }
   end

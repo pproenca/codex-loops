@@ -32,6 +32,18 @@ defmodule Workflow.ResumeTest do
     end
   end
 
+  # A fan-out region that precedes a gated agent, so a run can be held in flight
+  # *after* the whole parallel bracket is journaled but before the gate settles.
+  defmodule FanoutThenGate do
+    use Workflow
+
+    workflow "fanout-then-gate" do
+      parallel([agent("a"), agent("b")])
+      agent("gate")
+      return(:ok)
+    end
+  end
+
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
 
   defp await_lease_released(run_id, tries \\ 200) do
@@ -83,6 +95,44 @@ defmodule Workflow.ResumeTest do
     # Exactly one committed turn per address: agent "first" was not re-committed.
     committed = Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
     assert Enum.map(committed, & &1.payload.address) == [[0], [1]]
+  end
+
+  @tag :capture_log
+  test "resuming past a completed fan-out region reuses its brackets, not re-emits them" do
+    id = run_id()
+
+    # First run: both branches commit and the parallel region is fully bracketed;
+    # the writer then blocks inside the gate agent, mid-run.
+    {:ok, ^id, pid} =
+      Run.start(FanoutThenGate, run_id: id, provider: {GateProvider, sink: self(), gate_on: "gate"})
+
+    for p <- ~w(a b gate), do: assert_receive({:agent_called, ^p})
+    assert_receive {:at_agent, ^pid}
+
+    # The fan-out region is fully journaled before the crash: one started, both
+    # branches, one completed.
+    before = Journal.fold(id) |> Enum.map(& &1.type)
+    assert Enum.count(before, &(&1 == :parallel_started)) == 1
+    assert Enum.count(before, &(&1 == :parallel_completed)) == 1
+
+    kill_and_await(id, pid)
+
+    # Resume re-walks the tree from the top, re-entering the already-completed
+    # fan-out node before reaching the still-open gate.
+    assert {:ok, ^id} = Run.run(FanoutThenGate, run_id: id, provider: {EchoProvider, sink: self()})
+
+    # Only the uncommitted gate turn ran on resume; the settled branches replayed.
+    refute_received {:agent_called, "a"}
+    refute_received {:agent_called, "b"}
+    assert_received {:agent_called, "gate"}
+
+    # The bracket is exactly-once: resume did not double-emit the started/completed
+    # markers, so a fold that pairs them sees a single region.
+    types = Journal.fold(id) |> Enum.map(& &1.type)
+    assert Enum.count(types, &(&1 == :parallel_started)) == 1
+    assert Enum.count(types, &(&1 == :parallel_completed)) == 1
+
+    assert Status.of(id).state == :completed
   end
 
   @tag :capture_log

@@ -32,12 +32,12 @@ defmodule Workflow.Compiler do
   """
 
   alias Workflow.Tree
-  alias Workflow.Node.{Phase, Log, Agent, Return}
+  alias Workflow.Node.{Phase, Log, Agent, Return, Parallel, Pipeline}
   alias Workflow.Compiler.Finding
 
   # The closed combinator vocabulary. Determinism is a property of this set: it
   # contains no randomness or wall-clock node, so neither can be expressed.
-  @combinators [:agent, :log, :phase, :return]
+  @combinators [:agent, :log, :phase, :parallel, :pipeline, :return]
 
   # Options a schema-backed `agent` accepts, and the default retry budget when
   # `retries:` is omitted (total attempts = retries + 1).
@@ -113,6 +113,24 @@ defmodule Workflow.Compiler do
        )}
     end
   end
+
+  # `parallel [agent(...), ...]` — a barrier fan-out over a literal list of agent
+  # branches, optionally capped by `max_concurrency:`. Each branch is addressed
+  # `address ++ [branch_index]`, so branches journal and key independently.
+  defp node({:parallel, _meta, [branches]} = form, address, env) when is_list(branches),
+    do: parallel(branches, [], address, form, env)
+
+  defp node({:parallel, _meta, [branches, opts]} = form, address, env) when is_list(branches),
+    do: parallel(branches, opts, address, form, env)
+
+  # `pipeline items, [agent(...), ...]` — per-item lanes through ordered stages,
+  # optionally capped by `max_concurrency:`. `items` is a literal list; the lanes
+  # are expanded here into pre-addressed inert agents.
+  defp node({:pipeline, _meta, [items, stages]} = form, address, env),
+    do: pipeline(items, stages, [], address, form, env)
+
+  defp node({:pipeline, _meta, [items, stages, opts]} = form, address, env),
+    do: pipeline(items, stages, opts, address, form, env)
 
   # A known combinator invoked with the wrong argument shape: recoverable finding,
   # located at the declaration site.
@@ -209,6 +227,135 @@ defmodule Workflow.Compiler do
       :error -> {:ok, @default_retries}
       {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
       {:ok, _} -> {:error, Finding.at(env, form, "`agent` retries must be a non-negative integer")}
+    end
+  end
+
+  # --- Static fan-out combinators (parallel / pipeline) ---
+
+  defp parallel([], _opts, _address, form, env) do
+    {:error,
+     Finding.at(env, form, "`parallel` requires at least one branch",
+       hint: "parallel [agent(\"...\"), agent(\"...\")]"
+     )}
+  end
+
+  defp parallel(branches, opts, address, form, env) do
+    with {:ok, cap} <- concurrency_opt(opts, form, env),
+         {:ok, nodes} <- agent_branches(branches, address, env) do
+      {:ok, %Parallel{address: address, branches: nodes, max_concurrency: cap}}
+    end
+  end
+
+  # Each branch must be a single `agent` turn (the concurrency shape fans out agent
+  # turns). Reuse `node/3` so a malformed branch raises the same located diagnostic
+  # it would at top level; then require the result be an %Agent{}.
+  defp agent_branches(branches, address, env) do
+    branches
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {branch, i}, {:ok, acc} ->
+      case node(branch, address ++ [i], env) do
+        {:ok, %Agent{} = agent} ->
+          {:cont, {:ok, [agent | acc]}}
+
+        {:ok, _other} ->
+          {:halt,
+           {:error,
+            Finding.at(env, branch, "`parallel` branches must be `agent` turns",
+              hint: "each branch is one agent call, e.g. agent(\"...\")"
+            )}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      err -> err
+    end
+  end
+
+  defp pipeline(items_ast, stages_ast, opts, address, form, env) do
+    with {:ok, items} <- pipeline_items(items_ast, form, env),
+         {:ok, cap} <- concurrency_opt(opts, form, env),
+         {:ok, stages} <- pipeline_stages(stages_ast, address, form, env) do
+      # Expand each item into its own lane of pre-addressed agents:
+      # lane `i`, stage `s` lives at `address ++ [i, s]`.
+      lanes =
+        items
+        |> Enum.with_index()
+        |> Enum.map(fn {_item, i} ->
+          Enum.with_index(stages, fn %Agent{} = stage, s -> %{stage | address: address ++ [i, s]} end)
+        end)
+
+      {:ok, %Pipeline{address: address, items: items, lanes: lanes, max_concurrency: cap}}
+    end
+  end
+
+  # `items` must be a non-empty literal list, materialized to plain data so lanes
+  # (and their journalled item values) stay inert.
+  defp pipeline_items(items_ast, form, env) do
+    if is_list(items_ast) and Macro.quoted_literal?(items_ast) do
+      case materialize(items_ast) do
+        [] ->
+          {:error, Finding.at(env, form, "`pipeline` requires at least one item")}
+
+        items ->
+          {:ok, items}
+      end
+    else
+      {:error,
+       Finding.at(env, form, "`pipeline` items must be a literal list",
+         hint: ~s|pass a compile-time list, e.g. pipeline ["a", "b"], [agent("...")]|
+       )}
+    end
+  end
+
+  # Stage templates are agent turns; their address is overwritten per lane, so parse
+  # them at a placeholder address and keep only prompt/schema/retries.
+  defp pipeline_stages([], _address, form, env),
+    do: {:error, Finding.at(env, form, "`pipeline` requires at least one stage")}
+
+  defp pipeline_stages(stages, address, _form, env) when is_list(stages) do
+    stages
+    |> Enum.reduce_while({:ok, []}, fn stage, {:ok, acc} ->
+      case node(stage, address, env) do
+        {:ok, %Agent{} = agent} ->
+          {:cont, {:ok, [agent | acc]}}
+
+        {:ok, _other} ->
+          {:halt,
+           {:error,
+            Finding.at(env, stage, "`pipeline` stages must be `agent` turns",
+              hint: "each stage is one agent call, e.g. agent(\"...\")"
+            )}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      err -> err
+    end
+  end
+
+  defp pipeline_stages(_stages, _address, form, env),
+    do: {:error, Finding.at(env, form, "`pipeline` stages must be a literal list of agents")}
+
+  # The only fan-out option, shared by both combinators.
+  defp concurrency_opt([], _form, _env), do: {:ok, nil}
+
+  defp concurrency_opt(opts, form, env) do
+    if keyword_literal?(opts) and Keyword.keyword?(opts) and Keyword.keys(opts) == [:max_concurrency] do
+      case Keyword.fetch!(opts, :max_concurrency) do
+        n when is_integer(n) and n > 0 -> {:ok, n}
+        _ -> {:error, Finding.at(env, form, "`max_concurrency` must be a positive integer")}
+      end
+    else
+      {:error,
+       Finding.at(env, form, "invalid fan-out options",
+         hint: "the only option is `max_concurrency: <pos integer>`"
+       )}
     end
   end
 

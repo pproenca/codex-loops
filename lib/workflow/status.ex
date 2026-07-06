@@ -66,6 +66,13 @@ defmodule Workflow.Status do
     %{s | state: :failed, failure: failure} |> tick()
   end
 
+  # Fan-out markers are structural brackets; the branch/lane agent turns they enclose
+  # already fold into `agents`/`usage` via `agent_committed`. They advance the event
+  # count so the fold stays total over the versioned, additive log.
+  defp apply_event(%Event{type: type}, s)
+       when type in [:parallel_started, :parallel_completed, :pipeline_started, :pipeline_completed],
+       do: tick(s)
+
   defp apply_event(%Event{type: :run_completed, payload: p}, s) do
     %{s | state: :completed, result: p.value} |> tick()
   end

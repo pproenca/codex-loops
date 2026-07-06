@@ -102,6 +102,46 @@ defmodule Workflow.Event do
     }
   end
 
+  @doc """
+  Barrier fan-out markers. `parallel_started` records the branch count so a fold can
+  see the fan-out width; `parallel_completed` marks the barrier join. Each branch's
+  own paid turn is journaled as an ordinary `agent_*` event at its branch address,
+  so these markers carry no results — they only bracket the concurrent region.
+  """
+  def parallel_started(%Workflow.Node.Parallel{} = node) do
+    %__MODULE__{
+      type: :parallel_started,
+      payload: %{address: node.address, branch_count: length(node.branches)}
+    }
+  end
+
+  def parallel_completed(%Workflow.Node.Parallel{} = node) do
+    %__MODULE__{type: :parallel_completed, payload: %{address: node.address}}
+  end
+
+  @doc """
+  Per-item fan-out markers. `pipeline_started` records the concrete `items` and the
+  stage count; `pipeline_completed` marks the join. Each item lane's stage turns are
+  journaled as ordinary `agent_*` events at their `[item, stage]` addresses.
+  """
+  def pipeline_started(%Workflow.Node.Pipeline{} = node) do
+    stage_count = node.lanes |> List.first([]) |> length()
+
+    %__MODULE__{
+      type: :pipeline_started,
+      payload: %{
+        address: node.address,
+        items: node.items,
+        item_count: length(node.items),
+        stage_count: stage_count
+      }
+    }
+  end
+
+  def pipeline_completed(%Workflow.Node.Pipeline{} = node) do
+    %__MODULE__{type: :pipeline_completed, payload: %{address: node.address}}
+  end
+
   def run_completed(value) do
     %__MODULE__{type: :run_completed, payload: %{value: value}}
   end

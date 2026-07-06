@@ -19,6 +19,12 @@
       "skillPath": "skills/productivity/grill-me/SKILL.md",
       "computedHash": "f321507f77702a54af1db66549ec1685fc625390d06c57d7949cdcda8eb1b5c7"
     },
+    "language-spec-author": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/language-spec-author/SKILL.md",
+      "computedHash": "0e531f2bedb3394e9ec3536335e923128cf5204d4be2a8bf68bf959a7b6d3394"
+    },
     "setup-matt-pocock-skills": {
       "source": "mattpocock/skills",
       "sourceType": "github",

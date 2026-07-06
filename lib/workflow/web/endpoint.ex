@@ -1,0 +1,22 @@
+defmodule Workflow.Web.Endpoint do
+  @moduledoc """
+  The HTTP/WebSocket endpoint for the live read surface. It exists only to serve the
+  journal-projecting `Workflow.Web.RunLive`; it owns no run state. Its `pubsub_server`
+  is `Workflow.PubSub` — the same post-commit bus the run writer broadcasts on — so a
+  connected LiveView is driven by committed events, never by writer process state.
+  """
+  use Phoenix.Endpoint, otp_app: :codex_loops
+
+  @session_options [
+    store: :cookie,
+    key: "_codex_loops_key",
+    signing_salt: "TQN5SXrkEUE=",
+    same_site: "Lax"
+  ]
+
+  socket "/live", Phoenix.LiveView.Socket,
+    websocket: [connect_info: [session: @session_options]]
+
+  plug Plug.Session, @session_options
+  plug Workflow.Web.Router
+end

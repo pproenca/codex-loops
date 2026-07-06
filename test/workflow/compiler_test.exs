@@ -1,7 +1,9 @@
 defmodule Workflow.CompilerTest do
   @moduledoc """
   Exercises the DSL at its highest seam — `Workflow.Compiler.parse/2` — directly
-  against `quote do ... end` input, with no macro expansion involved.
+  against `quote do ... end` / `Code.string_to_quoted!/1` input, with no macro
+  expansion involved. String-sourced bodies give precise, asserted line numbers so
+  we can prove diagnostics are caller-located.
   """
   use ExUnit.Case, async: true
 
@@ -9,62 +11,130 @@ defmodule Workflow.CompilerTest do
   alias Workflow.Compiler.Finding
   alias Workflow.Node.{Phase, Log, Agent, Return}
 
-  test "parses the demo body into an ordered, addressed, inert tree" do
-    body =
-      quote do
-        phase("p")
-        log("hi")
-        agent("say hello")
-        return(:ok)
-      end
+  # An env whose file we control, so located messages are readable and asserted.
+  defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
 
-    assert {:ok, tree} = Compiler.parse(body, __ENV__)
+  # Parse a source string whose line numbers we can assert against directly.
+  defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
 
-    assert [
-             %Phase{address: [0], name: "p"},
-             %Log{address: [1], message: "hi"},
-             %Agent{address: [2], prompt: "say hello"},
-             %Return{address: [3], value: :ok}
-           ] = tree.nodes
-  end
+  describe "accepting the closed vocabulary" do
+    test "parses the demo body into an ordered, addressed, inert tree" do
+      body =
+        quote do
+          phase("p")
+          log("hi")
+          agent("say hello")
+          return(:ok)
+        end
 
-  test "parses a single-statement body (not wrapped in a __block__)" do
-    assert {:ok, tree} = Compiler.parse(quote(do: log("only")), __ENV__)
-    assert [%Log{address: [0], message: "only"}] = tree.nodes
-  end
+      assert {:ok, tree} = Compiler.parse(body, env())
 
-  test "the tree contains no closures anywhere in the term" do
-    {:ok, tree} = Compiler.parse(quote(do: agent("go")), __ENV__)
-    refute contains_function?(tree)
-  end
+      assert [
+               %Phase{address: [0], name: "p"},
+               %Log{address: [1], message: "hi"},
+               %Agent{address: [2], prompt: "say hello"},
+               %Return{address: [3], value: :ok}
+             ] = tree.nodes
+    end
 
-  test "raises on an unknown form outside the vocabulary" do
-    body =
-      quote do
-        phase("p")
-        frobnicate("boom")
-      end
+    test "parses a single-statement body (not wrapped in a __block__)" do
+      assert {:ok, tree} = Compiler.parse(quote(do: return(:ok)), env())
+      assert [%Return{address: [0], value: :ok}] = tree.nodes
+    end
 
-    assert_raise Workflow.CompileError, ~r/unknown workflow form/, fn ->
-      Compiler.parse(body, __ENV__)
+    test "the accepted tree contains no closures anywhere in the term" do
+      {:ok, tree} = parse(~s|agent("go")\nreturn(:ok)|)
+      refute contains_function?(tree)
     end
   end
 
-  test "raises on a closure — the forbidden fn -> ... end form" do
-    body = quote(do: fn -> :nope end)
+  describe "forbidden-form catalog (raises, located)" do
+    test "rejects a call into an external module — Enum" do
+      err = assert_raise Workflow.CompileError, fn -> parse("Enum.map([], 1)\nreturn(:ok)") end
+      assert err.message =~ "external modules"
+      assert err.message =~ "workflows/demo.ex:1"
+    end
 
-    assert_raise Workflow.CompileError, fn ->
-      Compiler.parse(body, __ENV__)
+    test "rejects randomness — :rand — as non-deterministic" do
+      err = assert_raise Workflow.CompileError, fn -> parse(":rand.uniform()\nreturn(:ok)") end
+      assert err.message =~ "external modules"
+      assert err.message =~ ":rand.uniform"
+    end
+
+    test "rejects wall-clock — System — as non-deterministic" do
+      err =
+        assert_raise Workflow.CompileError, fn ->
+          parse("System.monotonic_time()\nreturn(:ok)")
+        end
+
+      assert err.message =~ "external modules"
+      assert err.message =~ "System.monotonic_time"
+    end
+
+    test "rejects an anonymous function — the forbidden fn -> ... end form" do
+      err = assert_raise Workflow.CompileError, fn -> parse("fn -> :nope end\nreturn(:ok)") end
+      assert err.message =~ "anonymous functions"
+      assert err.message =~ "workflows/demo.ex:1"
+    end
+
+    test "rejects a stray literal/variable outside the vocabulary" do
+      assert_raise Workflow.CompileError, fn -> parse("42\nreturn(:ok)") end
+      assert_raise Workflow.CompileError, fn -> parse("some_var\nreturn(:ok)") end
     end
   end
 
-  test "returns a finding for a known combinator with the wrong argument shape" do
-    assert {:error, %Finding{}} = Compiler.parse(quote(do: agent(:not_a_string)), __ENV__)
-    assert {:error, %Finding{}} = Compiler.parse(quote(do: phase("a", "b")), __ENV__)
+  describe "unknown combinators carry a closed-vocabulary suggestion" do
+    test "a near-miss surfaces a 'did you mean' from the vocabulary, at the user's line" do
+      err = assert_raise Workflow.CompileError, fn -> parse(~s|phase("p")\nretrun(:ok)|) end
+
+      assert err.message =~ "unknown combinator `retrun`"
+      assert err.message =~ "did you mean `return`"
+      assert err.message =~ "workflows/demo.ex:2"
+    end
+
+    test "a far miss still lists the closed vocabulary" do
+      err =
+        assert_raise Workflow.CompileError, fn -> parse(~s|frobnicate("boom")\nreturn(:ok)|) end
+
+      assert err.message =~ "unknown combinator `frobnicate`"
+      assert err.message =~ "expected one of: agent, log, phase, return"
+    end
   end
 
-  test "returns a finding when return is given a non-literal value" do
-    assert {:error, %Finding{}} = Compiler.parse(quote(do: return(compute())), __ENV__)
+  describe "per-node option errors (findings, located at the declaration)" do
+    test "a known combinator with the wrong argument shape returns a located finding" do
+      assert {:error, %Finding{message: msg, line: 1}} =
+               parse("agent(:not_a_string)\nreturn(:ok)")
+
+      assert msg =~ "`agent` was called with invalid arguments"
+
+      assert {:error, %Finding{}} = parse(~s|phase("a", "b")\nreturn(:ok)|)
+    end
+
+    test "return given a non-literal value is a located finding" do
+      assert {:error, %Finding{line: 1} = f} = parse("return(compute())")
+      assert f.message =~ "`return` expects a literal value"
+    end
+  end
+
+  describe "whole-DSL invariants (findings, located at the offending declaration)" do
+    test "duplicate phase names fail, citing the second declaration's line" do
+      assert {:error, %Finding{line: 2} = f} =
+               parse(~s|phase("x")\nphase("x")\nreturn(:ok)|)
+
+      assert f.message =~ ~s|duplicate phase name "x"|
+      assert Finding.format(f) =~ "workflows/demo.ex:2"
+    end
+
+    test "a workflow with no return fails, located at the workflow declaration" do
+      env = %{__ENV__ | file: "workflows/demo.ex", line: 7}
+
+      assert {:error, %Finding{line: 7} = f} =
+               Compiler.parse(Code.string_to_quoted!(~s|phase("p")\nlog("hi")|), env)
+
+      assert f.message =~ "must contain a `return`"
+      assert Finding.format(f) =~ "workflows/demo.ex:7"
+    end
   end
 
   # A term with no functions anywhere: proves inertness/serializability.

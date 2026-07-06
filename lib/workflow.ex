@@ -43,7 +43,7 @@ defmodule Workflow do
         end
 
       {:error, finding} ->
-        raise Workflow.CompileError, finding.message
+        raise Workflow.CompileError, Workflow.Compiler.Finding.format(finding)
     end
   end
 

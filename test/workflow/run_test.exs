@@ -101,11 +101,11 @@ defmodule Workflow.RunTest do
         %Usage{total_tokens: 8}
       )
 
-    assert {:ok, %{"echo" => "cached"}, %Usage{total_tokens: 8}} =
-             Idempotency.committed_effect([committed], [2], 0)
+    assert {:committed, %{"echo" => "cached"}, %Usage{total_tokens: 8}} =
+             Idempotency.resolve([committed], [2], 0)
 
-    assert :none = Idempotency.committed_effect([], [2], 0)
-    assert :none = Idempotency.committed_effect([committed], [9], 0)
+    assert :none = Idempotency.resolve([], [2], 0)
+    assert :none = Idempotency.resolve([committed], [9], 0)
   end
 
   test "one live writer per run: a second start for the same run_id is rejected" do

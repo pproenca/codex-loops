@@ -15,7 +15,7 @@ defmodule Workflow.Run.Writer do
   """
   use GenServer, restart: :temporary
 
-  alias Workflow.{Journal, Event, Idempotency, IdempotencyKey, PubSub}
+  alias Workflow.{Journal, Event, Idempotency, IdempotencyKey, Schema, Status, PubSub}
   alias Workflow.Node.{Phase, Log, Agent, Return}
 
   def start_link(opts) do
@@ -38,46 +38,115 @@ defmodule Workflow.Run.Writer do
 
   defp execute(%{run_id: run_id, tree: tree, provider: provider}) do
     prior = Journal.fold(run_id)
+
+    # Resume is a pure fold. If the journal already folds to a terminal state, that
+    # state is reused verbatim: no fresh `run_started` is appended (which would
+    # un-terminate the read model) and no settled turn is re-run.
+    case Status.fold(prior, run_id) do
+      %Status{state: :completed} ->
+        {:ok, run_id}
+
+      %Status{state: :failed, failure: failure} ->
+        {:error, {:malformed_output, failure.address, failure.reason}}
+
+      %Status{} ->
+        run_tree(run_id, tree, provider, prior)
+    end
+  end
+
+  defp run_tree(run_id, tree, provider, prior) do
     seq = Journal.last_seq(run_id) + 1
 
-    seq = commit(run_id, seq, Event.run_started(tree))
+    # A fresh run gets its start marker; a resume already carries one, so appending
+    # another would falsely re-mark the folded run as `:running`.
+    seq = if prior == [], do: commit(run_id, seq, Event.run_started(tree)), else: seq
 
-    {seq, return_value} =
-      Enum.reduce(tree.nodes, {seq, nil}, fn node, {seq, return_value} ->
-        run_node(node, run_id, provider, prior, seq, return_value)
+    outcome =
+      Enum.reduce_while(tree.nodes, {seq, nil}, fn node, {seq, return_value} ->
+        case run_node(node, run_id, provider, prior, seq, return_value) do
+          {:cont, seq, return_value} -> {:cont, {seq, return_value}}
+          {:halt, seq, reason} -> {:halt, {:failed, seq, reason}}
+        end
       end)
 
-    _seq = commit(run_id, seq, Event.run_completed(return_value))
-    {:ok, run_id}
+    case outcome do
+      # A node failed closed: its terminal `agent_failed` is already journaled.
+      {:failed, _seq, reason} ->
+        {:error, reason}
+
+      {seq, return_value} ->
+        _seq = commit(run_id, seq, Event.run_completed(return_value))
+        {:ok, run_id}
+    end
   end
 
   defp run_node(%Phase{} = node, run_id, _provider, _prior, seq, return_value),
-    do: {commit(run_id, seq, Event.phase_entered(node)), return_value}
+    do: {:cont, commit(run_id, seq, Event.phase_entered(node)), return_value}
 
   defp run_node(%Log{} = node, run_id, _provider, _prior, seq, return_value),
-    do: {commit(run_id, seq, Event.log_emitted(node)), return_value}
+    do: {:cont, commit(run_id, seq, Event.log_emitted(node)), return_value}
 
   defp run_node(%Return{} = node, _run_id, _provider, _prior, seq, _return_value),
-    do: {seq, node.value}
+    do: {:cont, seq, node.value}
 
   defp run_node(%Agent{} = node, run_id, provider, prior, seq, return_value) do
     iteration = 0
 
-    case Idempotency.committed_effect(prior, node.address, iteration) do
-      # Exactly-once: a committed turn is replayed from the journal, never re-run.
-      {:ok, _result, _usage} ->
-        {seq, return_value}
+    case Idempotency.resolve(prior, node.address, iteration) do
+      # Exactly-once: a settled turn is replayed from the journal, never re-run.
+      {:committed, _result, _usage} ->
+        {:cont, seq, return_value}
+
+      {:failed, reason} ->
+        {:halt, seq, {:malformed_output, node.address, reason}}
+
+      # Mid-flight resume: the first `next` attempts already paid and journaled a
+      # rejection, so pick the loop back up at `next` — never re-call the provider
+      # for an attempt the journal already ledgered.
+      {:resume, next} ->
+        attempt(node, run_id, provider, seq, iteration, next, return_value)
 
       :none ->
-        {:ok, result, usage} = call_provider(provider, node.prompt)
-
-        key = %IdempotencyKey{run_id: run_id, node_path: node.address, iteration: iteration}
-        event = Event.agent_committed(node, iteration, key, result, usage)
-        {commit(run_id, seq, event), return_value}
+        attempt(node, run_id, provider, seq, iteration, 0, return_value)
     end
   end
 
-  defp call_provider({module, opts}, prompt), do: module.run_agent(prompt, opts)
+  # A schemaless turn proceeds on any output; a schema-backed turn is fail-closed
+  # with on-thread retry up to `node.retries`. On valid output, commit and
+  # continue; on invalid, journal the rejection and retry until the budget is
+  # spent, then fail the node.
+  defp attempt(%Agent{schema: nil} = node, run_id, provider, seq, iteration, _attempt, return_value) do
+    {:ok, result, usage} = call_provider(provider, node.prompt, nil)
+    key = key(run_id, node.address, iteration)
+    {:cont, commit(run_id, seq, Event.agent_committed(node, iteration, key, result, usage)), return_value}
+  end
+
+  defp attempt(%Agent{} = node, run_id, provider, seq, iteration, attempt, return_value) do
+    {:ok, output, usage} = call_provider(provider, node.prompt, node.schema)
+
+    case Schema.validate(node.schema, output) do
+      {:ok, validated} ->
+        key = key(run_id, node.address, iteration)
+        event = Event.agent_committed(node, iteration, key, validated, usage)
+        {:cont, commit(run_id, seq, event), return_value}
+
+      {:error, reason} ->
+        rejected = Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage)
+        seq = commit(run_id, seq, rejected)
+
+        if attempt < node.retries do
+          attempt(node, run_id, provider, seq, iteration, attempt + 1, return_value)
+        else
+          event = Event.agent_failed(node, iteration, attempt + 1, reason)
+          {:halt, commit(run_id, seq, event), {:malformed_output, node.address, reason}}
+        end
+    end
+  end
+
+  defp key(run_id, address, iteration),
+    do: %IdempotencyKey{run_id: run_id, node_path: address, iteration: iteration}
+
+  defp call_provider({module, opts}, prompt, schema), do: module.run_agent(prompt, schema, opts)
 
   defp commit(run_id, seq, %Event{} = event) do
     event = %{event | run_id: run_id, seq: seq}

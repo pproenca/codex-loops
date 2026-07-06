@@ -1,13 +1,16 @@
 defmodule Workflow.Provider do
   @moduledoc """
-  The contract an agent backend must satisfy. Results are **opaque** in this slice:
-  no schema, no retry. Every call reports `Usage` so the budget ledger can fold
-  over agent events in a later slice.
+  The contract an agent backend must satisfy. `schema` is the raw JSON-schema map
+  the caller wants the output to conform to, or `nil` for a schemaless turn — a
+  real backend uses it to request structured output; the runner independently
+  validates and, on failure, retries or fails the node (the provider never sees
+  retry policy). Every call reports `Usage` so the budget ledger can fold over
+  agent events.
   """
 
   @type result :: term()
 
-  @callback run_agent(prompt :: String.t(), opts :: term()) ::
+  @callback run_agent(prompt :: String.t(), schema :: map() | nil, opts :: term()) ::
               {:ok, result(), Workflow.Provider.Usage.t()}
 end
 

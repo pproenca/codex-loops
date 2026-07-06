@@ -58,6 +58,43 @@ defmodule Workflow.Event do
     }
   end
 
+  @doc """
+  A single fail-closed attempt whose output did not conform to the schema. Records
+  the rejected output and the validator's reason so replay reconstructs every retry
+  decision; the paid `usage` is still ledgered.
+  """
+  def agent_attempt_rejected(%Workflow.Node.Agent{} = node, iteration, attempt, output, reason, usage) do
+    %__MODULE__{
+      type: :agent_attempt_rejected,
+      payload: %{
+        address: node.address,
+        iteration: iteration,
+        attempt: attempt,
+        prompt: node.prompt,
+        output: output,
+        reason: reason,
+        usage: usage
+      }
+    }
+  end
+
+  @doc """
+  Terminal node failure after the retry budget is exhausted (exit-8 / malformed
+  structured output). This is the run's terminal event on the fail path — there is
+  no `run_completed`.
+  """
+  def agent_failed(%Workflow.Node.Agent{} = node, iteration, attempts, reason) do
+    %__MODULE__{
+      type: :agent_failed,
+      payload: %{
+        address: node.address,
+        iteration: iteration,
+        attempts: attempts,
+        reason: reason
+      }
+    }
+  end
+
   def run_completed(value) do
     %__MODULE__{type: :run_completed, payload: %{value: value}}
   end

@@ -30,14 +30,25 @@ end
 
 defmodule Workflow.Node.Agent do
   @moduledoc """
-  A schemaless agent turn. The prompt is a static literal; the provider result is
-  opaque (no schema, no retry — those are later slices). Its execution is a paid
-  effect keyed for exactly-once by `(run_id, address, iteration)`.
+  An agent turn. The prompt is a static literal; execution is a paid effect keyed
+  for exactly-once by `(run_id, address, iteration)`.
+
+  `schema` is an inert, raw JSON-schema **map literal** (or `nil` for a schemaless
+  turn). When present the turn is **fail-closed**: the provider's output is
+  validated against the schema, invalid output is retried on-thread up to
+  `retries` times, and exhausting the budget fails the node. `schema`/`retries`
+  are compile-time constants materialized from literals, so the node stays inert
+  and serializable — no closure is ever captured.
   """
   @enforce_keys [:address, :prompt]
-  defstruct [:address, :prompt]
+  defstruct [:address, :prompt, schema: nil, retries: 2]
 
-  @type t :: %__MODULE__{address: Workflow.Node.address(), prompt: String.t()}
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          prompt: String.t(),
+          schema: map() | nil,
+          retries: non_neg_integer()
+        }
 end
 
 defmodule Workflow.Node.Return do

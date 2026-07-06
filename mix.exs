@@ -25,7 +25,8 @@ defmodule CodexLoops.MixProject do
 
   defp deps do
     [
-      {:phoenix_pubsub, "~> 2.1"}
+      {:phoenix_pubsub, "~> 2.1"},
+      {:stream_data, "~> 1.3", only: :test}
     ]
   end
 end

@@ -74,6 +74,34 @@ defmodule Workflow.CLITest do
     """)
   end
 
+  defp syntax_error_workflow do
+    dir = Path.join(System.tmp_dir!(), "agent_loops_cli_test")
+    File.mkdir_p!(dir)
+    path = Path.join(dir, "wf_syntax_#{System.unique_integer([:positive])}.exs")
+
+    File.write!(path, """
+    defmodule CLISyntaxFixture#{System.unique_integer([:positive])} do
+      use Workflow
+      workflow "bad" do
+        agent "unterminated
+        return :ok
+      end
+    end
+    """)
+
+    path
+  end
+
+  defp compile_error_workflow do
+    write_workflow("""
+    unquote(:outside_quote)
+
+    workflow "compile-bad" do
+      return :ok
+    end
+    """)
+  end
+
   defp run_id, do: "run_cli_#{System.unique_integer([:positive])}"
 
   # --- Seam helpers: capture stdout / stderr and the returned exit code ---
@@ -128,11 +156,33 @@ defmodule Workflow.CLITest do
     assert error["message"] =~ "unknown combinator `frobnicate`"
   end
 
+  test "validate maps syntax errors to the json validation envelope" do
+    {code, err} = on_stderr(["validate", syntax_error_workflow(), "--json"])
+
+    assert code == 6
+    error = last_error(err)
+    assert error["code"] == "validation"
+    assert error["exitCode"] == 6
+    assert error["message"] =~ "missing terminator"
+  end
+
+  test "validate maps ordinary compile errors to the json validation envelope" do
+    {code, err} = on_stderr(["validate", compile_error_workflow(), "--json"])
+
+    assert code == 6
+    error = last_error(err)
+    assert error["code"] == "validation"
+    assert error["exitCode"] == 6
+    assert error["message"] =~ "cannot compile module"
+  end
+
   # --- run / test ---
 
   test "run drives a workflow to completion (json payload + folded journal)" do
     id = run_id()
-    {code, out} = on_stdout(["run", demo_workflow(), "--run-id", id, "--provider", "mock", "--json"])
+
+    {code, out} =
+      on_stdout(["run", demo_workflow(), "--run-id", id, "--provider", "mock", "--json"])
 
     assert code == 0
     payload = sole_payload(out)
@@ -159,7 +209,8 @@ defmodule Workflow.CLITest do
   test "test pins the mock provider even when --provider codex is passed" do
     id = run_id()
     # codex would shell out; the run staying offline and completing proves the pin.
-    {code, out} = on_stdout(["test", demo_workflow(), "--run-id", id, "--provider", "codex", "--json"])
+    {code, out} =
+      on_stdout(["test", demo_workflow(), "--run-id", id, "--provider", "codex", "--json"])
 
     assert code == 0
     payload = sole_payload(out)
@@ -169,7 +220,9 @@ defmodule Workflow.CLITest do
 
   test "run of a fail-closed schema turn exits 8 with a malformed-output error" do
     id = run_id()
-    {code, err} = on_stderr(["run", schema_fail_workflow(), "--run-id", id, "--provider", "mock", "--json"])
+
+    {code, err} =
+      on_stderr(["run", schema_fail_workflow(), "--run-id", id, "--provider", "mock", "--json"])
 
     assert code == 8
     error = last_error(err)
@@ -192,7 +245,8 @@ defmodule Workflow.CLITest do
   end
 
   test "a non-positive budget is a usage error (exit 2)" do
-    {code, err} = on_stderr(["run", demo_workflow(), "--provider", "mock", "--budget", "0", "--json"])
+    {code, err} =
+      on_stderr(["run", demo_workflow(), "--provider", "mock", "--budget", "0", "--json"])
 
     assert code == 2
     assert last_error(err)["code"] == "usage"

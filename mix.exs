@@ -30,6 +30,7 @@ defmodule CodexLoops.MixProject do
       {:phoenix, "~> 1.7"},
       {:phoenix_live_view, "~> 1.0"},
       {:jason, "~> 1.4"},
+      {:exqlite, "~> 0.38.0"},
       {:bandit, "~> 1.5"},
       {:lazy_html, ">= 0.1.0", only: :test},
       {:stream_data, "~> 1.3", only: :test}

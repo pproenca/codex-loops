@@ -42,7 +42,12 @@ defmodule Workflow.Compiler do
     Pipeline,
     Collect,
     WhileBudget,
-    UntilDry
+    UntilDry,
+    Verify,
+    Judge,
+    Synthesize,
+    FanOut,
+    BudgetSlices
   }
 
   alias Workflow.Compiler.Finding
@@ -58,8 +63,29 @@ defmodule Workflow.Compiler do
     :return,
     :collect,
     :while_budget,
-    :until_dry
+    :until_dry,
+    :verify,
+    :judge,
+    :synthesize,
+    :fan_out
   ]
+
+  # A voter/scorer casts a fail-closed, machine-checkable verdict/score, so its
+  # output is schema-bound. Retries are disabled: a malformed vote/score is a hard
+  # failure of the panel rather than a re-roll that could hide non-determinism.
+  @verdict_schema %{
+    "type" => "object",
+    "properties" => %{"verdict" => %{"type" => "boolean"}},
+    "required" => ["verdict"]
+  }
+
+  @score_schema %{
+    "type" => "object",
+    "properties" => %{"score" => %{"type" => "number"}},
+    "required" => ["score"]
+  }
+
+  @pick_strategies [:max_score, :min_score]
 
   # Combinators a loop body may contain. Loops, fan-out, and `return` are rejected
   # inside a body, so the per-iteration key stays a single integer and each loop
@@ -201,6 +227,82 @@ defmodule Workflow.Compiler do
          body: body,
          max_iterations: cap
        }}
+    end
+  end
+
+  # `verify subject, voters: N, threshold: :majority` /
+  # `verify subject, lenses: [:a, :b], threshold: :unanimous` — submit a literal
+  # finding to a bounded panel of votes and survive only when `threshold` confirm.
+  # The panel is fixed at author time (a compile-time constant width), so the voters
+  # are pre-expanded into inert, pre-addressed, schema-bound agents.
+  defp node({:verify, _meta, [subject, opts]} = form, address, env) do
+    with {:ok, lit} <- verify_subject(subject, form, env),
+         :ok <- only_keys(opts, [:voters, :lenses, :threshold], form, env),
+         {:ok, mode} <- verify_mode(opts, form, env),
+         {:ok, threshold} <- verify_threshold(opts, mode, form, env) do
+      {:ok,
+       %Verify{
+         address: address,
+         subject: lit,
+         mode: mode,
+         voters: verify_voters(mode, lit, address),
+         threshold: threshold
+       }}
+    end
+  end
+
+  # `judge candidates, by: [:c1, :c2], pick: :max_score` — score each literal
+  # candidate along each criterion and pick a winner. The scoring grid (candidates ×
+  # criteria, both compile-time constants) is pre-expanded into inert, pre-addressed,
+  # schema-bound scorer agents.
+  defp node({:judge, _meta, [candidates, opts]} = form, address, env) do
+    with {:ok, list} <- judge_candidates(candidates, form, env),
+         :ok <- only_keys(opts, [:by, :pick], form, env),
+         {:ok, by} <- judge_by(opts, form, env),
+         {:ok, pick} <- judge_pick(opts, form, env) do
+      {:ok,
+       %Judge{
+         address: address,
+         candidates: list,
+         by: by,
+         pick: pick,
+         scorers: judge_scorers(list, by, address)
+       }}
+    end
+  end
+
+  # `synthesize inputs, "prompt"` — fold literal inputs into one result under a
+  # static prompt. Both are compile-time literals, so the node stays inert.
+  defp node({:synthesize, _meta, [inputs, prompt]} = form, address, env)
+       when is_binary(prompt) do
+    if Macro.quoted_literal?(inputs) do
+      {:ok, %Synthesize{address: address, inputs: materialize(inputs), prompt: prompt}}
+    else
+      {:error,
+       Finding.at(env, form, "`synthesize` inputs must be a literal",
+         hint: "pass compile-time constants; a workflow cannot compute inputs at runtime"
+       )}
+    end
+  end
+
+  defp node({:synthesize, _meta, [_inputs, _prompt]} = form, _address, env) do
+    {:error,
+     Finding.at(env, form, "`synthesize` prompt must be a literal string",
+       hint: ~s|synthesize inputs, "a static instruction"|
+     )}
+  end
+
+  # `fan_out width: budget_slices(per: N)[, max_concurrency: M] do <body> end` —
+  # run the body across `floor(remaining / N)` concurrent branches. The width is a
+  # runtime-owned budget decision, never author arithmetic, so `width:` accepts only
+  # a `budget_slices(per:)` form.
+  defp node({:fan_out, _meta, args} = form, address, env) do
+    with {:ok, opts, block} <- loop_call(args, form, env),
+         :ok <- only_keys(opts, [:width, :max_concurrency], form, env),
+         {:ok, width} <- fan_out_width(opts, form, env),
+         {:ok, cap} <- fan_out_concurrency(opts, form, env),
+         {:ok, body} <- fan_out_body(block, address, form, env) do
+      {:ok, %FanOut{address: address, width: width, body: body, max_concurrency: cap}}
     end
   end
 
@@ -512,7 +614,17 @@ defmodule Workflow.Compiler do
     do: {:error, Finding.at(env, form, "`collect` requires `into: :name`")}
 
   defp body_node({combinator, _meta, _args} = form, _address, env)
-       when combinator in [:while_budget, :until_dry, :parallel, :pipeline, :return] do
+       when combinator in [
+              :while_budget,
+              :until_dry,
+              :parallel,
+              :pipeline,
+              :return,
+              :verify,
+              :judge,
+              :synthesize,
+              :fan_out
+            ] do
     {:error,
      Finding.at(env, form, "`#{combinator}` is not allowed inside a loop body",
        hint: "a loop body may contain: #{Enum.join(@body_combinators, ", ")}"
@@ -607,6 +719,260 @@ defmodule Workflow.Compiler do
          )}
     end
   end
+
+  # --- Quality combinators: verify / judge / synthesize / fan_out ---
+
+  defp verify_subject(subject, form, env) do
+    if Macro.quoted_literal?(subject) do
+      {:ok, materialize(subject)}
+    else
+      {:error,
+       Finding.at(env, form, "`verify` subject must be a literal",
+         hint: "pass a compile-time finding, e.g. verify \"the bug reproduces\", voters: 3"
+       )}
+    end
+  end
+
+  # Exactly one of `voters:` / `lenses:` selects the panel; both or neither is an
+  # error. Counts are fixed at author time, so the fan-out width is a constant.
+  defp verify_mode(opts, form, env) do
+    case {Keyword.fetch(opts, :voters), Keyword.fetch(opts, :lenses)} do
+      {{:ok, n}, :error} when is_integer(n) and n > 0 ->
+        {:ok, {:voters, n}}
+
+      {{:ok, _bad}, :error} ->
+        {:error, Finding.at(env, form, "`verify` `voters:` must be a positive integer")}
+
+      {:error, {:ok, lenses}} when is_list(lenses) and lenses != [] ->
+        if Enum.all?(lenses, &is_atom/1) do
+          {:ok, {:lenses, lenses}}
+        else
+          {:error,
+           Finding.at(env, form, "`verify` `lenses:` must be a list of perspective atoms")}
+        end
+
+      {:error, {:ok, _bad}} ->
+        {:error,
+         Finding.at(env, form, "`verify` `lenses:` must be a non-empty list of perspective atoms")}
+
+      {{:ok, _}, {:ok, _}} ->
+        {:error,
+         Finding.at(env, form, "`verify` takes either `voters:` or `lenses:`, not both",
+           hint: "choose redundant voters or perspective-diverse lenses"
+         )}
+
+      {:error, :error} ->
+        {:error,
+         Finding.at(env, form, "`verify` requires `voters: N` or `lenses: [...]`",
+           hint: "e.g. verify \"finding\", voters: 3, threshold: :majority"
+         )}
+    end
+  end
+
+  # `threshold:` defaults to `:majority`; an integer count must not exceed the panel.
+  defp verify_threshold(opts, mode, form, env) do
+    total = voter_count(mode)
+
+    case Keyword.fetch(opts, :threshold) do
+      :error -> {:ok, :majority}
+      {:ok, t} when t in [:majority, :unanimous, :any] -> {:ok, t}
+      {:ok, n} when is_integer(n) and n > 0 and n <= total -> {:ok, n}
+      {:ok, n} when is_integer(n) -> {:error, threshold_finding(form, env, total)}
+      {:ok, _} -> {:error, threshold_finding(form, env, total)}
+    end
+  end
+
+  defp threshold_finding(form, env, total) do
+    Finding.at(env, form, "`verify` threshold is out of range",
+      hint: "threshold: :majority | :unanimous | :any | 1..#{total}"
+    )
+  end
+
+  defp voter_count({:voters, n}), do: n
+  defp voter_count({:lenses, lenses}), do: length(lenses)
+
+  # Pre-expand the panel into inert, pre-addressed, schema-bound votes. Voter mode
+  # casts N identical votes; lens mode casts one perspective-framed vote per lens.
+  defp verify_voters({:voters, n}, subject, address) do
+    Enum.map(0..(n - 1), fn i ->
+      %Agent{
+        address: address ++ [i],
+        prompt: verify_prompt(subject, nil),
+        schema: @verdict_schema,
+        retries: 0
+      }
+    end)
+  end
+
+  defp verify_voters({:lenses, lenses}, subject, address) do
+    Enum.with_index(lenses, fn lens, i ->
+      %Agent{
+        address: address ++ [i],
+        prompt: verify_prompt(subject, lens),
+        schema: @verdict_schema,
+        retries: 0
+      }
+    end)
+  end
+
+  defp verify_prompt(subject, nil),
+    do: "Confirm or refute this finding, answering with a boolean verdict: #{to_text(subject)}"
+
+  defp verify_prompt(subject, lens),
+    do:
+      "From the #{lens} perspective, confirm or refute this finding, " <>
+        "answering with a boolean verdict: #{to_text(subject)}"
+
+  defp judge_candidates(candidates, form, env) do
+    if is_list(candidates) and Macro.quoted_literal?(candidates) do
+      case materialize(candidates) do
+        [] -> {:error, Finding.at(env, form, "`judge` requires at least one candidate")}
+        list -> {:ok, list}
+      end
+    else
+      {:error,
+       Finding.at(env, form, "`judge` candidates must be a literal list",
+         hint:
+           ~s|pass a compile-time list, e.g. judge ["a", "b"], by: [:quality], pick: :max_score|
+       )}
+    end
+  end
+
+  defp judge_by(opts, form, env) do
+    case Keyword.fetch(opts, :by) do
+      {:ok, by} when is_list(by) and by != [] ->
+        if Enum.all?(by, &is_atom/1),
+          do: {:ok, by},
+          else: {:error, Finding.at(env, form, "`judge` `by:` must be a list of criterion atoms")}
+
+      {:ok, _} ->
+        {:error,
+         Finding.at(env, form, "`judge` `by:` must be a non-empty list of criterion atoms")}
+
+      :error ->
+        {:error,
+         Finding.at(env, form, "`judge` requires `by: [:criterion, ...]`",
+           hint: "name the scoring criteria, e.g. by: [:feasibility, :impact]"
+         )}
+    end
+  end
+
+  defp judge_pick(opts, form, env) do
+    case Keyword.fetch(opts, :pick) do
+      {:ok, pick} when pick in @pick_strategies ->
+        {:ok, pick}
+
+      {:ok, _} ->
+        {:error,
+         Finding.at(env, form, "`judge` `pick:` is out of vocabulary",
+           hint: "pick: #{Enum.join(@pick_strategies, " | ")}"
+         )}
+
+      :error ->
+        {:error,
+         Finding.at(env, form, "`judge` requires `pick: :max_score` or `pick: :min_score`")}
+    end
+  end
+
+  # Expand the candidate × criterion grid into inert, pre-addressed scorer agents:
+  # candidate `c`, criterion `k` lives at `address ++ [c, k]`.
+  defp judge_scorers(candidates, by, address) do
+    candidates
+    |> Enum.with_index()
+    |> Enum.map(fn {candidate, c} ->
+      Enum.with_index(by, fn criterion, k ->
+        %Agent{
+          address: address ++ [c, k],
+          prompt: score_prompt(candidate, criterion),
+          schema: @score_schema,
+          retries: 0
+        }
+      end)
+    end)
+  end
+
+  defp score_prompt(candidate, criterion),
+    do:
+      "Score this candidate on #{criterion}, answering with a numeric score: #{to_text(candidate)}"
+
+  # `width:` accepts only `budget_slices(per: N)` — the runtime-owned width helper —
+  # so authors cannot smuggle in arbitrary arithmetic.
+  defp fan_out_width(opts, form, env) do
+    case Keyword.fetch(opts, :width) do
+      {:ok, {:budget_slices, _meta, [[per: n]]}} when is_integer(n) and n > 0 ->
+        {:ok, %BudgetSlices{per: n}}
+
+      {:ok, {:budget_slices, _meta, _args}} ->
+        {:error, Finding.at(env, form, "`budget_slices` requires a positive `per:` integer")}
+
+      {:ok, _} ->
+        {:error,
+         Finding.at(env, form, "`fan_out` width must be `budget_slices(per: N)`",
+           hint: "width is a runtime budget decision, not author arithmetic"
+         )}
+
+      :error ->
+        {:error, Finding.at(env, form, "`fan_out` requires `width: budget_slices(per: N)`")}
+    end
+  end
+
+  defp fan_out_concurrency(opts, form, env) do
+    case Keyword.fetch(opts, :max_concurrency) do
+      :error -> {:ok, nil}
+      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
+      {:ok, _} -> {:error, Finding.at(env, form, "`max_concurrency` must be a positive integer")}
+    end
+  end
+
+  # The fan_out body is a lane of agent turns (like a pipeline stage list), parsed at
+  # a placeholder address and re-addressed per branch at runtime.
+  defp fan_out_body(block, address, form, env) do
+    case agent_lane(statements(block), address, env) do
+      {:ok, []} ->
+        {:error,
+         Finding.at(env, form, "`fan_out` requires at least one body step",
+           hint:
+             "the body is a lane of agent turns, e.g. fan_out width: ... do agent(\"...\") end"
+         )}
+
+      {:ok, agents} ->
+        {:ok, agents}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # Parse a list of statements that must each be an `agent` turn (shared by fan_out).
+  # Reuses `node/3`, so a closure/external call still raises via the forbidden-form
+  # catalog and any malformed agent surfaces its own located finding.
+  defp agent_lane(stmts, address, env) do
+    stmts
+    |> Enum.reduce_while({:ok, []}, fn stmt, {:ok, acc} ->
+      case node(stmt, address, env) do
+        {:ok, %Agent{} = agent} ->
+          {:cont, {:ok, [agent | acc]}}
+
+        {:ok, _other} ->
+          {:halt,
+           {:error,
+            Finding.at(env, stmt, "`fan_out` body steps must be `agent` turns",
+              hint: "each step is one agent call, e.g. agent(\"...\")"
+            )}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      err -> err
+    end
+  end
+
+  # Deterministic stringification of a literal subject/candidate for an inert prompt.
+  defp to_text(text) when is_binary(text), do: text
+  defp to_text(other), do: inspect(other)
 
   # --- Whole-DSL invariants ---
 

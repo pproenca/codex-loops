@@ -191,6 +191,91 @@ defmodule Workflow.Event do
     }
   end
 
+  @doc """
+  Verification panel markers. `verify_started` records the panel shape (its `mode`
+  and voter count); `verify_settled` records the **journal-folded outcome**: how
+  many voters `confirmations` confirmed out of `total`, the `threshold` applied,
+  and whether the finding `survived`. Each voter's own vote is journaled as an
+  ordinary `agent_committed` event at its voter address, so `verify_settled` is a
+  pure summary a resume replays.
+  """
+  def verify_started(%Workflow.Node.Verify{} = node) do
+    %__MODULE__{
+      type: :verify_started,
+      payload: %{
+        address: node.address,
+        mode: verify_mode_tag(node.mode),
+        voter_count: length(node.voters),
+        threshold: node.threshold
+      }
+    }
+  end
+
+  def verify_settled(%Workflow.Node.Verify{} = node, confirmations, total, survived)
+      when is_boolean(survived) do
+    %__MODULE__{
+      type: :verify_settled,
+      payload: %{
+        address: node.address,
+        confirmations: confirmations,
+        total: total,
+        threshold: node.threshold,
+        survived: survived
+      }
+    }
+  end
+
+  defp verify_mode_tag({:voters, _n}), do: :voters
+  defp verify_mode_tag({:lenses, _lenses}), do: :lenses
+
+  @doc """
+  Judge-panel markers. `judge_started` records the candidate list and criteria;
+  `judge_settled` records the **journal-folded outcome**: the total `scores` per
+  candidate, the `pick` strategy, and the `winner`. Each per-criterion score is
+  journaled as an ordinary `agent_committed` event at its `[candidate, criterion]`
+  address, so `judge_settled` is a pure summary a resume replays.
+  """
+  def judge_started(%Workflow.Node.Judge{} = node) do
+    %__MODULE__{
+      type: :judge_started,
+      payload: %{
+        address: node.address,
+        candidates: node.candidates,
+        criteria: node.by
+      }
+    }
+  end
+
+  def judge_settled(%Workflow.Node.Judge{} = node, scores, winner) do
+    %__MODULE__{
+      type: :judge_settled,
+      payload: %{
+        address: node.address,
+        scores: scores,
+        pick: node.pick,
+        winner: winner
+      }
+    }
+  end
+
+  @doc """
+  Budget-scaled fan-out markers. `fan_out_started` **journals the decided width**
+  (`floor(remaining / per)`) so a resume replays that width rather than recomputing
+  it against a since-spent ledger; `fan_out_completed` marks the join. Each
+  branch's turns are journaled as ordinary `agent_committed` events at their
+  `[branch, stage]` addresses.
+  """
+  def fan_out_started(%Workflow.Node.FanOut{} = node, width) do
+    %__MODULE__{
+      type: :fan_out_started,
+      payload: %{address: node.address, per: node.width.per, width: width}
+    }
+  end
+
+  def fan_out_completed(%Workflow.Node.FanOut{} = node) do
+    %__MODULE__{type: :fan_out_completed, payload: %{address: node.address}}
+  end
+
   def run_completed(value) do
     %__MODULE__{type: :run_completed, payload: %{value: value}}
   end

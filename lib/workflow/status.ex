@@ -18,6 +18,8 @@ defmodule Workflow.Status do
             agents: [],
             rejected: [],
             accumulators: %{},
+            verifications: [],
+            judgments: [],
             failure: nil,
             result: nil,
             usage: %Usage{},
@@ -92,6 +94,31 @@ defmodule Workflow.Status do
   defp apply_event(%Event{type: type}, s)
        when type in [:iteration_started, :loop_decision, :loop_completed],
        do: tick(s)
+
+  # Quality-combinator brackets. The started/completed markers only bracket the
+  # concurrent region — their votes/scores already fold into `agents`/`usage`. The
+  # settled events carry the journal-folded panel outcome the read model surfaces,
+  # so LiveView renders only journaled verification/judgment state.
+  defp apply_event(%Event{type: type}, s)
+       when type in [:verify_started, :judge_started, :fan_out_started, :fan_out_completed],
+       do: tick(s)
+
+  defp apply_event(%Event{type: :verify_settled, payload: p}, s) do
+    verification = %{
+      address: p.address,
+      confirmations: p.confirmations,
+      total: p.total,
+      threshold: p.threshold,
+      survived: p.survived
+    }
+
+    %{s | verifications: s.verifications ++ [verification]} |> tick()
+  end
+
+  defp apply_event(%Event{type: :judge_settled, payload: p}, s) do
+    judgment = %{address: p.address, scores: p.scores, pick: p.pick, winner: p.winner}
+    %{s | judgments: s.judgments ++ [judgment]} |> tick()
+  end
 
   defp apply_event(%Event{type: :run_completed, payload: p}, s) do
     %{s | state: :completed, result: p.value} |> tick()

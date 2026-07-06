@@ -7,8 +7,8 @@ defmodule Workflow.AgentSchemaTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Status}
-  alias Workflow.Test.{ScriptedProvider, FlakyProvider, ExplodingProvider}
+  alias Workflow.{Run, Journal, Status, IdempotencyKey}
+  alias Workflow.Test.{ScriptedProvider, FlakyProvider, ExplodingProvider, DedupingProvider}
 
   # A workflow with a single schema-backed agent requiring an object with "label".
   defmodule Classify do
@@ -213,6 +213,39 @@ defmodule Workflow.AgentSchemaTest do
     assert status.state == :failed
     assert status.failure.attempts == 3
     assert length(status.rejected) == 3
+  end
+
+  test "distinct retry attempts carry distinct idempotency keys against a deduping backend" do
+    id = run_id()
+
+    # A deduping backend keyed by the request idempotency key: attempt 0 is served
+    # an invalid output, attempt 1 a valid one. Only *distinct* per-attempt keys let
+    # the retry reach the second scripted output; a single shared key would replay
+    # attempt 0's rejected output for every retry and the node could never succeed.
+    {:ok, store} = DedupingProvider.start([%{"wrong" => 1}, %{"label" => "ok"}])
+
+    assert {:ok, ^id} =
+             Run.run(Classify, run_id: id, provider: {DedupingProvider, store: store, sink: self()})
+
+    # Exactly two paid calls: the rejected attempt 0 and the committing attempt 1.
+    assert_received {:agent_called, "classify"}
+    assert_received {:agent_called, "classify"}
+    refute_received {:agent_called, _}
+
+    # Each distinct attempt key was charged exactly once — no attempt was deduped
+    # onto another attempt's key.
+    k0 = %IdempotencyKey{run_id: id, node_path: [0], iteration: 0, attempt: 0}
+    k1 = %IdempotencyKey{run_id: id, node_path: [0], iteration: 0, attempt: 1}
+    assert DedupingProvider.charges(store, k0) == 1
+    assert DedupingProvider.charges(store, k1) == 1
+
+    committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
+    assert committed.payload.result == %{"label" => "ok"}
+    # The committing turn is the second attempt, keyed accordingly.
+    assert committed.payload.idempotency_key.attempt == 1
+
+    assert types(id) == [:run_started, :agent_attempt_rejected, :agent_committed, :run_completed]
+    assert Status.of(id).state == :completed
   end
 
   test "resume replays a committed schema-agent effect instead of re-running the paid turn" do

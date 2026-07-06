@@ -84,6 +84,15 @@ test("trust rejects argv that violates the command contract", () => {
   assert.throws(() => parseCliArgv(["workflow", "flow.ts", "--args"]))
 })
 
+test("trust rejects removed journal flag on every command", () => {
+  for (const command of ["draft", "validate", "test", "workflow", "run", "resume", "inspect", "status", "list", "serve"] as const) {
+    assert.throws(
+      () => parseCliArgv([command, "--journal", "run-1"]),
+      /--journal was removed; use --run-id/,
+    )
+  }
+})
+
 test("trust classifies CLI usage errors separately from runtime errors", () => {
   assert.deepEqual(parseCliFailure(new CliUsageError("bad flag")), {
     exitCode: 2,

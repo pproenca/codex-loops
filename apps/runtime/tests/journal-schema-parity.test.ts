@@ -64,7 +64,6 @@ const runtimeContract = {
     thresholdPolicy: "fixture",
   },
   resume: {
-    journalPath: "/tmp/run.jsonl",
     cacheKey: "runId+phaseTitle+label+promptHash+schemaHash+optionsHash",
     completedNodesReplayFromJournal: true,
   },

@@ -247,7 +247,7 @@ export function draftForCommit(event: JournalEventDraft): JournalEventDraft {
   }
 }
 
-function commitEvent(seq: number, event: JournalEventDraft): JournalEvent {
+export function commitEvent(seq: number, event: JournalEventDraft): JournalEvent {
   switch (event.t) {
     case "run_opened":
       return { seq, ...event }

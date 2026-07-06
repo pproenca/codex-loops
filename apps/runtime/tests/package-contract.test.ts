@@ -1,10 +1,12 @@
 import assert from "node:assert/strict"
 import { readFile, readdir, rm, writeFile } from "node:fs/promises"
-import { basename, join } from "node:path"
+import { join } from "node:path"
 import { test } from "node:test"
 
 import * as api from "../src/index.ts"
+import { readRun } from "../src/app/workflow-runner.ts"
 import { COMMANDS, renderCommandUsageLines, renderCommandsBlock } from "../src/cli.ts"
+import { SqliteJournalReader } from "../src/effects/node/sqlite-journal-reader.ts"
 import { makeTempDir } from "./tmp.ts"
 
 test("public API export names stay frozen", () => {
@@ -18,10 +20,11 @@ test("public API arity stays compatible with current exported helpers", () => {
 
 test("public API return shapes stay compatible", async () => {
   const root = await makeTempDir("agent-loops-api-")
-  const defaultJournalRoot = new URL("../.agent-loops-runs/", import.meta.url)
-  await rm(defaultJournalRoot, { recursive: true, force: true })
+  const previousHome = process.env["HOME"]
+  process.env["HOME"] = root
   try {
     const scriptPath = join(root, "api-demo.ts")
+    const databasePath = join(root, ".codex", "workflows", "runs_1.sqlite")
     await writeFile(scriptPath, `export const meta = { name: "api-demo", description: "Valid API workflow" }
 return agent("do the work", { label: "agent" })
 `, "utf8")
@@ -40,15 +43,17 @@ return agent("do the work", { label: "agent" })
     assert.equal(testResult.snapshot.status, "done")
     assert.equal(record(testResult.budgetPlan)["provider"], "mock")
     assert.equal(testResult.scriptPath, scriptPath)
-    assert.equal(testResult.journalPath.endsWith(".jsonl"), true)
-    const journalText = await readFile(testResult.journalPath, "utf8")
-    assert.match(journalText, /"t":"run_opened"/)
-    assert.match(journalText, /"t":"run_finished"/)
-    const pointer = JSON.parse(await readFile(new URL("../.agent-loops-runs/latest.json", import.meta.url), "utf8"))
-    assert.deepEqual(pointer, { $pointer: basename(testResult.journalPath) })
+    assert.equal(testResult.databasePath, databasePath)
+    assert.equal(Object.hasOwn(testResult, "journalPath"), false)
+    const { read } = await readRun(String(testResult.snapshot.runId), { journalReader: new SqliteJournalReader(databasePath) })
+    assert.equal(read.events.some((event) => event.t === "run_opened"), true)
+    assert.equal(read.events.some((event) => event.t === "run_finished"), true)
+    const latest = await readRun("latest", { journalReader: new SqliteJournalReader(databasePath) })
+    assert.equal(latest.runId, testResult.snapshot.runId)
   } finally {
+    if (previousHome === undefined) delete process.env["HOME"]
+    else process.env["HOME"] = previousHome
     await rm(root, { recursive: true, force: true })
-    await rm(defaultJournalRoot, { recursive: true, force: true })
   }
 })
 
@@ -77,16 +82,16 @@ test("CLI command block is generated from one source", () => {
 test("CLI usage stays contract-compatible", () => {
   assert.deepEqual(renderCommandUsageLines(), [
     "agent-loops draft --goal '<goal>' [--name name] [--output .codex/workflows/name.ts] [--json]",
-    "agent-loops validate <script-or-name> --args '<json>' [--journal <path>] [--json] [--no-input]",
-    "agent-loops test <script-or-name> --args '<json>' [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]",
-    "agent-loops workflow <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]",
+    "agent-loops validate <script-or-name> --args '<json>' [--json] [--no-input]",
+    "agent-loops test <script-or-name> --args '<json>' [--run-id <id>] [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]",
+    "agent-loops workflow <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]",
     "agent-loops workflow <script-or-name> --args '<json>' --background [--status-server] [--json] [--no-input]",
-    "agent-loops run <script-or-name> --args '<json>' [--journal <path>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]",
-    "agent-loops resume [--journal <path>] [--provider sdk|mock] [--approved] [--json] [--no-input]",
-    "agent-loops inspect [--journal <path>] [--json]",
-    "agent-loops status [--journal <path>] [--event-limit 5] [--json]",
-    "agent-loops list [--journal-root .agent-loops-runs] [--limit 20] [--event-limit 5] [--json]",
-    "agent-loops serve [--journal <path>] [--host 127.0.0.1] [--port 0] [--json]",
+    "agent-loops run <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]",
+    "agent-loops resume [--run-id <id>] [--provider sdk|mock] [--approved] [--json] [--no-input]",
+    "agent-loops inspect [--run-id <id>] [--json]",
+    "agent-loops status [--run-id <id>] [--event-limit 5] [--json]",
+    "agent-loops list [--limit 20] [--event-limit 5] [--json]",
+    "agent-loops serve [--run-id <id>] [--host 127.0.0.1] [--port 0] [--json]",
     "agent-loops help",
   ])
 })

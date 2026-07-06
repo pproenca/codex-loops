@@ -26,7 +26,7 @@ export class NodeBackgroundProcessLauncher implements BackgroundProcessLauncher 
   async launchResumeWorker(input: Parameters<BackgroundProcessLauncher["launchResumeWorker"]>[0]): ReturnType<BackgroundProcessLauncher["launchResumeWorker"]> {
     return spawnDetachedProcess({
       file: process.execPath,
-      args: [this.#cliEntryPath, "resume", "--journal", input.journalPath, "--background-worker", "--quiet"],
+      args: [this.#cliEntryPath, "resume", "--run-id", input.runId, "--background-worker", "--quiet"],
       cwd: process.cwd(),
     })
   }
@@ -34,7 +34,7 @@ export class NodeBackgroundProcessLauncher implements BackgroundProcessLauncher 
   async launchStatusServer(input: Parameters<BackgroundProcessLauncher["launchStatusServer"]>[0]): ReturnType<BackgroundProcessLauncher["launchStatusServer"]> {
     return spawnDetachedProcess({
       file: process.execPath,
-      args: [this.#cliEntryPath, "serve", "--journal", input.journalPath, "--host", input.host, "--port", String(input.port), "--json"],
+      args: [this.#cliEntryPath, "serve", "--run-id", input.runId, "--host", input.host, "--port", String(input.port), "--json"],
       cwd: process.cwd(),
     })
   }

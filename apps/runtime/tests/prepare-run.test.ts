@@ -22,6 +22,7 @@ const limits = {
 const facts = {
   runId: "system-run-id",
   cwd: "/tmp",
+  databasePath: "/tmp/runs_1.sqlite",
   scriptSha256: "abc",
 } satisfies Parameters<typeof prepareWorkflowRun>[0]["facts"]
 
@@ -31,7 +32,7 @@ const script = {
   compatibility: { ok: true, findings: [] },
 } satisfies Parameters<typeof prepareWorkflowRun>[0]["script"]
 
-test("workflow command API parser separates requested run id from system-authored run id", () => {
+test("workflow command API parser uses requested run id as the durable run identity", () => {
   const request = parseWorkflowCommandApiRequest("workflow", {
     script: "wf.ts",
     args: { ticket: 123 },
@@ -43,8 +44,10 @@ test("workflow command API parser separates requested run id from system-authore
   })
   const prepared = prepareWorkflowRun({ request, provider: "mock", scriptPath: "/tmp/wf.ts", script, facts })
 
-  assert.equal(prepared.runId, "system-run-id")
+  assert.equal(prepared.runId, "requested-run-id")
   assert.deepEqual(prepared.requestedRunId, { t: "requested", value: "requested-run-id" })
+  assert.equal(prepared.databasePath, "/tmp/runs_1.sqlite")
+  assert.equal(Object.hasOwn(prepared, "journalPath"), false)
   assert.deepEqual(prepared.args, { ticket: 123 })
   assert.equal(prepared.provider, "mock")
 })
@@ -60,6 +63,17 @@ test("workflow command CLI parser converts raw argv to semantic request", () => 
   assert.deepEqual(request.requestedRunId, { t: "requested", value: "requested" })
 })
 
+test("workflow run commands reject removed journal flags", () => {
+  assert.throws(
+    () => parseWorkflowCommandCliRequest(parseCliArgv(["test", "wf.ts", "--journal", "run-1"])),
+    /--journal was removed; use --run-id/,
+  )
+  assert.throws(
+    () => parseWorkflowProgrammaticCall("workflow", "wf.ts", [{}, { journal: "run-1" }, {}]),
+    /--journal was removed; use --run-id/,
+  )
+})
+
 test("programmatic workflow parser preserves current public call surface", () => {
   const request = parseWorkflowProgrammaticCall("workflow", { scriptPath: "wf.ts" }, [
     { ticket: 123 },
@@ -69,7 +83,7 @@ test("programmatic workflow parser preserves current public call surface", () =>
       codexConfig: { profile: "test" },
       turnBudget: 100,
       approved: true,
-      journal: "/tmp/api-run.jsonl",
+      runId: "api-run",
       maxAgents: 2,
     },
     { signal: undefined },
@@ -79,7 +93,7 @@ test("programmatic workflow parser preserves current public call surface", () =>
   assert.deepEqual(request.script, { t: "unresolved", value: "wf.ts" })
   assert.deepEqual(request.args, { ticket: 123 })
   assert.deepEqual(request.provider, { t: "explicit", provider: "mock" })
-  assert.deepEqual(request.journal, { t: "requested", path: "/tmp/api-run.jsonl" })
+  assert.deepEqual(request.requestedRunId, { t: "requested", value: "api-run" })
   assert.equal(request.options.budget, "deep")
   assert.deepEqual(request.options.codexConfig, { profile: "test" })
   assert.throws(() => parseWorkflowProgrammaticCall("workflow", "flow.ts", [{}, { codexConfig: null }, {}]))
@@ -138,16 +152,18 @@ test("journal initialization commits the prepared run_opened record", async () =
   assert.deepEqual(committed.event.args, { ok: true })
 })
 
-test("core prepares policy records and journal paths from trusted request facts", () => {
+test("core prepares policy records and SQLite storage from trusted request facts", () => {
   const request = parseWorkflowProgrammaticCall("workflow", "wf.ts", [
     {},
-    { provider: "mock", maxAgents: 2, maxPromptBytesPerAgent: 24, journal: "/tmp/requested.jsonl" },
+    { provider: "mock", maxAgents: 2, maxPromptBytesPerAgent: 24, runId: "stable-run" },
     {},
   ])
   const prepared = prepareWorkflowRun({ request, provider: "mock", scriptPath: "/tmp/wf.ts", script, facts })
 
   assert.equal(prepared.workflowName, "wf")
-  assert.equal(prepared.journalPath, "/tmp/requested.jsonl")
+  assert.equal(prepared.runId, "stable-run")
+  assert.equal(prepared.databasePath, "/tmp/runs_1.sqlite")
+  assert.equal(Object.hasOwn(prepared, "journalPath"), false)
   assert.equal(prepared.limits.maxAgents, 2)
   assert.equal(prepared.limits.maxPromptBytesPerAgent, 24)
   assert.deepEqual(record(prepared.budgetPlan)["provider"], "mock")

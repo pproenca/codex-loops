@@ -10,6 +10,7 @@ export function parseCliArgs(argv) {
     }
     if (value.startsWith("--")) {
       const [rawName, inlineValue] = value.slice(2).split("=", 2)
+      if (rawName === "journal") throw new Error("--journal was removed; pass the run id as a positional argument")
       const next = inlineValue ?? argv[index + 1]
       if (next === undefined || next.startsWith("--")) throw new Error(`missing value for --${rawName}`)
       if (inlineValue === undefined) index += 1
@@ -18,10 +19,12 @@ export function parseCliArgs(argv) {
     }
     positionals.push(value)
   }
-  if (positionals.length !== 1) throw new Error("usage: agent-loops-ui <journal.jsonl> [--host 127.0.0.1] [--port 0] [--json]")
+  if (positionals.length > 1) throw new Error("usage: agent-loops-ui [run-id|latest] [--host 127.0.0.1] [--port 0] [--json]")
+  const selector = positionals[0] ?? "latest"
+  rejectPathStyleRunSelector(selector)
   return {
     t: "serve",
-    journalPath: positionals[0],
+    selector,
     host: parseHost(flags.get("host")),
     port: parsePort(flags.get("port")),
     eventLimit: parsePositiveInteger(flags.get("event-limit"), 100, "event-limit"),
@@ -65,6 +68,12 @@ export function parseJournalText(text) {
     events.push(value)
   }
   return events
+}
+
+function rejectPathStyleRunSelector(value) {
+  if (value.endsWith(".jsonl") || value.endsWith(".json") || value.includes("/") || value.includes("\\")) {
+    throw new Error("path-style run selectors were removed; use a run id or 'latest'")
+  }
 }
 
 function parseHost(value) {

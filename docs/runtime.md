@@ -21,26 +21,26 @@ CLI request -> parsed command -> run preparation -> isolated workflow script
 ```
 
 ## Journal Model
-The current journal format is `agent-loops/journal@2`: one append-only JSONL file
-whose lines are closed journal events with strictly increasing `seq` values.
-When no `--journal` is passed for a new run, Codex Loops writes a per-run JSONL
-file under `.agent-loops-runs/` and updates `.agent-loops-runs/latest.json` as a
-one-hop pointer.
+Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`. The current
+journal format remains `agent-loops/journal@2`: committed events are closed JSON
+payloads stored as `event_json` rows keyed by `(run_id, seq)`.
 
-The file journal store is the serialization point. A writer holds
-`<journal>.lock`, appends are serialized, durable events are fsynced, idempotency
-keys prevent duplicate logical commits, and readers tolerate a torn final line by
-surfacing `truncatedTail` in projections.
+The SQLite store is the serialization point. Idempotency rows prevent duplicate
+logical commits, `metadata.latest_run_id` powers bare `status`/`inspect`/
+`resume`/`serve`, `run_locks` holds live run leases, `mutations` stores
+run-wide mutation records, and `serve_sessions` stores status-server handshakes.
+There are no filesystem run journals or auxiliary run-state files in the current
+persistence path.
 
 ## Snapshots And Status
 Snapshots are projections, not stored authorities. `inspect` renders
 `schemaVersion: "workflow-snapshot/v2"` with phases, embedded node summaries,
-logs, totals, script path and hash, journal path, status, and `runtimeContract`.
-`status` summarizes node counts, staleness, and a bounded event tail. `list`
-scans known journals and projects each entry.
+logs, totals, script path and hash, `runId`, `databasePath`, status, and
+`runtimeContract`. `status` summarizes node counts,
+staleness, and a bounded event tail. `list` reads known runs from SQLite and
+projects each entry.
 
-Legacy v1 snapshot journals are readable by `inspect`, `status`, and `list` but
-are rejected by `resume` and `serve`.
+Filesystem run artifacts are not read by this version.
 
 ## Node Identity And Resume
 Node identity is based on run id, phase title, label, prompt hash, schema hash,

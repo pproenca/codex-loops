@@ -3,14 +3,13 @@ import type {
   CompatibleWorkflowScript,
   DraftWorkflowPlan,
   JournalCommitRequest,
-  JournalFileCandidate,
+  JournalRunCandidate,
   JournalEventDraft,
   JournalMutationRecord,
-  JournalPointerTarget,
   PreparedWorkflowRun,
   ProviderEvent,
   ProcessExecutionResult,
-  ServePortfileRecord,
+  ServeSessionRecord,
   CodexConfigObject,
   WorkflowChildPlan,
   WorkflowCommandRequest,
@@ -64,13 +63,13 @@ export interface JournalStoreFactory {
 }
 
 export interface JournalReader {
-  readText(path: string): Promise<string>
-  readMutationText(journalPath: string): Promise<string>
-  readPointerTarget(input: { readonly sourcePath: string; readonly target: JournalPointerTarget }): Promise<{ readonly path: string; readonly text: string }>
+  resolveRun(input: { readonly runId: string }): Promise<{ readonly runId: string; readonly databasePath: string }>
+  readText(runId: string): Promise<string>
+  readMutationText(runId: string): Promise<string>
 }
 
 export interface JournalDirectoryPort {
-  listJournalFiles(root: string): Promise<readonly JournalFileCandidate[]>
+  listRuns(): Promise<readonly JournalRunCandidate[]>
 }
 
 export interface ProviderTurnPort {
@@ -91,10 +90,10 @@ export interface DraftWorkflowStore {
   writeDraft(plan: DraftWorkflowPlan): Promise<{ readonly scriptPath: string }>
 }
 
-export interface ServePortfileStore {
-  writePortfile(record: ServePortfileRecord): Promise<void>
-  readPortfile(portfilePath: string): Promise<string>
-  removePortfile(portfilePath: string): Promise<void>
+export interface ServeSessionStore {
+  writeSession(record: ServeSessionRecord): Promise<void>
+  readSession(runId: string): Promise<string>
+  removeSession(runId: string): Promise<void>
 }
 
 export interface StatusServerPort {
@@ -124,8 +123,8 @@ export type StatusServerRoute =
   | { readonly t: "not-found" }
 
 export interface BackgroundProcessLauncher {
-  launchResumeWorker(input: { readonly journalPath: string }): Promise<{ readonly pid: number }>
-  launchStatusServer(input: { readonly journalPath: string; readonly host: string; readonly port: number }): Promise<{ readonly pid: number }>
+  launchResumeWorker(input: { readonly runId: string }): Promise<{ readonly pid: number }>
+  launchStatusServer(input: { readonly runId: string; readonly host: string; readonly port: number }): Promise<{ readonly pid: number }>
   terminate(input: { readonly pid: number }): Promise<void>
   wait(input: { readonly ms: number }): Promise<void>
 }

@@ -1,21 +1,22 @@
 import assert from "node:assert/strict"
-import { mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import { spawnSync } from "node:child_process"
+import { DatabaseSync } from "node:sqlite"
 import { test } from "node:test"
 import { fileURLToPath } from "node:url"
 
 import { IsolatedWorkflowExecutor } from "../src/app/isolated-workflow-executor.ts"
-import { runResumeCommandApp, runServeCommandApp, runWorkflowCommandApp } from "../src/app/workflow-runner.ts"
+import { readRun, runResumeCommandApp, runServeCommandApp, runWorkflowCommandApp } from "../src/app/workflow-runner.ts"
 import { FileDraftWorkflowStore } from "../src/consistency/draft-workflow-store.ts"
-import { FileJournalStoreFactory } from "../src/consistency/file-journal-store.ts"
-import { FileServePortfileStore } from "../src/consistency/serve-portfile-store.ts"
 import { InMemoryJournalStoreFactory } from "../src/consistency/journal-store.ts"
-import { FileJournalDirectory } from "../src/effects/node/file-journal-directory.ts"
-import { FileJournalReader } from "../src/effects/node/file-journal-reader.ts"
+import { SqliteJournalStoreFactory, initializeSqliteSchema } from "../src/consistency/sqlite-journal-store.ts"
+import { SqliteServeSessionStore } from "../src/consistency/sqlite-serve-session-store.ts"
+import { SqliteJournalDirectory, SqliteJournalReader } from "../src/effects/node/sqlite-journal-reader.ts"
 import { NodeStatusServerPort } from "../src/effects/node/status-server.ts"
 import { NodeWorkflowScriptSourceStore } from "../src/effects/node/workflow-script-source-store.ts"
 import { NodeWorkflowChildResolver, NodeWorkflowPreparer, NodeWorkflowScriptLocator } from "../src/effects/node/workflow-preparer.ts"
+import type { JournalEvent } from "../src/domain/contracts.ts"
 import type { BackgroundProcessLauncher, ProviderAgentTurnPort, RunnerHeartbeatPort, StatusServerPort } from "../src/ports/index.ts"
 import { parseCliArgv, parseWorkflowCliEnvelope } from "../src/trust/cli.ts"
 import { parseWorkflowChildExecutionPolicy } from "../src/trust/containment.ts"
@@ -29,10 +30,10 @@ import { makeTempDir } from "./tmp.ts"
 
 function appEnv() {
   return {
-    journalReader: new FileJournalReader(),
-    journalDirectory: new FileJournalDirectory(),
+    journalReader: unusedJournalReader,
+    journalDirectory: emptyJournalDirectory,
     journalStoreFactory: new InMemoryJournalStoreFactory(),
-    servePortfileStore: new FileServePortfileStore(),
+    serveSessionStore: new FakeServeSessionStore(),
     draftWorkflowStore: new FileDraftWorkflowStore(),
     processPort: processPort(),
     workflowScriptLocator: new NodeWorkflowScriptLocator(),
@@ -44,6 +45,23 @@ function appEnv() {
     }),
     backgroundLauncher: new FakeBackgroundProcessLauncher(),
     runnerHeartbeat: new FakeRunnerHeartbeat(),
+  }
+}
+
+function sqliteAppEnv(databasePath: string, pid = 12345) {
+  const workflowPreparer = new NodeWorkflowPreparer()
+  return {
+    ...appEnv(),
+    journalReader: new SqliteJournalReader(databasePath),
+    journalDirectory: new SqliteJournalDirectory(databasePath),
+    journalStoreFactory: new SqliteJournalStoreFactory(databasePath, processPort(pid)),
+    serveSessionStore: new SqliteServeSessionStore(databasePath),
+    processPort: processPort(pid),
+    workflowPreparer: {
+      async prepare(input: Parameters<NodeWorkflowPreparer["prepare"]>[0]) {
+        return { ...await workflowPreparer.prepare(input), databasePath }
+      },
+    },
   }
 }
 
@@ -139,14 +157,14 @@ test("structured provider output retries malformed JSON and journals the retry",
 const result = await agent("return json", { label: "agent", schema: { type: "object" } })
 return result
 `)
-  const journalPath = join(fixture.root, "schema-retry.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "schema-retry"
   const provider = new FakeProviderAgentTurn(["not json", "{\"ok\":true}"])
   try {
     const result = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath, schemaRetryLimit: 1 }, {}]),
+      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { runId, schemaRetryLimit: 1 }, {}]),
       {
-        ...appEnv(),
-        journalStoreFactory: new FileJournalStoreFactory(processPort()),
+        ...sqliteAppEnv(databasePath),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: provider,
@@ -161,7 +179,7 @@ return result
     assert.deepEqual(result.snapshot.result, { ok: true })
     assert.equal(result.snapshot.phases[0]?.nodes[0]?.attempt, 2)
     assert.equal(provider.requests.length, 2)
-    const journalEvents = (await readFile(journalPath, "utf8")).trim().split("\n").map((line) => parseJournalEventLine(line))
+    const journalEvents = await sqliteJournalEvents(databasePath, runId)
     assert.equal(journalEvents.filter((event) => event.t === "agent_retried").length, 1)
     assert.equal(journalEvents.filter((event) => event.t === "agent_completed").length, 1)
   } finally {
@@ -174,14 +192,14 @@ test("structured provider output refuses retry after possible external writes", 
 const result = await agent("return json", { label: "agent", isolation: "workspace-write", schema: { type: "object" } })
 return result
 `)
-  const journalPath = join(fixture.root, "schema-write-failclosed.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "schema-write-failclosed"
   const provider = new FakeProviderAgentTurn(["not json", "{\"ok\":true}"])
   try {
     const result = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath, schemaRetryLimit: 1 }, {}]),
+      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { runId, schemaRetryLimit: 1 }, {}]),
       {
-        ...appEnv(),
-        journalStoreFactory: new FileJournalStoreFactory(processPort()),
+        ...sqliteAppEnv(databasePath),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: provider,
@@ -195,7 +213,7 @@ return result
     assert.equal(result.snapshot.status, "failed")
     assert.match(result.snapshot.error ?? "", /structured output retry refused for workspace-write isolation/)
     assert.equal(provider.requests.length, 1)
-    const journalEvents = (await readFile(journalPath, "utf8")).trim().split("\n").map((line) => parseJournalEventLine(line))
+    const journalEvents = await sqliteJournalEvents(databasePath, runId)
     assert.equal(journalEvents.filter((event) => event.t === "agent_retried").length, 0)
     assert.equal(journalEvents.filter((event) => event.t === "agent_failed").length, 1)
   } finally {
@@ -268,21 +286,20 @@ return "unreachable"
   }
 })
 
-test("provider mutation sidecar preserves run-wide caps across resume", async () => {
+test("provider mutation records preserve run-wide caps across resume", async () => {
   const fixture = await workflowFixture(`export const meta = { name: "demo", description: "Valid test workflow" }
 await agent("first", { label: "first" })
 await agent("second", { label: "second" })
 return "unreachable"
 `)
-  const journalPath = join(fixture.root, "mutation-resume.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "mutation-resume"
   try {
     const initialProvider = new FakeProviderAgentTurn(["first result", "second result"], [["a.ts"], ["b.ts"]])
     const initial = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath, maxAgents: 2, maxMutationFilesPerAgent: 2, maxMutationFilesPerRun: 1 }, {}]),
+      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { runId, maxAgents: 2, maxMutationFilesPerAgent: 2, maxMutationFilesPerRun: 1 }, {}]),
       {
-        ...appEnv(),
-        processPort: processPort(11111),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(11111)),
+        ...sqliteAppEnv(databasePath, 11111),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: initialProvider,
@@ -291,27 +308,26 @@ return "unreachable"
       },
     )
     assert.equal(initial.status, "completed")
-    const fullLines = (await readFile(journalPath, "utf8")).trim().split("\n")
-    const kept: string[] = []
     let firstCompletedNode = ""
-    for (const line of fullLines) {
-      kept.push(line)
-      const event = parseJournalEventLine(line)
+    let stopAfterFirstCompletion = false
+    for (const event of await sqliteJournalEvents(databasePath, runId)) {
       if (event.t === "agent_completed") {
         firstCompletedNode = event.node
         break
       }
     }
-    await writeFile(journalPath, `${kept.join("\n")}\n`, "utf8")
-    await writeFile(`${journalPath}.mutations.jsonl`, `${JSON.stringify({ node: firstCompletedNode, attempt: 1, files: ["a.ts"] })}\n`, "utf8")
+    pruneSqliteEvents(databasePath, runId, (event) => {
+      if (stopAfterFirstCompletion) return false
+      if (event.t === "agent_completed") stopAfterFirstCompletion = true
+      return true
+    })
+    insertSqliteMutation(databasePath, runId, { node: firstCompletedNode, attempt: 1, files: ["a.ts"] })
 
     const resumeProvider = new FakeProviderAgentTurn(["second result"], [["b.ts"]])
     const resumed = await runResumeCommandApp(
-      parseResumeCliRequest(parseCliArgv(["resume", "--journal", journalPath, "--json", "--quiet"])),
+      parseResumeCliRequest(parseCliArgv(["resume", "--run-id", runId, "--json", "--quiet"])),
       {
-        ...appEnv(),
-        processPort: processPort(22222),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(22222)),
+        ...sqliteAppEnv(databasePath, 22222),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: resumeProvider,
@@ -324,7 +340,7 @@ return "unreachable"
     if (resumed.status !== "completed") return
     assert.equal(resumed.snapshot.status, "failed")
     assert.match(resumed.snapshot.error ?? "", /maxMutationFilesPerRun 1/)
-    assert.equal(resumeProvider.requests.length, 1)
+    assert.equal(resumeProvider.requests.length, 0)
   } finally {
     await fixture.dispose()
   }
@@ -576,13 +592,13 @@ await agent("second", { label: "second" })
 await agent("third", { label: "third" })
 return "unreachable"
 `)
-  const journalPath = join(fixture.root, "budget-overrun.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "budget-overrun"
   try {
     const result = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("test", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath, taskBudget: 3 }, {}]),
+      parseWorkflowProgrammaticCall("test", fixture.scriptPath, [{ ticket: 123 }, { runId, taskBudget: 3 }, {}]),
       {
-        ...appEnv(),
-        journalStoreFactory: new FileJournalStoreFactory(processPort()),
+        ...sqliteAppEnv(databasePath),
       },
     )
 
@@ -591,7 +607,7 @@ return "unreachable"
     assert.equal(result.snapshot.status, "failed")
     assert.equal(result.snapshot.agentCount, 2)
     assert.match(result.snapshot.error ?? "", /workflow token budget exceeded \(4 \/ 3 tokens\)/)
-    const journalEvents = (await readFile(journalPath, "utf8")).trim().split("\n").map((line) => parseJournalEventLine(line))
+    const journalEvents = await sqliteJournalEvents(databasePath, runId)
     assert.equal(journalEvents.filter((event) => event.t === "agent_completed").length, 2)
     assert.equal(journalEvents.some((event) => event.t === "agent_completed" && event.node !== undefined), true)
   } finally {
@@ -672,24 +688,28 @@ return agent("do the work", { label: "agent", isolation: "full-access" })
 test("CLI test --mock emits current run-family envelope shape and persists the journal", async () => {
   const fixture = await workflowFixture()
   const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url))
+  const databasePath = cliDatabasePath(fixture.root)
   const result = spawnSync(process.execPath, [cliPath, "test", "--mock", fixture.scriptPath, "--json", "--quiet"], {
     cwd: fixture.root,
     encoding: "utf8",
+    env: cliEnv(fixture.root),
   })
   try {
     assert.equal(result.status, 0, result.stderr)
     const envelope = record(parseWorkflowCliEnvelope(JSON.parse(result.stdout)))
-    assert.deepEqual(Object.keys(envelope).sort(), ["budgetPlan", "command", "journalPath", "scriptPath", "snapshot"])
+    assert.deepEqual(Object.keys(envelope).sort(), ["budgetPlan", "command", "databasePath", "scriptPath", "snapshot"])
     assert.equal(envelope["command"], "test")
     const snapshot = record(envelope["snapshot"])
     assert.equal(snapshot["schemaVersion"], "workflow-snapshot/v2")
     assert.equal(snapshot["status"], "done")
     assert.equal(snapshot["workflowName"], "demo")
     assert.equal(record(envelope["budgetPlan"])["provider"], "mock")
+    assert.equal(envelope["databasePath"], databasePath)
 
     const pointerStatus = spawnSync(process.execPath, [cliPath, "status", "--json", "--quiet"], {
       cwd: fixture.root,
       encoding: "utf8",
+      env: cliEnv(fixture.root),
     })
     assert.equal(pointerStatus.status, 0, pointerStatus.stderr)
     const status = record(parseWorkflowCliEnvelope(JSON.parse(pointerStatus.stdout)))
@@ -700,6 +720,7 @@ test("CLI test --mock emits current run-family envelope shape and persists the j
     const listed = spawnSync(process.execPath, [cliPath, "list", "--json", "--quiet"], {
       cwd: fixture.root,
       encoding: "utf8",
+      env: cliEnv(fixture.root),
     })
     assert.equal(listed.status, 0, listed.stderr)
     const listEnvelope = record(parseWorkflowCliEnvelope(JSON.parse(listed.stdout)))
@@ -712,18 +733,18 @@ test("CLI test --mock emits current run-family envelope shape and persists the j
     const resumed = spawnSync(process.execPath, [cliPath, "resume", "--json", "--quiet", "--no-input"], {
       cwd: fixture.root,
       encoding: "utf8",
+      env: cliEnv(fixture.root),
     })
     assert.equal(resumed.status, 0, resumed.stderr)
     const resumeEnvelope = record(parseWorkflowCliEnvelope(JSON.parse(resumed.stdout)))
     assert.equal(resumeEnvelope["command"], "resume")
     assert.equal(record(resumeEnvelope["snapshot"])["runId"], snapshot["runId"])
-    assert.equal(resumeEnvelope["journalPath"], envelope["journalPath"])
+    assert.equal(resumeEnvelope["databasePath"], envelope["databasePath"])
 
-    const journalText = await readFile(String(envelope["journalPath"]), "utf8")
-    assert.match(journalText, /"t":"runner_attached"/)
-    assert.match(journalText, /"totalTokens":3/)
-    const journalEvents = journalText.trim().split("\n").map((line) => parseJournalEventLine(line))
+    const journalEvents = await sqliteJournalEvents(databasePath, String(snapshot["runId"]))
     assert.equal(journalEvents.filter((event) => event.t === "run_opened").length, 1)
+    assert.equal(journalEvents.some((event) => event.t === "runner_attached"), true)
+    assert.equal(journalEvents.some((event) => event.t === "run_finished" && event.totalTokens === 3), true)
   } finally {
     await fixture.dispose()
   }
@@ -731,28 +752,21 @@ test("CLI test --mock emits current run-family envelope shape and persists the j
 
 test("resume replays completed journaled agents without a provider call", async () => {
   const fixture = await workflowFixture()
-  const journalPath = join(fixture.root, "partial.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "partial"
   try {
     const initial = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("test", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath }, {}]),
-      {
-        ...appEnv(),
-        processPort: processPort(11111),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(11111)),
-      },
+      parseWorkflowProgrammaticCall("test", fixture.scriptPath, [{ ticket: 123 }, { runId }, {}]),
+      sqliteAppEnv(databasePath, 11111),
     )
     assert.equal(initial.status, "completed")
-    const fullText = await readFile(journalPath, "utf8")
-    const partialLines = fullText.trim().split("\n").filter((line) => parseJournalEventLine(line).t !== "run_finished")
-    await writeFile(journalPath, `${partialLines.join("\n")}\n`, "utf8")
+    pruneSqliteEvents(databasePath, runId, (event) => event.t !== "run_finished")
 
     const provider = new FakeProviderAgentTurn()
     const resumed = await runResumeCommandApp(
-      parseResumeCliRequest(parseCliArgv(["resume", "--journal", journalPath, "--json", "--quiet"])),
+      parseResumeCliRequest(parseCliArgv(["resume", "--run-id", runId, "--json", "--quiet"])),
       {
-        ...appEnv(),
-        processPort: processPort(22222),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(22222)),
+        ...sqliteAppEnv(databasePath, 22222),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: provider,
@@ -770,7 +784,7 @@ test("resume replays completed journaled agents without a provider call", async 
       prompt: "do the work",
     })
     assert.equal(provider.requests.length, 0)
-    const journalEvents = (await readFile(journalPath, "utf8")).trim().split("\n").map((line) => parseJournalEventLine(line))
+    const journalEvents = await sqliteJournalEvents(databasePath, runId)
     assert.equal(journalEvents.filter((event) => event.t === "run_opened").length, 1)
     assert.equal(journalEvents.filter((event) => event.t === "agent_replayed").length, 1)
     assert.equal(journalEvents.filter((event) => event.t === "run_finished").length, 1)
@@ -781,15 +795,14 @@ test("resume replays completed journaled agents without a provider call", async 
 
 test("resume passes recorded SDK thread binding for incomplete provider turns", async () => {
   const fixture = await workflowFixture()
-  const journalPath = join(fixture.root, "partial-sdk.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "partial-sdk"
   try {
     const initialProvider = new FakeProviderAgentTurn(["live result"])
     const initial = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath }, {}]),
+      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { runId }, {}]),
       {
-        ...appEnv(),
-        processPort: processPort(11111),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(11111)),
+        ...sqliteAppEnv(databasePath, 11111),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: initialProvider,
@@ -798,20 +811,13 @@ test("resume passes recorded SDK thread binding for incomplete provider turns", 
       },
     )
     assert.equal(initial.status, "completed")
-    const fullText = await readFile(journalPath, "utf8")
-    const partialLines = fullText.trim().split("\n").filter((line) => {
-      const event = parseJournalEventLine(line)
-      return event.t !== "agent_completed" && event.t !== "run_finished"
-    })
-    await writeFile(journalPath, `${partialLines.join("\n")}\n`, "utf8")
+    pruneSqliteEvents(databasePath, runId, (event) => event.t !== "agent_completed" && event.t !== "run_finished")
 
     const resumeProvider = new FakeProviderAgentTurn(["resumed result"])
     const resumed = await runResumeCommandApp(
-      parseResumeCliRequest(parseCliArgv(["resume", "--journal", journalPath, "--json", "--quiet"])),
+      parseResumeCliRequest(parseCliArgv(["resume", "--run-id", runId, "--json", "--quiet"])),
       {
-        ...appEnv(),
-        processPort: processPort(22222),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(22222)),
+        ...sqliteAppEnv(databasePath, 22222),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: resumeProvider,
@@ -837,15 +843,14 @@ try { await agent("first", { label: "first" }) } catch {}
 await agent("second", { label: "second" })
 return "unreachable"
 `)
-  const journalPath = join(fixture.root, "partial-failed-budget.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "partial-failed-budget"
   try {
     const initialProvider = new FakeProviderAgentTurn(["first result"], [], ["first failed"])
     const initial = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath, taskBudget: 7 }, {}]),
+      parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, { runId, taskBudget: 7 }, {}]),
       {
-        ...appEnv(),
-        processPort: processPort(11111),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(11111)),
+        ...sqliteAppEnv(databasePath, 11111),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: initialProvider,
@@ -855,21 +860,18 @@ return "unreachable"
     )
     assert.equal(initial.status, "completed")
     assert.equal(initialProvider.requests.length, 1)
-    const fullLines = (await readFile(journalPath, "utf8")).trim().split("\n")
-    const kept: string[] = []
-    for (const line of fullLines) {
-      kept.push(line)
-      if (parseJournalEventLine(line).t === "agent_failed") break
-    }
-    await writeFile(journalPath, `${kept.join("\n")}\n`, "utf8")
+    let keepThroughFailed = true
+    pruneSqliteEvents(databasePath, runId, (event) => {
+      if (!keepThroughFailed) return false
+      if (event.t === "agent_failed") keepThroughFailed = false
+      return true
+    })
 
     const resumeProvider = new FakeProviderAgentTurn(["resumed first", "resumed second"])
     const resumed = await runResumeCommandApp(
-      parseResumeCliRequest(parseCliArgv(["resume", "--journal", journalPath, "--json", "--quiet"])),
+      parseResumeCliRequest(parseCliArgv(["resume", "--run-id", runId, "--json", "--quiet"])),
       {
-        ...appEnv(),
-        processPort: processPort(22222),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(22222)),
+        ...sqliteAppEnv(databasePath, 22222),
         workflowExecutor: new IsolatedWorkflowExecutor({
           policy: parseWorkflowChildExecutionPolicy({}),
           providerAgentTurn: resumeProvider,
@@ -890,22 +892,21 @@ return "unreachable"
 
 test("workflow runner writes periodic runner heartbeats while live", async () => {
   const fixture = await workflowFixture()
-  const journalPath = join(fixture.root, "heartbeat-run.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
+  const runId = "heartbeat-run"
   const heartbeat = new FakeRunnerHeartbeat(2)
   try {
     const result = await runWorkflowCommandApp(
-      parseWorkflowProgrammaticCall("test", fixture.scriptPath, [{ ticket: 123 }, { journal: journalPath }, {}]),
+      parseWorkflowProgrammaticCall("test", fixture.scriptPath, [{ ticket: 123 }, { runId }, {}]),
       {
-        ...appEnv(),
-        processPort: processPort(33333),
-        journalStoreFactory: new FileJournalStoreFactory(processPort(33333)),
+        ...sqliteAppEnv(databasePath, 33333),
         runnerHeartbeat: heartbeat,
       },
     )
 
     assert.equal(result.status, "completed")
     assert.equal(heartbeat.stopped, true)
-    const journalEvents = (await readFile(journalPath, "utf8")).trim().split("\n").map((line) => parseJournalEventLine(line))
+    const journalEvents = await sqliteJournalEvents(databasePath, runId)
     assert.equal(journalEvents.filter((event) => event.t === "runner_heartbeat" && event.pid === 33333).length, 3)
   } finally {
     await fixture.dispose()
@@ -915,9 +916,11 @@ test("workflow runner writes periodic runner heartbeats while live", async () =>
 test("CLI --background launches a resume worker after run_opened is committed", async () => {
   const fixture = await workflowFixture()
   const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url))
+  const databasePath = cliDatabasePath(fixture.root)
   const result = spawnSync(process.execPath, [cliPath, "workflow", "--mock", fixture.scriptPath, "--background", "--json", "--quiet"], {
     cwd: fixture.root,
     encoding: "utf8",
+    env: cliEnv(fixture.root),
   })
   try {
     assert.equal(result.status, 0, result.stderr)
@@ -926,7 +929,8 @@ test("CLI --background launches a resume worker after run_opened is committed", 
     assert.equal(envelope["command"], "workflow")
     assert.equal(envelope["workflowName"], "demo")
     assert.equal(record(envelope)["pid"] !== undefined, true)
-    const journalEvents = (await readFile(String(envelope["journalPath"]), "utf8")).trim().split("\n").map((line) => parseJournalEventLine(line))
+    assert.equal(envelope["databasePath"], databasePath)
+    const journalEvents = await sqliteJournalEvents(databasePath, String(envelope["runId"]))
     assert.equal(journalEvents.filter((event) => event.t === "run_opened").length, 1)
     assert.equal(journalEvents.some((event) => event.t === "runner_attached"), true)
   } finally {
@@ -972,12 +976,12 @@ test("CLI --background --status-server returns status server handshake fields", 
   ], {
     cwd: fixture.root,
     encoding: "utf8",
+    env: cliEnv(fixture.root),
   })
   try {
     assert.equal(result.status, 0, result.stderr)
     const envelope = record(parseWorkflowCliEnvelope(JSON.parse(result.stdout)))
     assert.equal(envelope["status"], "async_launched")
-    assert.equal(typeof envelope["journalPath"], "string")
     assert.equal(typeof envelope["pid"], "number")
     assert.match(String(envelope["statusUrl"]), /^http:\/\/127\.0\.0\.1:\d+\/$/)
     assert.equal(typeof envelope["statusServerPid"], "number")
@@ -985,11 +989,12 @@ test("CLI --background --status-server returns status server handshake fields", 
     statusServerPid = Number(envelope["statusServerPid"])
     const statusResponse = await fetch(new URL("/status.json", String(envelope["statusUrl"])))
     const statusPayload = record(await statusResponse.json())
-    assert.equal(statusPayload["journalPath"], envelope["journalPath"])
+    assert.equal(statusPayload["runId"], envelope["runId"])
+    assert.equal(statusPayload["databasePath"], envelope["databasePath"])
     assert.equal(record(statusPayload["status"])["runId"], envelope["runId"])
-    const portfile = record(JSON.parse(await readFile(`${envelope["journalPath"]}.serve.json`, "utf8")))
-    assert.equal(portfile["url"], envelope["statusUrl"])
-    assert.equal(portfile["pid"], envelope["statusServerPid"])
+    const session = sqliteServeSession(String(envelope["databasePath"]), String(envelope["runId"]))
+    assert.equal(session["url"], envelope["statusUrl"])
+    assert.equal(session["pid"], envelope["statusServerPid"])
   } finally {
     if (statusServerPid > 0) {
       try {
@@ -1011,25 +1016,24 @@ test("CLI --background --status-server returns status server handshake fields", 
 
 test("background status-server handshake failure does not launch the worker", async () => {
   const fixture = await workflowFixture()
-  const journalPath = join(fixture.root, "status-fail.jsonl")
+  const databasePath = join(fixture.root, "runs_1.sqlite")
   const launcher = new FakeBackgroundProcessLauncher()
   try {
     await assert.rejects(
       () => runWorkflowCommandApp(
         parseWorkflowProgrammaticCall("workflow", fixture.scriptPath, [{ ticket: 123 }, {
-          journal: journalPath,
+          runId: "status-fail",
           provider: "mock",
           background: true,
           statusServer: true,
         }, {}]),
         {
-          ...appEnv(),
+          ...sqliteAppEnv(databasePath, 44444),
           processPort: processPort(44444),
-          journalStoreFactory: new FileJournalStoreFactory(processPort(44444)),
           backgroundLauncher: launcher,
         },
       ),
-      /status server pid 99998 did not publish a portfile/,
+      /status server pid 99998 did not publish a serve session/,
     )
     assert.equal(launcher.statusLaunches, 1)
     assert.equal(launcher.resumeLaunches, 0)
@@ -1072,12 +1076,14 @@ test("CLI draft writes a validated workflow scaffold", async () => {
   }
 })
 
-test("serve app emits a status envelope and writes a durable portfile", async () => {
+test("serve app emits a status envelope and writes a durable serve session", async () => {
   const fixture = await workflowFixture()
   const cliPath = fileURLToPath(new URL("../src/cli.ts", import.meta.url))
+  const databasePath = cliDatabasePath(fixture.root)
   const run = spawnSync(process.execPath, [cliPath, "test", "--mock", fixture.scriptPath, "--json", "--quiet"], {
     cwd: fixture.root,
     encoding: "utf8",
+    env: cliEnv(fixture.root),
   })
   try {
     assert.equal(run.status, 0, run.stderr)
@@ -1086,28 +1092,31 @@ test("serve app emits a status envelope and writes a durable portfile", async ()
     const uiRoot = join(fixture.root, "status-ui")
     await mkdir(uiRoot, { recursive: true })
     await writeFile(join(uiRoot, "index.html"), "<!doctype html><div id=\"root\"></div>", "utf8")
+    const runId = String(record(runEnvelope["snapshot"])["runId"])
     const serve = await runServeCommandApp(
-      parseServeCliRequest(parseCliArgv(["serve", "--journal", String(runEnvelope["journalPath"]), "--port", "0", "--json"])),
+      parseServeCliRequest(parseCliArgv(["serve", "--run-id", runId, "--port", "0", "--json"])),
       {
-        journalReader: new FileJournalReader(),
+        journalReader: new SqliteJournalReader(databasePath),
         processPort: processPort(),
-        servePortfileStore: new FileServePortfileStore(),
+        serveSessionStore: new SqliteServeSessionStore(databasePath),
         statusServer,
         statusUiRootDirectory: uiRoot,
         workflowScriptSourceStore: { read: async (path: string) => readFile(path, "utf8") },
       },
     )
-    assert.deepEqual(Object.keys(serve.envelope).sort(), ["command", "journalPath", "url"])
+    assert.deepEqual(Object.keys(serve.envelope).sort(), ["command", "databasePath", "runId", "url"])
     assert.equal(serve.envelope.command, "serve")
-    assert.equal(serve.envelope.journalPath, runEnvelope["journalPath"])
+    assert.equal(serve.envelope.runId, runId)
+    assert.equal(serve.envelope.databasePath, databasePath)
     assert.equal(serve.envelope.url, "http://127.0.0.1:43210/")
     assert.equal(statusServer.uiRootDirectory, uiRoot)
-    assert.equal(record(JSON.parse(statusServer.prettyPayload))["journalPath"], runEnvelope["journalPath"])
+    assert.equal(record(JSON.parse(statusServer.prettyPayload))["runId"], runId)
+    assert.equal(record(JSON.parse(statusServer.prettyPayload))["databasePath"], databasePath)
     assert.equal(record(record(JSON.parse(statusServer.prettyPayload))["status"])["runId"], record(runEnvelope["snapshot"])["runId"])
 
-    const portfile = JSON.parse(await readFile(`${runEnvelope["journalPath"]}.serve.json`, "utf8"))
-    assert.equal(portfile.url, serve.envelope.url)
-    assert.equal(portfile.pid, 12345)
+    const session = sqliteServeSession(databasePath, runId)
+    assert.equal(session.url, serve.envelope.url)
+    assert.equal(session.pid, 12345)
     await serve.close()
   } finally {
     await fixture.dispose()
@@ -1164,6 +1173,7 @@ test("CLI validate rejects incompatible scripts with validation exit code", asyn
   const result = spawnSync(process.execPath, [cliPath, "validate", scriptPath, "--json", "--quiet"], {
     cwd: root,
     encoding: "utf8",
+    env: cliEnv(root),
   })
   try {
     assert.equal(result.status, 6)
@@ -1182,6 +1192,7 @@ test("CLI validate accepts compatible scripts without journal writes or executio
   const result = spawnSync(process.execPath, [cliPath, "validate", fixture.scriptPath, "--json", "--quiet"], {
     cwd: fixture.root,
     encoding: "utf8",
+    env: cliEnv(fixture.root),
   })
   try {
     assert.equal(result.status, 0, result.stderr)
@@ -1190,7 +1201,7 @@ test("CLI validate accepts compatible scripts without journal writes or executio
     assert.equal(envelope["workflowName"], "demo")
     assert.equal(envelope["scriptPath"], fixture.scriptPath)
     assert.equal(record(envelope["validation"])["ok"], true)
-    await assert.rejects(() => readdir(join(fixture.root, ".agent-loops-runs")))
+    await assert.rejects(() => readFile(cliDatabasePath(fixture.root), "utf8"))
   } finally {
     await fixture.dispose()
   }
@@ -1206,6 +1217,7 @@ return agent("do the work", { label: "agent" })
   const result = spawnSync(process.execPath, [cliPath, "validate", scriptPath, "--json", "--quiet"], {
     cwd: root,
     encoding: "utf8",
+    env: cliEnv(root),
   })
   try {
     assert.equal(result.status, 6)
@@ -1223,6 +1235,86 @@ function record(value: unknown): Record<string, unknown> {
   assert.notEqual(value, null)
   assert.equal(Array.isArray(value), false)
   return value as Record<string, unknown>
+}
+
+const unusedJournalReader = {
+  async resolveRun(input: { readonly runId: string }) {
+    return { runId: input.runId, databasePath: "" }
+  },
+  async readText(): Promise<string> {
+    throw new Error("unexpected journal read")
+  },
+  async readMutationText(): Promise<string> {
+    throw Object.assign(new Error("no mutation records"), { code: "ENOENT" })
+  },
+}
+
+const emptyJournalDirectory = {
+  async listRuns() {
+    return []
+  },
+}
+
+function cliDatabasePath(home: string): string {
+  return join(home, ".codex", "workflows", "runs_1.sqlite")
+}
+
+function cliEnv(home: string): NodeJS.ProcessEnv {
+  return { ...process.env, HOME: home }
+}
+
+async function sqliteJournalEvents(databasePath: string, runId: string): Promise<readonly JournalEvent[]> {
+  const { read } = await readRun(runId, { journalReader: new SqliteJournalReader(databasePath) })
+  return read.events
+}
+
+function pruneSqliteEvents(databasePath: string, runId: string, keep: (event: JournalEvent) => boolean): void {
+  const db = new DatabaseSync(databasePath)
+  try {
+    initializeSqliteSchema(db)
+    const rows = db.prepare("select seq, event_json from events where run_id = ? order by seq").all(runId)
+    db.exec("begin immediate")
+    try {
+      for (const row of rows) {
+        const seq = Number(row["seq"])
+        const eventJson = String(row["event_json"])
+        const event = parseJournalEventLine(eventJson)
+        if (!keep(event)) {
+          db.prepare("delete from events where run_id = ? and seq = ?").run(runId, seq)
+          db.prepare("delete from idempotency_keys where run_id = ? and seq = ?").run(runId, seq)
+        }
+      }
+      db.prepare("update runs set status = 'running', updated_at = ? where run_id = ?").run(new Date().toISOString(), runId)
+      db.exec("commit")
+    } catch (error) {
+      db.exec("rollback")
+      throw error
+    }
+  } finally {
+    db.close()
+  }
+}
+
+function insertSqliteMutation(databasePath: string, runId: string, input: { readonly node: string; readonly attempt: number; readonly files: readonly string[] }): void {
+  const db = new DatabaseSync(databasePath)
+  try {
+    initializeSqliteSchema(db)
+    db.prepare("insert into mutations(run_id, idempotency_key, mutation_json, created_at) values(?, ?, ?, ?)")
+      .run(runId, `test:${input.node}:${input.attempt}`, JSON.stringify(input), new Date().toISOString())
+  } finally {
+    db.close()
+  }
+}
+
+function sqliteServeSession(databasePath: string, runId: string): { readonly url: string; readonly pid: number } {
+  const db = new DatabaseSync(databasePath, { readOnly: true, timeout: 5_000 })
+  try {
+    const row = db.prepare("select url, pid from serve_sessions where run_id = ?").get(runId)
+    assert.notEqual(row, undefined)
+    return { url: String(row?.["url"]), pid: Number(row?.["pid"]) }
+  } finally {
+    db.close()
+  }
 }
 
 async function waitForProcessExit(pid: number): Promise<boolean> {
@@ -1329,6 +1421,24 @@ class FakeStatusServer implements StatusServerPort {
       address: { address: "127.0.0.1", port: 43210 },
       async close() {},
     }
+  }
+}
+
+class FakeServeSessionStore {
+  readonly #sessions = new Map<string, { readonly url: string; readonly pid: number }>()
+
+  async writeSession(record: { readonly runId: string; readonly url: string; readonly pid: number }): Promise<void> {
+    this.#sessions.set(record.runId, { url: record.url, pid: record.pid })
+  }
+
+  async readSession(runId: string): Promise<string> {
+    const session = this.#sessions.get(runId)
+    if (session === undefined) throw Object.assign(new Error("serve session not found"), { code: "ENOENT" })
+    return `${JSON.stringify(session)}\n`
+  }
+
+  async removeSession(runId: string): Promise<void> {
+    this.#sessions.delete(runId)
   }
 }
 

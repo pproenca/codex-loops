@@ -495,7 +495,6 @@
           "additionalProperties": false,
           "required": ["cacheKey", "completedNodesReplayFromJournal"],
           "properties": {
-            "journalPath": { "type": "string" },
             "cacheKey": { "const": "runId+phaseTitle+label+promptHash+schemaHash+optionsHash" },
             "completedNodesReplayFromJournal": { "const": true }
           }

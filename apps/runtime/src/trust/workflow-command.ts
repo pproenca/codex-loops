@@ -27,8 +27,8 @@ const DEFAULT_BACKGROUND_HANDSHAKE_POLL_MS = 50
 const DEFAULT_BACKGROUND_HANDSHAKE_MAX_POLLS = 40
 const DEFAULT_STATUS_HOST = "127.0.0.1"
 const DEFAULT_STATUS_PORT = 0
-const DEFAULT_STATUS_PORTFILE_POLL_MS = 50
-const DEFAULT_STATUS_PORTFILE_MAX_POLLS = 40
+const DEFAULT_STATUS_SESSION_POLL_MS = 50
+const DEFAULT_STATUS_SESSION_MAX_POLLS = 40
 const DEFAULT_WORKFLOW_LIMITS: WorkflowLimits = {
   maxAgents: 1000,
   maxConcurrentAgents: 8,
@@ -118,11 +118,12 @@ const workflowCommandApiSchema = z.object({
 
 export function parseWorkflowCommandApiRequest(command: "test" | "workflow", input: unknown): Proven<WorkflowCommandRequest> {
   const parsed = workflowCommandApiSchema.parse(input)
+  rejectRemovedJournal(parsed.journal)
+  rejectRemovedJournal(parsed.input?.journal)
   return parsedWorkflowCommandRequest({
     command,
     script: parseScriptSelection(parsed.script),
     args: parsed.args,
-    journal: parseJournalSelection(parsed.journal),
     options: parsed.input ?? emptyCallOptions(),
   })
 }
@@ -140,6 +141,7 @@ export function parseWorkflowProgrammaticCall(
   const ref = parseProgrammaticRef(nameOrRef)
   const args = tuple[0] ?? {}
   const input = tuple[1] ?? emptyCallOptions()
+  rejectRemovedJournal(input.journal)
   return proven({
     command,
     script: ref,
@@ -147,7 +149,6 @@ export function parseWorkflowProgrammaticCall(
     provider: parseProviderSelection(command, input.provider),
     approval: parseApproval(input.approved),
     requestedRunId: parseRequestedRunId(input.runId),
-    journal: parseJournalSelection(input.journal),
     noInput: input.noInput,
     quiet: input.quiet,
     background: parseBackgroundLaunch(input),
@@ -159,6 +160,7 @@ export function parseWorkflowProgrammaticCall(
 export function parseWorkflowCommandCliRequest(input: Proven<CliRequest>): Proven<WorkflowCommandRequest> {
   const command = runnableCommandSchema.parse(input.command)
   const flags = z.record(z.string(), flagValueSchema).parse(input.flags)
+  rejectRemovedJournal(parseOptionalString(flags["journal"]))
   const provider = parseCliProvider(flags)
   const args = parseArgsFlag(flags["args"])
 
@@ -166,7 +168,6 @@ export function parseWorkflowCommandCliRequest(input: Proven<CliRequest>): Prove
     command,
     script: parseScriptSelection(input.args[0]),
     args,
-    journal: parseJournalSelection(parseOptionalString(flags["journal"])),
     options: {
       budget: parseBudget(flags["budget"]),
       provider,
@@ -212,7 +213,6 @@ function parsedWorkflowCommandRequest(input: {
   command: WorkflowRunnableCommand
   script: WorkflowScriptRef
   args: ReturnType<typeof jsonValueSchema.parse>
-  journal: WorkflowCommandRequest["journal"]
   options: z.infer<typeof callOptionsSchema>
 }): Proven<WorkflowCommandRequest> {
   return proven({
@@ -222,7 +222,6 @@ function parsedWorkflowCommandRequest(input: {
     provider: parseProviderSelection(input.command, input.options.provider),
     approval: parseApproval(input.options.approved),
     requestedRunId: parseRequestedRunId(input.options.runId),
-    journal: input.journal,
     noInput: input.options.noInput,
     quiet: input.options.quiet,
     background: parseBackgroundLaunch(input.options),
@@ -236,9 +235,8 @@ function parseScriptSelection(value: string | undefined): WorkflowScriptRef {
   return { t: "unresolved", value }
 }
 
-function parseJournalSelection(value: string | undefined): WorkflowCommandRequest["journal"] {
-  if (value === undefined) return { t: "none" }
-  return { t: "requested", path: value }
+function rejectRemovedJournal(value: string | undefined): void {
+  if (value !== undefined) throw new CliUsageError("--journal was removed; use --run-id")
 }
 
 function parseRequestedRunId(value: string | undefined): RequestedRunId {
@@ -264,8 +262,8 @@ function parseBackgroundLaunch(input: z.infer<typeof callOptionsSchema>["backgro
         t: "enabled",
         host: input.statusHost ?? DEFAULT_STATUS_HOST,
         port: input.statusPort ?? DEFAULT_STATUS_PORT,
-        portfilePollMs: DEFAULT_STATUS_PORTFILE_POLL_MS,
-        portfileMaxPolls: DEFAULT_STATUS_PORTFILE_MAX_POLLS,
+        sessionPollMs: DEFAULT_STATUS_SESSION_POLL_MS,
+        sessionMaxPolls: DEFAULT_STATUS_SESSION_MAX_POLLS,
       },
   }
 }

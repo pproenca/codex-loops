@@ -31,7 +31,7 @@ export function StatusApp({ payload, phaseIndex, agentId, query }: StatusAppProp
         <div className="title-group">
           <p className="eyebrow">Codex Loops</p>
           <h1>{payload?.status.workflowName ?? "Workflow status"}</h1>
-          <p className="journal">{payload?.journalPath ?? "Loading journal..."}</p>
+          <p className="journal">{payload?.databasePath ?? "Loading run storage..."}</p>
         </div>
         <div className="run-meta">
           <span className={`pill ${statusClass(payload?.status.status)}`}>{payload?.status.status ?? "loading"}</span>

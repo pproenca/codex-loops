@@ -1,6 +1,6 @@
 {
   "name": "codex-loops",
-  "version": "0.2.6+codex.20260614190037",
+  "version": "0.2.7",
   "description": "Use when a user explicitly asks for Codex Loops or path-first dynamic workflow orchestration through the Codex SDK.",
   "author": {
     "name": "Pedro Proenca"

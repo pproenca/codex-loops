@@ -284,3 +284,49 @@ defmodule Workflow.Test.ExplodingProvider do
   def run_agent(_prompt, _schema, _key, _opts),
     do: raise("provider was called when a journaled effect should have been replayed")
 end
+
+defmodule Workflow.Test.VerdictProvider do
+  @moduledoc """
+  A verify-panel mock that casts a **deterministic** verdict per voter, keyed on the
+  voter's branch index (the last element of the idempotency key's `node_path`) rather
+  than call order — so it is correct under the concurrent fan-out. `opts[:verdicts]`
+  is a boolean list indexed by voter; each call pings `{:agent_called, prompt}` to
+  `opts[:sink]` so the exact vote count is asserted.
+  """
+  @behaviour Workflow.Provider
+
+  alias Workflow.Provider.Usage
+
+  @impl true
+  def run_agent(prompt, _schema, key, opts) do
+    if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt})
+    verdict = Enum.at(Keyword.fetch!(opts, :verdicts), List.last(key.node_path))
+    {:ok, %{"verdict" => verdict}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+  end
+end
+
+defmodule Workflow.Test.PanelProvider do
+  @moduledoc """
+  A judge-panel mock. A schema-backed call is a **scoring** turn: it returns a
+  deterministic score keyed on the candidate index (`node_path` at position `-2`, i.e.
+  `[judge, candidate, criterion]`) from `opts[:scores]` — deterministic under the
+  concurrent grid, independent of call order. A schemaless call is the downstream
+  **synthesis** turn and echoes its prompt. Every call pings `{:agent_called, prompt}`
+  to `opts[:sink]`.
+  """
+  @behaviour Workflow.Provider
+
+  alias Workflow.Provider.Usage
+
+  @impl true
+  def run_agent(prompt, nil, _key, opts) do
+    if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt})
+    {:ok, %{"synthesis" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+  end
+
+  def run_agent(prompt, _schema, key, opts) do
+    if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt})
+    score = Enum.at(Keyword.fetch!(opts, :scores), Enum.at(key.node_path, -2))
+    {:ok, %{"score" => score}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+  end
+end

@@ -65,7 +65,13 @@ defmodule Workflow.AgentSchemaTest do
 
     # Two rejections are journaled before the committing turn.
     assert types(id) ==
-             [:run_started, :agent_attempt_rejected, :agent_attempt_rejected, :agent_committed, :run_completed]
+             [
+               :run_started,
+               :agent_attempt_rejected,
+               :agent_attempt_rejected,
+               :agent_committed,
+               :run_completed
+             ]
 
     status = Status.of(id)
     assert status.state == :completed
@@ -175,7 +181,10 @@ defmodule Workflow.AgentSchemaTest do
     {:ok, script1} = FlakyProvider.start([%{"a" => 1}, %{"b" => 2}])
 
     assert {:error, {:run_crashed, _}} =
-             Run.run(Classify, run_id: id, provider: {FlakyProvider, sink: self(), script: script1})
+             Run.run(Classify,
+               run_id: id,
+               provider: {FlakyProvider, sink: self(), script: script1}
+             )
 
     # The provider was called three times (two rejects + the faulting call).
     for _ <- 1..3, do: assert_received({:agent_called, "classify"})
@@ -193,7 +202,10 @@ defmodule Workflow.AgentSchemaTest do
     {:ok, script2} = FlakyProvider.start([%{"c" => 3}])
 
     assert {:error, {:malformed_output, [0], {:missing_required, "label"}}} =
-             Run.run(Classify, run_id: id, provider: {FlakyProvider, sink: self(), script: script2})
+             Run.run(Classify,
+               run_id: id,
+               provider: {FlakyProvider, sink: self(), script: script2}
+             )
 
     # The resumed run called the provider exactly once — not once per prior attempt.
     assert_received {:agent_called, "classify"}
@@ -225,7 +237,10 @@ defmodule Workflow.AgentSchemaTest do
     {:ok, store} = DedupingProvider.start([%{"wrong" => 1}, %{"label" => "ok"}])
 
     assert {:ok, ^id} =
-             Run.run(Classify, run_id: id, provider: {DedupingProvider, store: store, sink: self()})
+             Run.run(Classify,
+               run_id: id,
+               provider: {DedupingProvider, store: store, sink: self()}
+             )
 
     # Exactly two paid calls: the rejected attempt 0 and the committing attempt 1.
     assert_received {:agent_called, "classify"}

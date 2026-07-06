@@ -69,7 +69,9 @@ defmodule Workflow.CompilerTest do
         end
 
       assert {:ok, tree} = Compiler.parse(body, env())
-      assert [%Agent{address: [0], prompt: "classify", schema: schema, retries: 2}, %Return{}] = tree.nodes
+
+      assert [%Agent{address: [0], prompt: "classify", schema: schema, retries: 2}, %Return{}] =
+               tree.nodes
 
       # The stored schema is a real map, not a fragment of AST, and holds no closures.
       assert schema == %{
@@ -82,10 +84,11 @@ defmodule Workflow.CompilerTest do
     end
 
     test "an explicit retries budget overrides the default" do
-      body = quote do
-        agent("go", schema: %{"type" => "object"}, retries: 5)
-        return(:ok)
-      end
+      body =
+        quote do
+          agent("go", schema: %{"type" => "object"}, retries: 5)
+          return(:ok)
+        end
 
       assert {:ok, tree} = Compiler.parse(body, env())
       assert [%Agent{retries: 5}, %Return{}] = tree.nodes
@@ -97,7 +100,9 @@ defmodule Workflow.CompilerTest do
     end
 
     test "a non-literal / non-map schema is a located finding" do
-      assert {:error, %Finding{line: 1} = f} = parse("agent(\"go\", schema: build_schema())\nreturn(:ok)")
+      assert {:error, %Finding{line: 1} = f} =
+               parse("agent(\"go\", schema: build_schema())\nreturn(:ok)")
+
       assert f.message =~ "schema must be a literal map"
 
       assert {:error, %Finding{}} = parse(~s|agent("go", schema: "not a map")\nreturn(:ok)|)

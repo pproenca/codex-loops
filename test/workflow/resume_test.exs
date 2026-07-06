@@ -48,9 +48,15 @@ defmodule Workflow.ResumeTest do
 
   defp await_lease_released(run_id, tries \\ 200) do
     cond do
-      Registry.lookup(Workflow.Run.Registry, run_id) == [] -> :ok
-      tries == 0 -> flunk("lease for #{run_id} was never released")
-      true -> Process.sleep(5); await_lease_released(run_id, tries - 1)
+      Registry.lookup(Workflow.Run.Registry, run_id) == [] ->
+        :ok
+
+      tries == 0 ->
+        flunk("lease for #{run_id} was never released")
+
+      true ->
+        Process.sleep(5)
+        await_lease_released(run_id, tries - 1)
     end
   end
 
@@ -104,7 +110,10 @@ defmodule Workflow.ResumeTest do
     # First run: both branches commit and the parallel region is fully bracketed;
     # the writer then blocks inside the gate agent, mid-run.
     {:ok, ^id, pid} =
-      Run.start(FanoutThenGate, run_id: id, provider: {GateProvider, sink: self(), gate_on: "gate"})
+      Run.start(FanoutThenGate,
+        run_id: id,
+        provider: {GateProvider, sink: self(), gate_on: "gate"}
+      )
 
     for p <- ~w(a b gate), do: assert_receive({:agent_called, ^p})
     assert_receive {:at_agent, ^pid}
@@ -119,7 +128,8 @@ defmodule Workflow.ResumeTest do
 
     # Resume re-walks the tree from the top, re-entering the already-completed
     # fan-out node before reaching the still-open gate.
-    assert {:ok, ^id} = Run.run(FanoutThenGate, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:ok, ^id} =
+             Run.run(FanoutThenGate, run_id: id, provider: {EchoProvider, sink: self()})
 
     # Only the uncommitted gate turn ran on resume; the settled branches replayed.
     refute_received {:agent_called, "a"}
@@ -181,7 +191,10 @@ defmodule Workflow.ResumeTest do
 
     # Resume: the deduping provider replays the effect; the commit finally lands.
     assert {:ok, ^id} =
-             Run.run(OneAgent, run_id: id, provider: {LedgeredProvider, store: store, sink: self()})
+             Run.run(OneAgent,
+               run_id: id,
+               provider: {LedgeredProvider, store: store, sink: self()}
+             )
 
     # It was re-invoked (nothing was committed to replay from) ...
     assert_received {:agent_called, "do it"}

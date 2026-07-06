@@ -176,3 +176,119 @@ defmodule Workflow.Node.UntilDry do
           max_iterations: pos_integer()
         }
 end
+
+defmodule Workflow.Node.Verify do
+  @moduledoc """
+  Higher-order verification: submit a `subject` (a literal finding) to a bounded
+  panel of independent voters and let it **survive only when `threshold` of them
+  confirm**. The panel comes in two flavours, both fixed at author time so the
+  fan-out width is a compile-time constant:
+
+    * `voters: N` — `N` identical votes (redundant, majority-style confirmation).
+    * `lenses: [:correctness, :security, ...]` — one vote per perspective
+      (adversarial / perspective-diverse verification).
+
+  Each voter is pre-expanded into an inert, fail-closed `%Workflow.Node.Agent{}`
+  with its own stable address `parent ++ [voter]`, schema-bound to a boolean
+  `verdict`, so every vote is journaled and keyed for exactly-once independently.
+  Survival is a **pure fold** over the journaled verdicts against `threshold`
+  (`:majority` | `:unanimous` | `:any` | a positive integer count) — never process
+  state — so a resume replays the settled outcome.
+  """
+  @enforce_keys [:address, :subject, :mode, :voters, :threshold]
+  defstruct [:address, :subject, :mode, :voters, :threshold]
+
+  @type mode :: {:voters, pos_integer()} | {:lenses, [atom()]}
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          subject: term(),
+          mode: mode(),
+          voters: [Workflow.Node.Agent.t()],
+          threshold: :majority | :unanimous | :any | pos_integer()
+        }
+end
+
+defmodule Workflow.Node.Judge do
+  @moduledoc """
+  A judge panel: score each of a fixed list of `candidates` along the `by`
+  criteria and `pick` a winner. The scoring grid is fully expanded at compile time
+  into inert, pre-addressed agents — `scorers[c]` is candidate `c`'s ordered list
+  of one fail-closed `%Workflow.Node.Agent{}` per criterion, each at the stable
+  address `parent ++ [candidate, criterion]` and schema-bound to a numeric `score`.
+
+  Fan-out width is `length(candidates) * length(by)`, both compile-time constants,
+  so the panel stays bounded. The winner is derived by a **pure fold** over the
+  journaled per-criterion scores (summed per candidate, then `pick`ed —
+  `:max_score` / `:min_score`), so a resume replays the settled outcome rather than
+  re-scoring.
+  """
+  @enforce_keys [:address, :candidates, :by, :pick, :scorers]
+  defstruct [:address, :candidates, :by, :pick, :scorers]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          candidates: [term()],
+          by: [atom()],
+          pick: :max_score | :min_score,
+          scorers: [[Workflow.Node.Agent.t()]]
+        }
+end
+
+defmodule Workflow.Node.Synthesize do
+  @moduledoc """
+  Fold a set of `inputs` into a single result under a static `prompt`. Both are
+  compile-time literals, so the node stays inert. At runtime it is one schemaless,
+  exactly-once agent turn whose effective prompt deterministically embeds the
+  `inputs` — reusing the same paid-effect machinery every other agent turn does, so
+  it is journaled and resumable with no special case.
+  """
+  @enforce_keys [:address, :inputs, :prompt]
+  defstruct [:address, :inputs, :prompt]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          inputs: term(),
+          prompt: String.t()
+        }
+end
+
+defmodule Workflow.Node.BudgetSlices do
+  @moduledoc """
+  A **runtime-owned width helper**: `floor(remaining / per)` over the budget
+  ledger. It is deliberately *not* author arithmetic — the only thing a workflow
+  can say is `budget_slices(per: N)`, and the runtime, reading the journaled
+  ledger, decides the concrete width. Because the width is derived from budget it
+  is bounded, and because the decision is journaled it is deterministic across a
+  resume.
+  """
+  @enforce_keys [:per]
+  defstruct [:per]
+
+  @type t :: %__MODULE__{per: pos_integer()}
+end
+
+defmodule Workflow.Node.FanOut do
+  @moduledoc """
+  Budget-scaled fan-out: run `body` concurrently across a **dynamic** number of
+  branches whose width is a runtime-owned `%Workflow.Node.BudgetSlices{}` decision
+  (`floor(remaining / per)`), not a compile-time constant like `parallel`. The
+  decided width is journaled (`fan_out_started`) so a resume replays it rather than
+  recomputing against a ledger the branches have since spent down.
+
+  `body` is an inert list of `%Workflow.Node.Agent{}` templates at placeholder
+  addresses; at runtime branch `i` re-addresses them to `parent ++ [i, stage]` — a
+  pure data rebase, no closure — so every branch turn is journaled and keyed for
+  exactly-once independently. Width is bounded by the budget and further capped by
+  `max_concurrency`.
+  """
+  @enforce_keys [:address, :width, :body]
+  defstruct [:address, :width, :body, max_concurrency: nil]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          width: Workflow.Node.BudgetSlices.t(),
+          body: [Workflow.Node.Agent.t()],
+          max_concurrency: pos_integer() | nil
+        }
+end

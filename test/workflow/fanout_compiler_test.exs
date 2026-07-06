@@ -93,8 +93,14 @@ defmodule Workflow.FanoutCompilerTest do
                  items: ["x", "y"],
                  max_concurrency: nil,
                  lanes: [
-                   [%Agent{address: [0, 0, 0], prompt: "s1"}, %Agent{address: [0, 0, 1], prompt: "s2"}],
-                   [%Agent{address: [0, 1, 0], prompt: "s1"}, %Agent{address: [0, 1, 1], prompt: "s2"}]
+                   [
+                     %Agent{address: [0, 0, 0], prompt: "s1"},
+                     %Agent{address: [0, 0, 1], prompt: "s2"}
+                   ],
+                   [
+                     %Agent{address: [0, 1, 0], prompt: "s1"},
+                     %Agent{address: [0, 1, 1], prompt: "s2"}
+                   ]
                  ]
                },
                %Return{}
@@ -106,13 +112,19 @@ defmodule Workflow.FanoutCompilerTest do
     test "materializes a schema-backed stage into inert data on every lane" do
       body =
         quote do
-          pipeline(["x"], [agent("classify", schema: %{"type" => "object", "required" => ["label"]})])
+          pipeline(["x"], [
+            agent("classify", schema: %{"type" => "object", "required" => ["label"]})
+          ])
+
           return(:ok)
         end
 
       assert {:ok, tree} = Compiler.parse(body, env())
       assert [%Pipeline{lanes: [[stage]]}, %Return{}] = tree.nodes
-      assert %Agent{address: [0, 0, 0], schema: %{"type" => "object", "required" => ["label"]}} = stage
+
+      assert %Agent{address: [0, 0, 0], schema: %{"type" => "object", "required" => ["label"]}} =
+               stage
+
       refute contains_function?(tree)
     end
 
@@ -122,7 +134,9 @@ defmodule Workflow.FanoutCompilerTest do
     end
 
     test "non-literal items are a located finding" do
-      assert {:error, %Finding{line: 1} = f} = parse("pipeline(build_items(), [agent(\"s\")])\nreturn(:ok)")
+      assert {:error, %Finding{line: 1} = f} =
+               parse("pipeline(build_items(), [agent(\"s\")])\nreturn(:ok)")
+
       assert f.message =~ "literal list"
     end
 
@@ -145,8 +159,14 @@ defmodule Workflow.FanoutCompilerTest do
   # A term with no functions anywhere: proves inertness/serializability of the tree.
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
-  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+
+  defp contains_function?(m) when is_map(m),
+    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
-  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+
+  defp contains_function?(t) when is_tuple(t),
+    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+
   defp contains_function?(_), do: false
 end

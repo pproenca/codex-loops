@@ -15,7 +15,7 @@ defmodule Workflow.CompilerPropertyTest do
   @deterministic_nodes [Phase, Log, Agent, Return]
 
   property "every accepted workflow tree is built only from deterministic nodes" do
-    check all statements <- list_of(one_of([:phase, :log, :agent]), max_length: 12) do
+    check all(statements <- list_of(one_of([:phase, :log, :agent]), max_length: 12)) do
       # Unique phase names keep every generated body well-formed (accepted), so the
       # property speaks about the accept path; a trailing return makes it terminate.
       body =
@@ -41,7 +41,7 @@ defmodule Workflow.CompilerPropertyTest do
         constant(quote(do: :erlang.now()))
       ])
 
-    check all form <- forbidden do
+    check all(form <- forbidden) do
       body = {:__block__, [], [form, {:return, [line: 2], [:ok]}]}
       assert_raise Workflow.CompileError, fn -> Compiler.parse(body, __ENV__) end
     end

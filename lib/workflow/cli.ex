@@ -161,7 +161,9 @@ defmodule Workflow.CLI do
     case run_script_path(run_id) do
       nil ->
         {:error,
-         Error.new(:usage, "cannot resume #{run_id}: no script recorded",
+         Error.new(
+           :usage,
+           "cannot resume #{run_id}: no script recorded",
            "pass the workflow script path"
          )}
 
@@ -243,8 +245,7 @@ defmodule Workflow.CLI do
       nil ->
         case Journal.latest_run_id() do
           nil ->
-            {:error,
-             Error.new(:usage, "no runs found", "run a workflow first, or pass --run-id")}
+            {:error, Error.new(:usage, "no runs found", "run a workflow first, or pass --run-id")}
 
           id ->
             {:ok, id}
@@ -340,14 +341,20 @@ defmodule Workflow.CLI do
 
       nil ->
         {:error,
-         Error.new(:validation, "no workflow defined in #{path}",
+         Error.new(
+           :validation,
+           "no workflow defined in #{path}",
            "define one with `use Workflow` and a `workflow \"name\" do ... end` block"
          )}
     end
   rescue
     # The `workflow` macro raises this from the compile-time gate; surface its
-    # rustc-style findings as a located validation failure (exit 6).
-    e in Workflow.CompileError -> {:error, Error.new(:validation, Exception.message(e))}
+    # rustc-style findings as a located validation failure (exit 6). Ordinary
+    # Elixir parser/compiler failures are also expected user-script failures, so
+    # they must keep the CLI's JSON/exit-code contract instead of bubbling as a
+    # stacktrace.
+    e in [Workflow.CompileError, SyntaxError, TokenMissingError, CompileError] ->
+      {:error, Error.new(:validation, Exception.message(e))}
   end
 
   # --- Option/argument parsing ---
@@ -378,8 +385,11 @@ defmodule Workflow.CLI do
   # `test` pins the provider; otherwise honour --provider, defaulting per command.
   defp provider_name(parsed, opts) do
     case Keyword.get(opts, :force_provider) do
-      nil -> Keyword.get(parsed, :provider, Atom.to_string(Keyword.fetch!(opts, :default_provider)))
-      forced -> Atom.to_string(forced)
+      nil ->
+        Keyword.get(parsed, :provider, Atom.to_string(Keyword.fetch!(opts, :default_provider)))
+
+      forced ->
+        Atom.to_string(forced)
     end
   end
 
@@ -461,7 +471,12 @@ defmodule Workflow.CLI do
     recent = Enum.map(e["recentEvents"], &event_line/1)
 
     Enum.join(
-      [run_line(e), "phase: #{e["phase"]}", "usage: #{e["usage"]["totalTokens"]} tokens", "recent:"]
+      [
+        run_line(e),
+        "phase: #{e["phase"]}",
+        "usage: #{e["usage"]["totalTokens"]} tokens",
+        "recent:"
+      ]
       |> Kernel.++(recent),
       "\n"
     )

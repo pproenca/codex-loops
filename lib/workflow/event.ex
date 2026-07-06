@@ -70,7 +70,14 @@ defmodule Workflow.Event do
   the rejected output and the validator's reason so replay reconstructs every retry
   decision; the paid `usage` is still ledgered.
   """
-  def agent_attempt_rejected(%Workflow.Node.Agent{} = node, iteration, attempt, output, reason, usage) do
+  def agent_attempt_rejected(
+        %Workflow.Node.Agent{} = node,
+        iteration,
+        attempt,
+        output,
+        reason,
+        usage
+      ) do
     %__MODULE__{
       type: :agent_attempt_rejected,
       payload: %{
@@ -140,6 +147,48 @@ defmodule Workflow.Event do
 
   def pipeline_completed(%Workflow.Node.Pipeline{} = node) do
     %__MODULE__{type: :pipeline_completed, payload: %{address: node.address}}
+  end
+
+  @doc """
+  Loop control-flow markers and the declared-reduction event. **Control-flow
+  decisions are journaled**, so a resume replays them rather than recomputing them
+  from a ledger/accumulator fold that reflects the whole run instead of the
+  historical decision point.
+
+    * `iteration_started` — enters loop iteration `n` at the loop's address.
+    * `loop_decision` — the journaled `:continue`/`:stop` decision for iteration `n`.
+    * `loop_completed` — the loop's terminal bracket, recording how many iterations ran.
+    * `accumulate` — one `collect`'s reduction: the exact deduped items `added` to
+      `into` this iteration, plus the resulting accumulator `size`. Folding these
+      rebuilds every accumulator exactly on resume.
+  """
+  def iteration_started(loop, iteration) do
+    %__MODULE__{type: :iteration_started, payload: %{address: loop.address, iteration: iteration}}
+  end
+
+  def loop_decision(loop, iteration, decision) when decision in [:continue, :stop] do
+    %__MODULE__{
+      type: :loop_decision,
+      payload: %{address: loop.address, iteration: iteration, decision: decision}
+    }
+  end
+
+  def loop_completed(loop, iterations) do
+    %__MODULE__{type: :loop_completed, payload: %{address: loop.address, iterations: iterations}}
+  end
+
+  def accumulate(%Workflow.Node.Collect{} = node, iteration, seen_by, added, size) do
+    %__MODULE__{
+      type: :accumulate,
+      payload: %{
+        address: node.address,
+        into: node.into,
+        iteration: iteration,
+        seen_by: seen_by,
+        added: added,
+        size: size
+      }
+    }
   end
 
   def run_completed(value) do

@@ -12,8 +12,11 @@ defmodule Workflow.IdempotencyKey do
   keeping retries independent while still deduping the *same* attempt re-issued
   after a lost commit.
 
-  `iteration` is always `0` until loops exist (a later slice); both `iteration` and
-  `attempt` are present now so the event log never needs a migration to gain them.
+  `iteration` is `0` for every node outside a dynamic loop; inside `while_budget` /
+  `until_dry` it carries the real per-iteration index, so the same body address keys
+  a distinct paid effect each pass. The key format was fixed since the first slice —
+  both `iteration` and `attempt` were reserved up front — so populating `iteration`
+  now needs no migration.
   """
   @enforce_keys [:run_id, :node_path, :iteration]
   defstruct [:run_id, :node_path, :iteration, attempt: 0]

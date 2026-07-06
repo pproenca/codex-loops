@@ -139,7 +139,9 @@ defmodule Workflow.Test.LedgeredProvider do
           {false, state}
         else
           crash? = Keyword.get(opts, :crash_once, false) and not state.crashed
-          {crash?, %{state | charges: Map.put(state.charges, key, 1), crashed: state.crashed or crash?}}
+
+          {crash?,
+           %{state | charges: Map.put(state.charges, key, 1), crashed: state.crashed or crash?}}
         end
       end)
 
@@ -171,7 +173,8 @@ defmodule Workflow.Test.DedupingProvider do
   alias Workflow.Provider.Usage
 
   @doc "Start the shared store seeded with the outputs to return, in order."
-  def start(outputs), do: Agent.start_link(fn -> %{script: outputs, results: %{}, charges: %{}} end)
+  def start(outputs),
+    do: Agent.start_link(fn -> %{script: outputs, results: %{}, charges: %{}} end)
 
   @doc "How many times the paid effect for `key` was actually charged (0 or 1)."
   def charges(store, key), do: Agent.get(store, &Map.get(&1.charges, key, 0))
@@ -201,6 +204,69 @@ defmodule Workflow.Test.DedupingProvider do
              }}
         end
       end)
+
+    {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+  end
+end
+
+defmodule Workflow.Test.LoopProvider do
+  @moduledoc """
+  A deduping, charge-counting mock for driving dynamic loops. A shared `store`
+  `Agent` holds a scripted sequence of per-iteration outputs plus a per-key ledger
+  (`Workflow.IdempotencyKey`). The *first* call for a fresh key pops the next
+  scripted output, records it under the key, and charges once; any later call for
+  the *same* key replays that recorded output without charging again — modelling a
+  real backend's request idempotency so a loop iteration re-run after a lost commit
+  is free and deterministic.
+
+  With `opts[:crash_at]` set to an iteration index, the first (fresh) call for that
+  iteration records its output durably in the store and then hard-kills the caller —
+  the live writer — *before returning*, reproducing the return→commit crash window
+  mid-loop: the effect happened but no `agent_committed`/`accumulate` landed for
+  that round. On resume the writer re-invokes with the same key, the store dedupes
+  (no re-pop, no new charge), and the round finally commits — proving the
+  accumulator rebuilds with no lost or duplicated items.
+
+  Every call pings `{:agent_called, prompt, iteration}` to `opts[:sink]`, so a test
+  can assert the exact per-iteration call sequence.
+  """
+  @behaviour Workflow.Provider
+
+  alias Workflow.Provider.Usage
+
+  @doc "Start the shared store seeded with the per-iteration outputs to return, in order."
+  def start(outputs),
+    do: Agent.start_link(fn -> %{outputs: outputs, results: %{}, charges: %{}} end)
+
+  @doc "How many times the paid effect for `key` was actually charged (0 or 1)."
+  def charges(store, key), do: Agent.get(store, &Map.get(&1.charges, key, 0))
+
+  @impl true
+  def run_agent(prompt, _schema, key, opts) do
+    store = Keyword.fetch!(opts, :store)
+    if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt, key.iteration})
+
+    {output, fresh?} =
+      Agent.get_and_update(store, fn state ->
+        case Map.fetch(state.results, key) do
+          {:ok, recorded} ->
+            {{recorded, false}, state}
+
+          :error ->
+            [out | rest] = state.outputs
+
+            {{out, true},
+             %{
+               state
+               | outputs: rest,
+                 results: Map.put(state.results, key, out),
+                 charges: Map.put(state.charges, key, 1)
+             }}
+        end
+      end)
+
+    # Kill the writer after the effect is durable server-side but before it commits.
+    if fresh? and Keyword.get(opts, :crash_at) == key.iteration, do: Process.exit(self(), :kill)
 
     {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
   end

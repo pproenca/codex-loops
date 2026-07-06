@@ -35,6 +35,19 @@ defmodule Workflow.Provider do
               key :: Workflow.IdempotencyKey.t(),
               opts :: term()
             ) :: {:ok, result(), Workflow.Provider.Usage.t()}
+
+  @typedoc "A resolved backend: the provider module plus its opaque per-run opts."
+  @type t :: {module(), term()}
+
+  @doc """
+  Resolve a backend name (the `--provider` flag) into a `{module, opts}` port the
+  interpreter can drive. This is the whole of provider selection: swapping `:mock`
+  for `:codex` changes only which module the writer calls — never any core, writer,
+  or fold code — so the two backends are interchangeable behind one port.
+  """
+  @spec select(:mock | :codex, keyword()) :: t()
+  def select(:mock, opts), do: {Workflow.Provider.Mock, opts}
+  def select(:codex, opts), do: {Workflow.Provider.Codex, opts}
 end
 
 defmodule Workflow.Provider.Usage do

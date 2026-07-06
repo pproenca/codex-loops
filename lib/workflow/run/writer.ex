@@ -9,9 +9,13 @@ defmodule Workflow.Run.Writer do
   writer for the same `run_id` fails with `{:already_started, pid}`. The registry
   monitors this process, releasing the lease on death.
 
-  Work runs in `handle_continue/2` (so `start_link` returns as soon as the lease is
-  held), then the writer reports its result to the caller and stops `:normal`.
-  Crashes propagate to the caller via its monitor — let it crash.
+  `start_link` returns as soon as the lease is held; the writer then idles until it
+  receives `:begin`. Deferring the work to a message (rather than a
+  `handle_continue`) lets the caller establish its `Process.monitor` before any
+  effect runs, so a mid-turn crash is observed with its real exit reason rather
+  than a `:noproc` race. On `:begin` the writer executes, reports its result to the
+  caller, and stops `:normal`. Crashes propagate to the caller via its monitor —
+  let it crash.
   """
   use GenServer, restart: :temporary
 
@@ -27,10 +31,10 @@ defmodule Workflow.Run.Writer do
   def via(run_id), do: {:via, Registry, {Workflow.Run.Registry, run_id}}
 
   @impl true
-  def init(state), do: {:ok, state, {:continue, :execute}}
+  def init(state), do: {:ok, state}
 
   @impl true
-  def handle_continue(:execute, state) do
+  def handle_info(:begin, state) do
     result = execute(state)
     send(state.parent, {:run_finished, state.run_id, result})
     {:stop, :normal, state}
@@ -116,18 +120,24 @@ defmodule Workflow.Run.Writer do
   # with on-thread retry up to `node.retries`. On valid output, commit and
   # continue; on invalid, journal the rejection and retry until the budget is
   # spent, then fail the node.
-  defp attempt(%Agent{schema: nil} = node, run_id, provider, seq, iteration, _attempt, return_value) do
-    {:ok, result, usage} = call_provider(provider, node.prompt, nil)
-    key = key(run_id, node.address, iteration)
+  defp attempt(%Agent{schema: nil} = node, run_id, provider, seq, iteration, attempt, return_value) do
+    # The key is minted *before* the paid call and handed to the provider, so a
+    # server-side dedupe closes the return→commit crash window (see `Provider`).
+    # A schemaless turn is a single paid call, so `attempt` is always 0.
+    key = key(run_id, node.address, iteration, attempt)
+    {:ok, result, usage} = call_provider(provider, node.prompt, nil, key)
     {:cont, commit(run_id, seq, Event.agent_committed(node, iteration, key, result, usage)), return_value}
   end
 
   defp attempt(%Agent{} = node, run_id, provider, seq, iteration, attempt, return_value) do
-    {:ok, output, usage} = call_provider(provider, node.prompt, node.schema)
+    # Each retry is a distinct paid call, so it carries a distinct request key
+    # (`attempt`). This keeps retries independent from a deduping backend, while a
+    # crash-and-resume of the *same* attempt re-issues the identical key and dedupes.
+    key = key(run_id, node.address, iteration, attempt)
+    {:ok, output, usage} = call_provider(provider, node.prompt, node.schema, key)
 
     case Schema.validate(node.schema, output) do
       {:ok, validated} ->
-        key = key(run_id, node.address, iteration)
         event = Event.agent_committed(node, iteration, key, validated, usage)
         {:cont, commit(run_id, seq, event), return_value}
 
@@ -144,10 +154,11 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp key(run_id, address, iteration),
-    do: %IdempotencyKey{run_id: run_id, node_path: address, iteration: iteration}
+  defp key(run_id, address, iteration, attempt),
+    do: %IdempotencyKey{run_id: run_id, node_path: address, iteration: iteration, attempt: attempt}
 
-  defp call_provider({module, opts}, prompt, schema), do: module.run_agent(prompt, schema, opts)
+  defp call_provider({module, opts}, prompt, schema, key),
+    do: module.run_agent(prompt, schema, key, opts)
 
   defp commit(run_id, seq, %Event{} = event) do
     event = %{event | run_id: run_id, seq: seq}

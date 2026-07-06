@@ -31,18 +31,49 @@ defmodule Workflow.Compiler do
   failure.
   """
 
-  alias Workflow.Tree
-  alias Workflow.Node.{Phase, Log, Agent, Return, Parallel, Pipeline}
+  alias Workflow.{Tree, Predicate}
+
+  alias Workflow.Node.{
+    Phase,
+    Log,
+    Agent,
+    Return,
+    Parallel,
+    Pipeline,
+    Collect,
+    WhileBudget,
+    UntilDry
+  }
+
   alias Workflow.Compiler.Finding
 
   # The closed combinator vocabulary. Determinism is a property of this set: it
   # contains no randomness or wall-clock node, so neither can be expressed.
-  @combinators [:agent, :log, :phase, :parallel, :pipeline, :return]
+  @combinators [
+    :agent,
+    :log,
+    :phase,
+    :parallel,
+    :pipeline,
+    :return,
+    :collect,
+    :while_budget,
+    :until_dry
+  ]
+
+  # Combinators a loop body may contain. Loops, fan-out, and `return` are rejected
+  # inside a body, so the per-iteration key stays a single integer and each loop
+  # provably terminates on its own budget/dryness bound.
+  @body_combinators [:agent, :log, :phase, :collect]
 
   # Options a schema-backed `agent` accepts, and the default retry budget when
   # `retries:` is omitted (total attempts = retries + 1).
   @agent_option_keys [:schema, :retries]
   @default_retries 2
+
+  # A structural safety bound so every loop terminates even if its budget/dryness
+  # condition never fires. Authors may lower it with `max_iterations:`.
+  @default_max_iterations 1000
 
   @spec parse(Macro.t(), Macro.Env.t()) :: {:ok, Tree.t()} | {:error, Finding.t()}
   def parse(block, env) do
@@ -131,6 +162,56 @@ defmodule Workflow.Compiler do
 
   defp node({:pipeline, _meta, [items, stages, opts]} = form, address, env),
     do: pipeline(items, stages, opts, address, form, env)
+
+  # `while_budget reserve: N[, until: <predicate>][, max_iterations: N] do <body> end`
+  # — a dynamic loop whose body runs while the ledger's `remaining` exceeds `reserve`.
+  defp node({:while_budget, _meta, args} = form, address, env) do
+    with {:ok, opts, block} <- loop_call(args, form, env),
+         :ok <- only_keys(opts, [:reserve, :until, :max_iterations], form, env),
+         {:ok, reserve} <- required_integer(opts, :reserve, 0, form, env),
+         {:ok, until_pred} <- optional_predicate(opts, env),
+         {:ok, cap} <- max_iterations(opts, form, env),
+         {:ok, body} <- parse_body(block, address, form, env) do
+      {:ok,
+       %WhileBudget{
+         address: address,
+         reserve: reserve,
+         until: until_pred,
+         body: body,
+         max_iterations: cap
+       }}
+    end
+  end
+
+  # `until_dry rounds: K, seen_by: [:field, ...][, max_iterations: N] do <body> end`
+  # — loops until K consecutive iterations add nothing new (deduped by `seen_by`).
+  defp node({:until_dry, _meta, args} = form, address, env) do
+    with {:ok, opts, block} <- loop_call(args, form, env),
+         :ok <- only_keys(opts, [:rounds, :seen_by, :max_iterations], form, env),
+         {:ok, rounds} <- required_integer(opts, :rounds, 1, form, env),
+         {:ok, seen_by} <- seen_by_opt(opts, form, env),
+         {:ok, cap} <- max_iterations(opts, form, env),
+         {:ok, body} <- parse_body(block, address, form, env),
+         :ok <- require_collect(body, form, env) do
+      {:ok,
+       %UntilDry{
+         address: address,
+         rounds: rounds,
+         seen_by: seen_by,
+         body: body,
+         max_iterations: cap
+       }}
+    end
+  end
+
+  # `collect` is only meaningful inside a loop body; at top level it is rejected. The
+  # body parser handles the in-loop form before delegating here.
+  defp node({:collect, _meta, _args} = form, _address, env) do
+    {:error,
+     Finding.at(env, form, "`collect` must appear inside a loop body",
+       hint: "collect reduces a loop iteration's agent output into a declared accumulator"
+     )}
+  end
 
   # A known combinator invoked with the wrong argument shape: recoverable finding,
   # located at the declaration site.
@@ -224,9 +305,14 @@ defmodule Workflow.Compiler do
 
   defp agent_retries(kw, form, env) do
     case Keyword.fetch(kw, :retries) do
-      :error -> {:ok, @default_retries}
-      {:ok, n} when is_integer(n) and n >= 0 -> {:ok, n}
-      {:ok, _} -> {:error, Finding.at(env, form, "`agent` retries must be a non-negative integer")}
+      :error ->
+        {:ok, @default_retries}
+
+      {:ok, n} when is_integer(n) and n >= 0 ->
+        {:ok, n}
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`agent` retries must be a non-negative integer")}
     end
   end
 
@@ -284,7 +370,9 @@ defmodule Workflow.Compiler do
         items
         |> Enum.with_index()
         |> Enum.map(fn {_item, i} ->
-          Enum.with_index(stages, fn %Agent{} = stage, s -> %{stage | address: address ++ [i, s]} end)
+          Enum.with_index(stages, fn %Agent{} = stage, s ->
+            %{stage | address: address ++ [i, s]}
+          end)
         end)
 
       {:ok, %Pipeline{address: address, items: items, lanes: lanes, max_concurrency: cap}}
@@ -346,7 +434,8 @@ defmodule Workflow.Compiler do
   defp concurrency_opt([], _form, _env), do: {:ok, nil}
 
   defp concurrency_opt(opts, form, env) do
-    if keyword_literal?(opts) and Keyword.keyword?(opts) and Keyword.keys(opts) == [:max_concurrency] do
+    if keyword_literal?(opts) and Keyword.keyword?(opts) and
+         Keyword.keys(opts) == [:max_concurrency] do
       case Keyword.fetch!(opts, :max_concurrency) do
         n when is_integer(n) and n > 0 -> {:ok, n}
         _ -> {:error, Finding.at(env, form, "`max_concurrency` must be a positive integer")}
@@ -369,6 +458,155 @@ defmodule Workflow.Compiler do
   defp materialize({left, right}), do: {materialize(left), materialize(right)}
   defp materialize(list) when is_list(list), do: Enum.map(list, &materialize/1)
   defp materialize(literal), do: literal
+
+  # --- Dynamic loop combinators (while_budget / until_dry / collect) ---
+
+  # Split a loop call's args into its option keyword list and its do-block body.
+  # Elixir parses `foo opt: v do ... end` as `[[opt: v], [do: block]]`.
+  defp loop_call([opts, [do: block]], _form, _env) when is_list(opts), do: {:ok, opts, block}
+  defp loop_call([[do: block]], _form, _env), do: {:ok, [], block}
+
+  defp loop_call(_args, form, env) do
+    {:error,
+     Finding.at(env, form, "a loop requires options and a `do` block",
+       hint: "e.g. while_budget reserve: 100 do agent(\"...\") end"
+     )}
+  end
+
+  # The loop body is a fresh sub-tree; its nodes are addressed `parent ++ [i]` so
+  # they journal and key independently while every iteration re-runs the same
+  # addresses under a distinct `iteration`.
+  defp parse_body(block, loop_address, form, env) do
+    case build_body(statements(block), loop_address, 0, [], MapSet.new(), env) do
+      {:ok, []} -> {:error, Finding.at(env, form, "a loop body must contain at least one node")}
+      other -> other
+    end
+  end
+
+  defp build_body([], _loop_address, _index, acc, _seen, _env), do: {:ok, Enum.reverse(acc)}
+
+  defp build_body([stmt | rest], loop_address, index, acc, seen, env) do
+    case body_node(stmt, loop_address ++ [index], env) do
+      {:ok, %Phase{name: name} = phase} ->
+        if MapSet.member?(seen, name) do
+          {:error, Finding.at(env, stmt, "duplicate phase name #{inspect(name)}")}
+        else
+          build_body(rest, loop_address, index + 1, [phase | acc], MapSet.put(seen, name), env)
+        end
+
+      {:ok, node} ->
+        build_body(rest, loop_address, index + 1, [node | acc], seen, env)
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
+  # A loop body permits the body vocabulary plus `collect`; loops, fan-out, and
+  # `return` are rejected here (keeping the iteration key a single integer), while
+  # closures/external calls still raise via the shared forbidden-form catalog.
+  defp body_node({:collect, _meta, [opts]} = form, address, env),
+    do: collect(opts, form, address, env)
+
+  defp body_node({:collect, _meta, _args} = form, _address, env),
+    do: {:error, Finding.at(env, form, "`collect` requires `into: :name`")}
+
+  defp body_node({combinator, _meta, _args} = form, _address, env)
+       when combinator in [:while_budget, :until_dry, :parallel, :pipeline, :return] do
+    {:error,
+     Finding.at(env, form, "`#{combinator}` is not allowed inside a loop body",
+       hint: "a loop body may contain: #{Enum.join(@body_combinators, ", ")}"
+     )}
+  end
+
+  defp body_node(stmt, address, env), do: node(stmt, address, env)
+
+  defp collect(opts, form, address, env) do
+    cond do
+      not (keyword_literal?(opts) and Keyword.keyword?(opts)) ->
+        {:error, Finding.at(env, form, "`collect` requires `into: :name`")}
+
+      Keyword.keys(opts) != [:into] ->
+        {:error, Finding.at(env, form, "`collect` takes exactly one option, `into: :name`")}
+
+      not is_atom(Keyword.fetch!(opts, :into)) ->
+        {:error, Finding.at(env, form, "`collect` `into:` must be an accumulator name (an atom)")}
+
+      true ->
+        {:ok, %Collect{address: address, into: Keyword.fetch!(opts, :into)}}
+    end
+  end
+
+  defp require_collect(body, form, env) do
+    if Enum.any?(body, &match?(%Collect{}, &1)) do
+      :ok
+    else
+      {:error,
+       Finding.at(env, form, "`until_dry` body must `collect` into an accumulator",
+         hint: "dryness is measured over what the body accumulates; add collect into: :name"
+       )}
+    end
+  end
+
+  defp only_keys(opts, allowed, form, env) do
+    if keyword_literal?(opts) and Keyword.keyword?(opts) and
+         Enum.all?(Keyword.keys(opts), &(&1 in allowed)) do
+      :ok
+    else
+      {:error,
+       Finding.at(env, form, "invalid loop options",
+         hint: "allowed options: #{Enum.join(allowed, ", ")}"
+       )}
+    end
+  end
+
+  defp required_integer(opts, key, min, form, env) do
+    case Keyword.fetch(opts, key) do
+      {:ok, n} when is_integer(n) and n >= min ->
+        {:ok, n}
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`#{key}` must be an integer >= #{min}")}
+
+      :error ->
+        {:error, Finding.at(env, form, "a loop requires `#{key}:`")}
+    end
+  end
+
+  defp optional_predicate(opts, env) do
+    case Keyword.fetch(opts, :until) do
+      :error -> {:ok, nil}
+      {:ok, ast} -> Predicate.parse(ast, env)
+    end
+  end
+
+  defp max_iterations(opts, form, env) do
+    case Keyword.fetch(opts, :max_iterations) do
+      :error -> {:ok, @default_max_iterations}
+      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
+      {:ok, _} -> {:error, Finding.at(env, form, "`max_iterations` must be a positive integer")}
+    end
+  end
+
+  defp seen_by_opt(opts, form, env) do
+    case Keyword.fetch(opts, :seen_by) do
+      :error ->
+        {:ok, []}
+
+      {:ok, fields} when is_list(fields) ->
+        if Enum.all?(fields, &is_atom/1) do
+          {:ok, fields}
+        else
+          {:error, Finding.at(env, form, "`seen_by` must be a list of field names (atoms)")}
+        end
+
+      {:ok, _} ->
+        {:error,
+         Finding.at(env, form, "`seen_by` must be a field list, never a function",
+           hint: "e.g. seen_by: [:file, :line] — a list so validation can see it"
+         )}
+    end
+  end
 
   # --- Whole-DSL invariants ---
 

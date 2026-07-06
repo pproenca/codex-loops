@@ -17,6 +17,7 @@ defmodule Workflow.Status do
             logs: [],
             agents: [],
             rejected: [],
+            accumulators: %{},
             failure: nil,
             result: nil,
             usage: %Usage{},
@@ -70,7 +71,26 @@ defmodule Workflow.Status do
   # already fold into `agents`/`usage` via `agent_committed`. They advance the event
   # count so the fold stays total over the versioned, additive log.
   defp apply_event(%Event{type: type}, s)
-       when type in [:parallel_started, :parallel_completed, :pipeline_started, :pipeline_completed],
+       when type in [
+              :parallel_started,
+              :parallel_completed,
+              :pipeline_started,
+              :pipeline_completed
+            ],
+       do: tick(s)
+
+  # A declared reduction: append this iteration's already-deduped items to the named
+  # accumulator. The read model is thus a pure fold — the same rebuild that resume
+  # relies on — so LiveView renders only journaled accumulator state.
+  defp apply_event(%Event{type: :accumulate, payload: p}, s) do
+    accumulators = Map.update(s.accumulators, p.into, p.added, &(&1 ++ p.added))
+    %{s | accumulators: accumulators} |> tick()
+  end
+
+  # Loop control-flow brackets/decisions carry no read-model state of their own; they
+  # advance the count so the fold stays total over the versioned, additive log.
+  defp apply_event(%Event{type: type}, s)
+       when type in [:iteration_started, :loop_decision, :loop_completed],
        do: tick(s)
 
   defp apply_event(%Event{type: :run_completed, payload: p}, s) do

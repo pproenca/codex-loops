@@ -104,3 +104,75 @@ defmodule Workflow.Node.Pipeline do
           max_concurrency: pos_integer() | nil
         }
 end
+
+defmodule Workflow.Node.Collect do
+  @moduledoc """
+  A **declared reduction**: fold the current loop iteration's most recent agent
+  result into a named accumulator. `into` names the accumulator; the dedup field
+  list (`seen_by`) comes from the enclosing loop, not the author — so the
+  accumulator is owned and rebuilt by the runtime from the journal, never
+  author-managed mutable state.
+
+  `collect` is only meaningful inside a loop body (it needs an iteration and a
+  harvest), so the compiler rejects it at top level. Each execution journals an
+  `accumulate` event carrying the deduped items it added, so replaying the journal
+  rebuilds the accumulator exactly.
+  """
+  @enforce_keys [:address, :into]
+  defstruct [:address, :into]
+
+  @type t :: %__MODULE__{address: Workflow.Node.address(), into: atom()}
+end
+
+defmodule Workflow.Node.WhileBudget do
+  @moduledoc """
+  A dynamic loop that runs its `body` once per iteration **while the budget
+  ledger's `remaining` exceeds `reserve`** (and, optionally, while an `until`
+  predicate stays false). Because every paid turn only lowers `remaining`
+  (monotonically non-increasing), the loop **provably terminates**: it stops once
+  `remaining <= reserve`. `max_iterations` is a structural safety bound that
+  guarantees termination even for a body that spends nothing.
+
+  The body is an inert list of nodes addressed `parent ++ [i]`; each iteration
+  re-runs those addresses under a distinct `iteration`, which is the real
+  per-iteration component of the exactly-once key. Every control-flow decision is
+  journaled (`loop_decision`), so a resume **replays** the decision rather than
+  recomputing it from a ledger fold that reflects the whole run instead of the
+  historical decision point.
+  """
+  @enforce_keys [:address, :reserve, :body, :max_iterations]
+  defstruct [:address, :reserve, :body, :max_iterations, until: nil]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          reserve: non_neg_integer(),
+          until: struct() | nil,
+          body: [struct()],
+          max_iterations: pos_integer()
+        }
+end
+
+defmodule Workflow.Node.UntilDry do
+  @moduledoc """
+  A dynamic loop that runs its `body` until **`rounds` consecutive iterations add
+  nothing new** to their accumulators, deduping by the `seen_by` field list. A
+  round is "dry" when its `collect`s added zero new items; `rounds` consecutive dry
+  iterations stop the loop. `max_iterations` bounds it structurally so it
+  terminates even if the body never goes dry.
+
+  `seen_by` is a **field list, never a closure**, so the compiler sees it and the
+  node stays inert and serializable. Dryness is derived by folding the journaled
+  `accumulate` events — never from re-inspecting non-deterministic agent output —
+  and each `loop_decision` is journaled so resume replays it.
+  """
+  @enforce_keys [:address, :rounds, :seen_by, :body, :max_iterations]
+  defstruct [:address, :rounds, :seen_by, :body, :max_iterations]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          rounds: pos_integer(),
+          seen_by: [atom()],
+          body: [struct()],
+          max_iterations: pos_integer()
+        }
+end

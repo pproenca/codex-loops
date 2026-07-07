@@ -1,86 +1,75 @@
 # Codex Loops Operations
 
-## Sources
-Sources:
-- `apps/runtime/README.md`
-- `plugins/codex-loops/skills/codex-loops/SKILL.md`
-- `plugins/codex-loops/SPEC.md`
-
-## Preflight
-Use `validate` to check script compatibility before execution:
+## Developer Setup
 
 ```sh
-agent-loops validate <script-or-name> --args '<json>' --json --no-input
+make setup
+make test
+make release
 ```
 
-For generated workflows, verify that the workflow path, args, budget, intended
-write scope, and expected verification commands are known before running a live
-provider.
+`make setup` installs Hex/Rebar, fetches Elixir dependencies, and installs the
+Node workspace when `pnpm` is available. `.tool-versions` pins the known-good
+local toolchain for `mise`/`asdf`.
 
-## Mock Test Gate
-Run a bounded mock test before live SDK execution:
+## Release Proof
 
 ```sh
-agent-loops test <script-or-name> --args '<json>' --provider mock --budget small --json --no-input
+make proof
 ```
 
-Inspect `snapshot.status`, `budgetPlan`, `runtimeContract`, phase node summaries,
-and failed node errors.
-
-## Live Execution
-Run live SDK execution only after the gate passes and approval exists:
+This builds the Mix release and runs the packaged `agent-loops` command against
+a temporary workflow and SQLite journal:
 
 ```sh
-agent-loops workflow <script-or-name> --args '<json>' --provider sdk --budget small --approved --json --no-input
+agent-loops validate <script> --json
+agent-loops test <script> --run-id <id> --json
+agent-loops status --run-id <id> --json
+agent-loops inspect --run-id <id> --json
 ```
 
-Use an explicit `--run-id <id>` when the run needs a stable durable identifier.
-
-## Background Runs
-`--background` initializes the journal, then launches a detached resume worker.
+## Live Proof
 
 ```sh
-agent-loops workflow <script-or-name> --args '<json>' --background --json --no-input
+make proof-live
 ```
 
-The launch result includes the workflow name, pid, run id, `databasePath`, and
-script path.
+This spends one live Codex provider turn through the packaged release command,
+then asserts the run completed and recorded nonzero token usage.
 
-## Status And Inspect
+## Normal Workflow Run
+
+```sh
+agent-loops validate .codex/workflows/example.exs --json
+agent-loops test .codex/workflows/example.exs --run-id run_example --json
+agent-loops run .codex/workflows/example.exs --run-id run_example_live --provider codex --json
+```
+
+Use `--provider mock` for offline `run`/`workflow` checks. `test` is always
+mock-backed.
+
+## Status, Inspect, List, Resume
+
 ```sh
 agent-loops status --run-id <id> --event-limit 5 --json
 agent-loops inspect --run-id <id> --json
-agent-loops list --limit 20 --event-limit 5 --json
+agent-loops list --limit 20 --json
+agent-loops resume --run-id <id> --provider codex --json
 ```
 
-Omit `--run-id` to read the latest run id from
-`~/.codex/workflows/runs_1.sqlite`.
-
-## Serve
-```sh
-npx -y agent-loops serve --run-id <id> --json
-```
-
-The Codex Loops plugin should not start this visual status UI implicitly after a
-run. It should report the run id, ask whether the user wants the UI, and only
-run `agent-loops serve --run-id <id> --json` after the user accepts.
-The JSON envelope includes the local URL. The server exposes `GET /status.json`,
-a local dashboard, and SSE updates derived from SQLite run events.
-
-## Resume
-```sh
-agent-loops resume --run-id <id> --provider sdk --approved --json --no-input
-```
-
-Resume folds the journal, reuses completed nodes, and re-runs failed or changed
-nodes.
+Omit `--run-id` to select the latest known run from SQLite.
 
 ## Failure Parsing
-For `--json` commands, parse the final stderr line as a JSON error object. Do not
-scrape earlier human diagnostics for automation.
 
-## Operational Artifacts
-Treat these as generated runtime artifacts rather than source docs:
+For `--json` commands, parse stdout as the command payload on success. On
+failure, parse the last stderr line as the JSON error object. Backend warnings
+may appear earlier on stderr.
+
+## Runtime Artifacts
+
+Treat these as generated runtime artifacts:
+
 - `~/.codex/workflows/runs_1.sqlite`
 - `~/.codex/workflows/runs_1.sqlite-wal`
 - `~/.codex/workflows/runs_1.sqlite-shm`
+- `_build/prod/rel/agent_loops/`

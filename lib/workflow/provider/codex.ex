@@ -1,7 +1,7 @@
 defmodule Workflow.Provider.Codex do
   @moduledoc """
   The real provider: each agent turn shells out to the Codex CLI's one-shot,
-  non-interactive entrypoint — `codex exec --experimental-json` — through the
+  non-interactive entrypoint — `codex exec --json` — through the
   `Workflow.Containment` seam (the only place an external process runs). The prompt
   is fed on stdin; a schema-backed turn additionally writes the JSON schema to a
   temp file passed as `--output-schema`, so Codex constrains its final message to
@@ -34,7 +34,7 @@ defmodule Workflow.Provider.Codex do
   alias Workflow.Containment
   alias Workflow.Provider.Usage
 
-  @exec_args ["exec", "--experimental-json", "--skip-git-repo-check"]
+  @exec_args ["exec", "--json", "--skip-git-repo-check"]
 
   @impl true
   def run_agent(prompt, schema, _key, opts) do
@@ -52,7 +52,7 @@ defmodule Workflow.Provider.Codex do
 
   @doc """
   The production default backend: the real `codex` binary's one-shot
-  `exec --experimental-json` entrypoint. Overridable per run via
+  `exec --json` entrypoint. Overridable per run via
   `command: {path, args}` (the seam a test uses to point at a hermetic stub).
   """
   @spec default_command() :: {String.t(), [String.t()]}

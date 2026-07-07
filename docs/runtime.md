@@ -1,70 +1,64 @@
 # Codex Loops Runtime
 
-## Sources
-Sources:
-- `apps/runtime/DESIGN.md`
-- `apps/runtime/README.md`
-- `plugins/codex-loops/SPEC.md`
-
 ## Architecture
-The shipped package implements a local event-sourced runner. The core model is a
-pure reducer over journal events plus a thin effect shell. CLI parsing and
-request preparation happen at the edge, core code computes decisions and
-projections, consistency code owns journal writes, and effects contain filesystem,
-process, status-server, and SDK adapters.
 
-Runtime flow:
+The Elixir runtime is a supervised, journal-backed workflow runner. Workflow
+scripts compile into inert trees. A per-run writer process walks the tree,
+invokes the selected provider, commits ordered events to SQLite, and exits.
+Read surfaces are projections over the journal.
+
 ```text
-CLI request -> parsed command -> run preparation -> isolated workflow script
-             -> DSL intents -> pure decisions -> provider or child effects
-             -> append-only journal -> projections
+CLI argv -> workflow compile gate -> supervised run writer
+         -> provider turn or mock turn -> append-only SQLite journal
+         -> status / inspect / list projections
 ```
 
+## Packaging
+
+The production artifact is a Mix release named `agent_loops`. It includes ERTS,
+compiled BEAM code, dependency `priv/` directories, and native artifacts such as
+`exqlite`'s SQLite NIF.
+
+```sh
+make release
+_build/prod/rel/agent_loops/bin/agent-loops help
+```
+
+The release includes a small `bin/agent-loops` wrapper over the generated
+`bin/agent_loops` release script. The wrapper forwards the original argv through
+`Workflow.ReleaseCLI` and then calls the normal `Workflow.CLI.exec/1` seam.
+
 ## Journal Model
-Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`. The current
-journal format remains `agent-loops/journal@2`: committed events are closed JSON
-payloads stored as `event_json` rows keyed by `(run_id, seq)`.
 
-The SQLite store is the serialization point. Idempotency rows prevent duplicate
-logical commits, `metadata.latest_run_id` powers bare `status`/`inspect`/
-`resume`/`serve`, `run_locks` holds live run leases, `mutations` stores
-run-wide mutation records, and `serve_sessions` stores status-server handshakes.
-There are no filesystem run journals or auxiliary run-state files in the current
-persistence path.
+Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite` by default, or
+at `CODEX_LOOPS_JOURNAL_PATH` when set. Events are keyed by `{run_id, seq}` and
+folded to reconstruct status, summaries, and resume decisions.
 
-## Snapshots And Status
-Snapshots are projections, not stored authorities. `inspect` renders
-`schemaVersion: "workflow-snapshot/v2"` with phases, embedded node summaries,
-logs, totals, script path and hash, `runId`, `databasePath`, status, and
-`runtimeContract`. `status` summarizes node counts,
-staleness, and a bounded event tail. `list` reads known runs from SQLite and
-projects each entry.
+## Providers
 
-Filesystem run artifacts are not read by this version.
+- `mock`: offline provider used by `test`.
+- `codex`: live provider that shells out to `codex exec --json
+  --skip-git-repo-check` and folds the JSONL stream into a result plus token
+  usage.
 
-## Node Identity And Resume
-Node identity is based on run id, phase title, label, prompt hash, schema hash,
-and options hash. Completed nodes replay from the journal on resume, so an
-identical re-run makes no provider calls. Failed nodes re-run with a new attempt;
-script edits emit `script_changed` and invalidate only calls whose identity
-inputs changed.
+Schema-backed turns use Codex structured output via `--output-schema`; the
+writer validates results and fails closed after configured retries.
 
-Default labels are content-derived. Explicit labels are recommended for
-byte-identical fan-out whose positional results matter.
+## Supervision
 
-## Sandbox And Determinism
-Workflow scripts run in an isolated child/runtime context with deterministic DSL
-globals and restricted host access. Scripts cannot import modules, access Node or
-process APIs, use dynamic time or random values, or use TypeScript syntax. The
-sandbox enforces determinism and hygiene for caller-approved scripts; it is not a
-multi-tenant security boundary.
+The application supervises:
 
-## Structured Output
-Schema-backed `agent()` calls use provider structured output. Schema-invalid or
-unparseable structured output is retried according to the configured schema retry
-limit and then fails closed with exit code 8 when it cannot validate.
+- `Workflow.Run.Registry`: unique per-run writer lease.
+- `Workflow.PubSub`: post-commit notifications.
+- `Workflow.Journal`: SQLite owner process.
+- `Workflow.Run.Supervisor`: dynamic supervisor for run writers.
+- `Workflow.Web.Endpoint`: optional endpoint, disabled by default in release CLI
+  mode unless `CODEX_LOOPS_SERVER=1` or `true`.
 
-## Unsupported Runtime Scope
-The implemented package is local-only. Hosted workflow services, external
-workflow UIs, per-agent skip/retry controls, and inline script execution are not
-shipped Codex Loops runtime behavior.
+## Scope
+
+Supported: local workflow scripts, mock tests, live Codex runs, SQLite-backed
+status/inspect/list/resume, and release packaging.
+
+Not currently shipped in the Elixir CLI: draft scaffolding, background launch,
+serve/status UI commands, hosted workflow services, and per-agent skip controls.

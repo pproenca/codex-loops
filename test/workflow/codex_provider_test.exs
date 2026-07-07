@@ -4,7 +4,7 @@ defmodule Workflow.CodexProviderTest do
   external behaviour at the highest seam: `Workflow.Run.run/2` with the `:codex`
   backend selected as a port swap. The backend is a **hermetic stub** — a genuine
   OS subprocess reached through the `Workflow.Containment` boundary — that speaks
-  the *exact* line protocol the real `codex exec --experimental-json` speaks: it
+  the *exact* line protocol the real `codex exec --json` speaks: it
   reads the prompt on stdin and emits the same JSONL `ThreadEvent` stream
   (`thread.started` / `turn.started` / `item.completed{agent_message}` /
   `turn.completed{usage}`) that the production default parses, then exits `0`. So
@@ -20,7 +20,7 @@ defmodule Workflow.CodexProviderTest do
 
   alias Workflow.{Run, Journal, Status, Provider}
 
-  # A hermetic stub `codex exec --experimental-json`: read the prompt on stdin, emit
+  # A hermetic stub `codex exec --json`: read the prompt on stdin, emit
   # the real JSONL event stream, exit 0. Output is chosen by argv mode. The `retry`
   # mode alternates invalid→valid across successive invocations via a counter file —
   # exactly how successive real turns differ — so it exercises fail-closed retry.
@@ -155,7 +155,7 @@ defmodule Workflow.CodexProviderTest do
     # No live turn is spent: this pins the untested production wiring. The default
     # command resolves to the real `codex` binary's one-shot JSONL entrypoint — the
     # protocol the stub above faithfully mimics.
-    assert {path, ["exec", "--experimental-json", "--skip-git-repo-check"]} =
+    assert {path, ["exec", "--json", "--skip-git-repo-check"]} =
              Workflow.Provider.Codex.default_command()
 
     assert Path.basename(path) == "codex"

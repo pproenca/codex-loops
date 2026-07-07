@@ -1,2 +1,3 @@
-*
-!.gitignore
+# The plugin intentionally commits this packaged Mix release so users can
+# install codex-loops without local Elixir, Erlang, Mix, or build tools.
+# Run `make release` to refresh the payload before publishing.

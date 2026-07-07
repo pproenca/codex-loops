@@ -1,4 +1,4 @@
-.PHONY: setup test build release proof proof-live proof-mcp proof-mcp-live dogfood clean-release
+.PHONY: setup test build release proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -35,6 +35,9 @@ proof-mcp: release
 
 proof-mcp-live: release
 	MIX_ENV=dev mix run --no-start scripts/proof-mcp-live.exs
+
+verify-plugin-package:
+	scripts/verify-plugin-package.sh
 
 dogfood:
 	scripts/dogfood-plugin.sh

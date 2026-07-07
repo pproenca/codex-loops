@@ -55,5 +55,6 @@ Then use the Codex Loops MCP tools to:
 4. inspect events
 5. open the Phoenix UI URL
 
-Do not use the legacy agent-loops CLI for this dogfood run.
+Do not use shell commands for the workflow run; this dogfood run is meant to
+exercise the MCP tools.
 PROMPT

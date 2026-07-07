@@ -9,9 +9,8 @@ make release
 make proof
 ```
 
-`make setup` installs Hex/Rebar, fetches Elixir dependencies, and installs the
-Node workspace when `pnpm` is available. `.tool-versions` pins the known-good
-local toolchain for `mise`/`asdf`.
+`make setup` installs Hex/Rebar and fetches Elixir dependencies.
+`.tool-versions` pins the known-good local toolchain for `mise`/`asdf`.
 
 `make test` runs the scheduler/API/UI Elixir test suite. `make release` produces
 the distributable local scheduler artifact under `_build/prod/rel/agent_loops/`.
@@ -59,16 +58,12 @@ make proof
 ```sh
 make proof-mcp-live
 make proof-live
-make proof-release-live
 ```
 
 `make proof-mcp-live` spends one live Codex provider turn through the packaged
 scheduler plus MCP lifecycle path, then asserts the run completed and recorded
 nonzero token usage in the scheduler projection. `make proof-live` aliases the
 same MCP proof.
-
-`make proof-release-live` keeps the legacy direct packaged-release command path
-covered for compatibility.
 
 ## Normal Workflow Run
 
@@ -100,16 +95,10 @@ workflow_open_ui run_id=<id>
 workflow_resume  run_id=<id> provider=codex
 ```
 
-Use the compatible `agent-loops` command only for terminal diagnostics, legacy
-scripts, or release-wrapper proofing.
-
 ## Failure Parsing
 
 MCP tools return scheduler success envelopes as structured content. Scheduler
-typed errors remain typed and are returned as MCP errors. For legacy `--json`
-terminal commands, parse stdout as the command payload on success; on failure,
-parse the last stderr line as the JSON error object. Backend warnings may
-appear earlier on stderr.
+typed errors remain typed and are returned as MCP errors.
 
 ## Runtime Artifacts
 

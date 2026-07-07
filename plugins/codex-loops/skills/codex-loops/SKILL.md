@@ -29,10 +29,6 @@ when set.
 - `workflow_resume`: resume an existing run through the scheduler API.
 - `workflow_open_ui`: return the Phoenix LiveView run URL.
 
-The remaining `agent-loops` command is a compatibility/developer wrapper, not
-the product control path. Use it only when the user explicitly asks for terminal
-commands or when debugging the release locally.
-
 If working from a repo clone, the packaged binary is built with:
 
 ```bash

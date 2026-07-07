@@ -77,6 +77,3 @@ retried with:
 workflow_resume run_id=<id> provider=codex
 workflow_status run_id=<id>
 ```
-
-The `agent-loops` command can still perform the same operations from a terminal
-for compatibility and diagnostics, but agents should prefer the MCP tools.

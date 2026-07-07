@@ -6,9 +6,8 @@ Elixir/Phoenix scheduler. MCP manages local lifecycle and tool calls; Elixir
 owns runtime supervision, workflow workers, Phoenix PubSub/LiveView, and the
 SQLite journal.
 
-The packaged `agent_loops` Mix release still includes a compatible
-`agent-loops` command for developer diagnostics and legacy scripts, but that
-command is not the product integration surface.
+The packaged `agent_loops` Mix release is a scheduler runtime. It does not ship
+the old `agent-loops` CLI surface.
 
 ## Quick Start
 
@@ -72,7 +71,7 @@ workflow_status run_id=run_audit_live
 ## Development Commands
 
 ```sh
-make setup       # install Hex/Rebar deps, Elixir deps, and Node workspace deps when pnpm exists
+make setup       # install Hex/Rebar and Elixir deps
 make build       # compile with warnings as errors
 make test        # run the Elixir scheduler/API/UI test suite
 make release     # build the self-contained scheduler Mix release
@@ -104,7 +103,6 @@ scheduler. In the packaged plugin path, it discovers
 
 - Elixir runtime: `mix.exs`, `lib/workflow/**`, `test/workflow/**`.
 - Codex plugin guidance: `plugins/codex-loops`.
-- Legacy Node packages: `apps/runtime` and `apps/status-ui`.
 - Docs: `docs`.
 
 ## License

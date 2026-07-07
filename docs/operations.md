@@ -16,6 +16,16 @@ local toolchain for `mise`/`asdf`.
 `make test` runs the scheduler/API/UI Elixir test suite. `make release` produces
 the distributable local scheduler artifact under `_build/prod/rel/agent_loops/`.
 
+For a repeatable local dogfood run, use:
+
+```sh
+make dogfood
+```
+
+It proves the packaged scheduler/MCP path, reinstalls `codex-loops@codex-loops`
+from the current checkout, verifies Codex sees the plugin, and prints the prompt
+to paste into a fresh thread for the actual agent-driven workflow run.
+
 ## Release Proof
 
 ```sh

@@ -27,6 +27,7 @@ defmodule Workflow.Web.Router do
     get("/health", SchedulerHealthController, :show)
     post("/runs", SchedulerRunController, :create)
     get("/runs/:id/events", SchedulerRunController, :events)
+    post("/runs/:id/resume", SchedulerRunController, :resume)
     get("/runs/:id", SchedulerRunController, :show)
     post("/workflows/validate", SchedulerWorkflowController, :validate)
     match(:*, "/*path", SchedulerErrorController, :not_found)

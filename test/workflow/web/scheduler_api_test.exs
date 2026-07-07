@@ -5,6 +5,9 @@ defmodule Workflow.Web.SchedulerAPITest do
   import Phoenix.ConnTest
   import Plug.Conn, only: [put_req_header: 3]
 
+  alias Workflow.{Journal, Run, Script}
+  alias Workflow.Test.GateProvider
+
   @endpoint Workflow.Web.Endpoint
 
   defp write_script(source, prefix \\ "wf") do
@@ -34,6 +37,16 @@ defmodule Workflow.Web.SchedulerAPITest do
       phase "draft"
       log "ready"
       agent "ship it"
+      return :ok
+    end
+    """)
+  end
+
+  defp two_agent_workflow do
+    write_workflow(~S"""
+    workflow "scheduler-api-two-agents" do
+      agent "first"
+      agent "second"
       return :ok
     end
     """)
@@ -287,6 +300,27 @@ defmodule Workflow.Web.SchedulerAPITest do
   defp run_id(prefix),
     do: "#{prefix}_#{System.unique_integer([:positive])}"
 
+  defp await_lease_released(run_id, tries \\ 200) do
+    cond do
+      Registry.lookup(Workflow.Run.Registry, run_id) == [] ->
+        :ok
+
+      tries == 0 ->
+        flunk("lease for #{run_id} was never released")
+
+      true ->
+        Process.sleep(5)
+        await_lease_released(run_id, tries - 1)
+    end
+  end
+
+  defp kill_and_await(run_id, pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+    await_lease_released(run_id)
+  end
+
   defp wait_for_api_projection(id, attempts \\ 50)
 
   defp wait_for_api_projection(id, 0),
@@ -490,6 +524,244 @@ defmodule Workflow.Web.SchedulerAPITest do
                ]
              }
            } = wait_for_api_events(id)
+  end
+
+  test "POST /api/runs/:id/resume recovers the journaled script and returns an accepted response" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_resume_completed")
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+
+    assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
+
+    before =
+      id
+      |> wait_for_api_events()
+      |> get_in(["data", "events"])
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{id}/resume", %{})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "data" => %{
+               "run_id" => ^id,
+               "state" => "accepted",
+               "ui_path" => "/runs/" <> ^id,
+               "ui_url" => "/runs/" <> ^id
+             }
+           } = json_response(conn, 200)
+
+    await_lease_released(id)
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+    assert %{"data" => %{"events" => after_events}} = json_response(conn, 200)
+    assert Enum.map(after_events, & &1["type"]) == Enum.map(before, & &1["type"])
+    assert length(after_events) == length(before)
+
+    projection = get(json_conn(), "/api/runs/#{id}") |> json_response(200) |> Map.fetch!("data")
+    assert projection["state"] == "completed"
+    assert projection["event_count"] == length(after_events)
+    assert projection["event_count"] == length(Journal.fold(id))
+    assert projection["result"] == "ok"
+  end
+
+  test "POST /api/runs/:id/resume returns typed errors for unknown and invalid run ids" do
+    unknown = run_id("scheduler_api_resume_unknown")
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{unknown}/resume", %{})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.run.not_found",
+               "message" => "Workflow run not found.",
+               "details" => %{"run_id" => ^unknown}
+             }
+           } = json_response(conn, 404)
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/bad$id/resume", %{})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.run.invalid_run_id",
+               "message" => "Run id must be a non-empty string.",
+               "details" => %{
+                 "field" => "run_id",
+                 "expected" => "route_safe_non_empty_string"
+               }
+             }
+           } = json_response(conn, 400)
+  end
+
+  test "POST /api/runs/:id/resume reports missing recovered and missing explicit scripts" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_resume_missing_recovered")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id} = Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{id}/resume", %{})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.validation.missing_script_path",
+               "message" => "Missing workflow script path.",
+               "details" => %{"field" => "script_path"}
+             }
+           } = json_response(conn, 400)
+
+    missing =
+      Path.join(
+        System.tmp_dir!(),
+        "agent_loops_missing_resume_#{System.unique_integer([:positive])}.exs"
+      )
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{id}/resume", %{script_path: missing})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.validation.script_not_found",
+               "message" => "workflow script not found: " <> _,
+               "details" => %{
+                 "path" => ^missing,
+                 "reason" => "workflow script not found: " <> _,
+                 "type" => "script_not_found"
+               }
+             }
+           } = json_response(conn, 404)
+  end
+
+  test "POST /api/runs/:id/resume validates explicit scripts and provider input" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_resume_validation")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id} = Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{id}/resume", %{script_path: bad_workflow(), provider: "mock"})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.validation.workflow_dsl",
+               "message" => "Workflow script failed validation.",
+               "details" => %{
+                 "reason" => reason,
+                 "type" => "workflow_dsl"
+               }
+             }
+           } = json_response(conn, 422)
+
+    assert reason =~ "unknown combinator `frobnicate`"
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{id}/resume", %{script_path: path, provider: "codex"})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.run.invalid_provider",
+               "message" => "Unsupported run provider.",
+               "details" => %{"field" => "provider", "supported" => ["mock"]}
+             }
+           } = json_response(conn, 400)
+  end
+
+  @tag :capture_log
+  test "POST /api/runs/:id/resume returns a typed already-running error" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_resume_running")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id, writer} =
+             Run.start(tree,
+               run_id: id,
+               provider: {GateProvider, sink: self()},
+               script_path: Path.expand(path)
+             )
+
+    assert_receive {:agent_called, "ship it"}
+    assert_receive {:at_agent, ^writer}
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{id}/resume", %{})
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.run.already_running",
+               "message" => "A workflow run with this id is already running.",
+               "details" => %{"run_id" => ^id}
+             }
+           } = json_response(conn, 409)
+
+    send(writer, :proceed)
+    await_lease_released(id)
+  end
+
+  @tag :capture_log
+  test "POST /api/runs/:id/resume reuses committed effects from the journal" do
+    path = two_agent_workflow()
+    id = run_id("scheduler_api_resume_once")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id, writer} =
+             Run.start(tree,
+               run_id: id,
+               provider: {GateProvider, sink: self(), gate_on: "second"},
+               script_path: Path.expand(path)
+             )
+
+    assert_receive {:agent_called, "first"}
+    assert_receive {:agent_called, "second"}
+    assert_receive {:at_agent, ^writer}
+
+    assert [%{payload: %{address: [0]}}] =
+             Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
+
+    kill_and_await(id, writer)
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs/#{id}/resume", %{})
+
+    assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
+
+    projection = wait_for_api_projection(id)
+    assert projection["event_count"] == 4
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+    assert %{"data" => %{"events" => events}} = json_response(conn, 200)
+
+    assert Enum.map(events, & &1["type"]) == [
+             "run_started",
+             "agent_committed",
+             "agent_committed",
+             "run_completed"
+           ]
+
+    assert events
+           |> Enum.filter(&(&1["type"] == "agent_committed"))
+           |> Enum.map(& &1["address"]) == [[0], [1]]
   end
 
   test "POST /api/runs rejects run ids that would break returned UI/API links" do

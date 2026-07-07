@@ -46,7 +46,9 @@ The following are deliberately **out of scope** and MUST NOT be expressible:
 
 - **General computation.** A workflow cannot compute values at runtime, bind variables,
   branch on agent output, or perform arithmetic. There is no value-binding construct.
-  *(Proposed §10 — dataflow: a proposed extension would narrow this bullet to §1.2′, reopening exactly one binding form — `let` over already-journaled values — while keeping the arithmetic and branch-on-output bans intact; see §10.)*
+  *(Dataflow §10 addendum: the implemented core narrows this bullet by reopening exactly one
+  binding form — `let` over already-journaled `agent`/`synthesize` outputs — while keeping the
+  arithmetic and branch-on-output bans intact; see §10.)*
 - **Non-determinism.** No node reads a clock, a random source, the environment, the
   filesystem, or any external module. Wall-clock and randomness are *unrepresentable*.
 - **Side effects outside the vocabulary.** No spawning shells, no I/O, no network calls,
@@ -93,7 +95,9 @@ readings are possible, the reading that upholds these principles is correct.
    a `verify` subject, `judge` candidates, `pipeline` items, and every prompt MUST be a
    compile-time literal. *Pre-resolves:* a workflow cannot "capture" or "reference" a
    runtime result except through the fixed data-flow of accumulators and panel folds.
-   *(Proposed §10 — dataflow: a proposed extension would strengthen this to Principle 6′ — journaled-values-only, deterministic-render-only — widening the enumerated data-flow set; see §10.)*
+   *(Dataflow §10 addendum: Principle 6′ is presented there as the proposed reconciliation for
+   the implemented `let`/`~P`/`emit` core — journaled-values-only, deterministic-render-only —
+   while §1–§8 remain the frozen base body.)*
 
 7. **Inert tree.** The compiled `%Tree{}` is pure, serializable data containing zero
    closures. It is `Macro.escape`-d into a compile-time constant and can be reconstructed
@@ -187,7 +191,9 @@ agent  log  phase  parallel  pipeline  return  collect
 while_budget  until_dry  verify  judge  synthesize  fan_out
 ```
 
-> *(Proposed §10 — dataflow: a proposed extension would widen this recognized name set to 17 (§2.4′), adding `let`, `map`, `gather`, and `emit`; see §10.)*
+> *(Dataflow §10 addendum: the implemented core recognizes `let` and `emit` alongside the base
+> set and admits `~P` only in the checked positions described there. Proposed `gather` and `map`
+> remain DEFER.)*
 
 Two names are contextual, not standalone combinators:
 
@@ -1050,6 +1056,8 @@ end
 
 **Rule 5.10.2 — A workflow MUST contain a `return`.** The top-level node list MUST contain
 at least one `%Return{}`; otherwise a finding located at the workflow declaration line.
+*(Dataflow §10 addendum: the implemented core widens this terminal rule so a final top-level
+`emit` also satisfies it; see §10.7.)*
 
 ```counter-example
 workflow "x" do
@@ -1435,6 +1443,9 @@ Consequences a conforming implementation MUST preserve:
   workflow that must end with a given value MUST place that `return` **last**. Example:
   `agent("a"); return(:early); agent("b"); return(:late)` runs both agents and completes
   with value `:late`, not `:early`.
+  *(Dataflow §10 addendum: the current compiler enforces terminal-final placement for top-level
+  `return` and `emit`; a top-level node after either terminal is rejected. The base last-wins
+  model remains historical context for §1–§8; see §10.7.)*
 - **`Agent`** — see RunAgent (§6.4).
 - **`Collect`** — see RunCollect (§6.6).
 - **`WhileBudget`** / **`UntilDry`** — Loop (§6.7), entered at `iteration = 0`:
@@ -2596,7 +2607,8 @@ Normative requirements a conforming implementation MUST satisfy:
 
 - **C1 (closed vocabulary).** It MUST reject, at compile time, any form outside the 13-way
   vocabulary (and the body vocabulary inside loops), per §5.
-  *(Proposed §10 — dataflow: a proposed extension would widen this to a 17-way vocabulary (C1′); see §10.)*
+  *(Dataflow §10 addendum: the implemented core recognizes `let` and `emit`; `gather`/`map`
+  remain DEFER and `reduce`/`select` remain REJECT.)*
 - **C2 (determinism by absence).** It MUST NOT provide any workflow-body construct that
   reads a clock, randomness, environment, filesystem, or external module. Determinism
   MUST be a property of the vocabulary, not a runtime linter.
@@ -2628,7 +2640,9 @@ Normative requirements a conforming implementation MUST satisfy:
 - **C9 (no value binding).** It MUST require compile-time literals for prompts, names,
   `return` values, `verify` subjects, `judge` candidates, `pipeline` items, `synthesize`
   inputs, and schema maps.
-  *(Proposed §10 — dataflow: a proposed extension would strengthen this to C9′ — a flowed value must be journaled by a lexically-preceding node and rendered by the deterministic, closure-free `RenderText`; see §10.)*
+  *(Dataflow §10 addendum: C9′ is the proposed reconciliation for the implemented core — a
+  flowed value must be journaled by a lexically-preceding node and rendered by deterministic,
+  closure-free `RenderText`; see §10.)*
 
 An implementation MAY add new node kinds and new event types (the log is additive), but it
 MUST preserve existing addresses (§4.2) and MUST keep folds total over unknown types. It
@@ -2790,28 +2804,31 @@ findings). Scheduling MUST NOT affect the verdict or the fixer's composed prompt
 
 ---
 
-## 10. Proposed extensions — Tier-1 dataflow (NOT YET IMPLEMENTED)
+## 10. Dataflow core and proposed extensions
 
-> **Status: Proposed / design-stage.** Nothing in this section is part of the closed
-> vocabulary: `let`, `map`, `gather`, and `emit` are **not** in `@combinators`, the `~P`
-> template sigil is not recognized, and no conforming implementation of §1–§8 parses or
-> executes any construct here. This section is a design for a *dataflow extension*, written to
-> the same completeness bar as §1–§8, and is **non-normative** with respect to the implemented
-> language. It is a sibling of §9 (`refine`): where §9 would add one combinator, this section
-> would add **four** — `let`, `map`, `gather`, `emit` — widening the closed vocabulary from
-> **13** to **17** (independently of §9's proposed 14th combinator `refine`). When implemented
-> the ADOPT idioms below would move into §2–§8 and the amendments of §10.3 would become
-> normative. Every construct that the reference `lib/` already implements has been folded into
-> §1–§8; the entire dataflow surface remains unimplemented, so all of it stays here.
+> **Status: dataflow core implemented; remaining surface proposed/deferred.** The reference
+> implementation has shipped the zero-new-event dataflow core: `let :name = agent(...)`,
+> `let :name = synthesize(...)`, top-level `agent(~P"...")` prompt injection over previous
+> `let` bindings, and terminal `emit(~P"...")`. This section is the normative home for that
+> dataflow addendum going forward while §1–§8 remain the frozen base specification, carrying
+> only forward-reference notes to this section. `SPEC-DATAFLOW-PROPOSAL.md` remains design
+> provenance, not the primary spec.
+>
+> **Clearly delimited PROPOSED surface.** `gather` and `map` remain **DEFER**; their detailed
+> rules are specified below as proposed future work and are not implemented by the current
+> reference compiler. `reduce` and `select`/`when` remain **REJECT**. The §10.3 Principle 6 →
+> 6′ reconciliation and its amendments are presented as **PROPOSED** amendments to the base
+> normative body; they explain how §1–§8 should be folded when the dataflow addendum is next
+> promoted into the main grammar.
 >
 > Notation is identical to the rest of this document (Appendix A): a `::` production is
-> **lexical**, a `:` production is **syntactic**. RFC 2119 keywords appear in uppercase inside
-> the proposed rules to fix the *would-be* requirements precisely, exactly as §9 does; they are
-> normative only if and when this section is promoted.
+> **lexical**, a `:` production is **syntactic**. RFC 2119 keywords in the implemented core
+> describe shipped requirements; RFC 2119 keywords under sections explicitly marked DEFER,
+> PROPOSED, or REJECT fix future or excluded behavior precisely.
 
 ### 10.1 Purpose & the governing rule (design principles)
 
-**The problem: outputs flow nowhere.** The implemented DSL produces values it cannot reuse. An
+**The base problem: outputs flow nowhere.** The §1–§8 DSL produces values it cannot reuse. An
 `agent`, a `verify`/`judge` panel, and a `synthesize` each commit a result to the journal
 (`agent_committed.result`, `verify_settled`, `judge_settled` — §7.2), but **no later node can
 read any of them**. Principle 6 (*No value binding*) forbids naming a runtime value; §2.2
@@ -2821,13 +2838,17 @@ literal prompt — never a splice of any other node's output". The one in-vocabu
 predicate; the item **content** never reaches another prompt. The worked "outputs flow nowhere"
 cases (§11.4 C/F/G) enshrine this: `judge`'s winner is never passed to `synthesize`; a
 `pipeline` stage never sees its item; a `fan_out` lane is a byte-identical replica.
+The implemented dataflow core opens one narrow edge for `agent`/`synthesize` outputs: bind the
+producer with `let`, render it through `~P`, and consume it from a later top-level `agent` or
+`emit`.
 
 **The thesis: add DATA FLOW, not CONTROL FLOW.** This extension would add the ability to **flow
 a journaled value into a later prompt or the terminal result** — and deliberately **not** add
 control flow: no general `if`, no value-dependent choice of which subtree runs, no unbounded
 iteration, no arbitrary computation. It changes only *what data a node's prompt is rendered
-from*, never which nodes run or how many times (except the one bounded, capped fan-out, `map`,
-which terminates by a structural cap exactly like every existing loop).
+from*, never which nodes run or how many times. The deferred `map` proposal is the one
+possible exception: it would add bounded, capped fan-out over a journaled collection and remains
+outside the implemented core.
 
 **The governing rule (the spine).** Three clauses apply to every idiom in §10:
 
@@ -2837,33 +2858,35 @@ which terminates by a structural cap exactly like every existing loop).
    deterministic, total, closure-free `RenderText` of §4.4 — widened here (§10.4) to accept
    journaled values as input. No interpolation (`"… #{expr} …"`), no computed value, no closure
    ever enters a prompt.
-2. **Transform collections with nodes only — never lambdas.** Per-element work uses a **node**
-   (`map`, one agent per element); folding a collection into one value uses a **node** (`gather`,
-   one agent over the whole collection). No `Enum.map(fn … end)`, no anonymous function, ever
-   (Rule 5.1.1 still holds; §10.4's struct stays closure-free).
-3. **Bound every fan-out.** The one construct whose width is a runtime quantity (`map` over a
-   bound collection) carries a **compile-time structural cap** (`max: <pos-int literal>`), exactly
-   as every loop carries `max_iterations` (Principle 5). Width `= min(observed_length, max)`; the
-   region has at most `max` lanes and provably terminates.
+2. **Transform collections with nodes only — never lambdas.** The implemented core has no
+   collection transform beyond existing `synthesize`. The deferred future forms keep the same
+   rule: per-element work uses a **node** (`map`, one agent per element) and folding a collection
+   into one value uses a **node** (`gather`, one agent over the whole collection). No
+   `Enum.map(fn … end)`, no anonymous function, ever (Rule 5.1.1 still holds; §10.4's struct
+   stays closure-free).
+3. **Bound every fan-out.** If the deferred `map` ships, its runtime width MUST carry a
+   **compile-time structural cap** (`max: <pos-int literal>`), exactly as every loop carries
+   `max_iterations` (Principle 5). Width `= min(observed_length, max)`; the region has at most
+   `max` lanes and provably terminates.
 
 ### 10.2 Verdict summary — per-idiom decisions
 
 | Idiom | Verdict | One-line reason |
 |---|---|---|
-| **Template layer** (§10.4) | **ADOPT** — foundation | Nothing flows without it; inert struct + compile-time binary scanner + the render §4.4 already defines. Closure-free by construction. |
-| **`let`** (§10.5) | **ADOPT** | The keystone; every value edge composes from it. No new effect/event/key — a bound value is a fold over the producer's existing `agent_committed`. |
-| **prompt injection** (§10.6) | **ADOPT** | The edge authors want ("improve this draft"); the rendered prompt rides the existing `agent_committed.prompt`. |
-| **`emit`** (§10.7) | **ADOPT** | Pure render, no paid effect; makes "flow N results into one document" a first-class terminal. |
-| **pipeline-with-dataflow** (§10.8) | **ADOPT** by composition | Falls out of `let` + injection + sequencing — no new combinator. |
+| **Template layer** (§10.4) | **ADOPT / IMPLEMENTED** — foundation | Nothing flows without it; inert struct + compile-time binary scanner + the render §4.4 already defines. Closure-free by construction. |
+| **`let`** (§10.5) | **ADOPT / IMPLEMENTED CORE** | The keystone; currently binds `agent(...)` and `synthesize(...)`. No new effect/event/key — a bound value is a fold over the producer's existing `agent_committed`. |
+| **prompt injection** (§10.6) | **ADOPT / IMPLEMENTED CORE** | The edge authors want ("improve this draft"); top-level `agent(~P"...")` renders previous `let` bindings and rides the existing `agent_committed.prompt`. |
+| **`emit`** (§10.7) | **ADOPT / IMPLEMENTED CORE** | Pure render, no paid effect; makes "flow N results into one document" a first-class terminal. |
+| **pipeline-with-dataflow** (§10.8) | **ADOPT / IMPLEMENTED by composition** | Falls out of `let` + injection + sequencing — no new combinator. |
 | **`gather`** (§10.9) | **DEFER** | `synthesize` over journaled inputs; ship when folding several bound outputs recurs. |
 | **`map`** (§10.9) | **DEFER** | Heaviest: runtime-decided width, per-lane re-addressing, structural `max:` cap, a new region + two new events. Single-agent lanes in Tier 1. |
 | **`reduce`** (§10.10) | **REJECT** (Tier 1) | Drifts toward in-language computation; `gather` + accumulators cover real needs. |
 | **`select` / `when`** (§10.10) | **REJECT** | It is **control** flow, not data flow — violates Principle 8 and the thesis. |
 
-**Build order.** (1) §9 `refine` first — standing priority; (2) **dataflow core** = Template +
-`let` + injection + `emit`, one coherent slice (unlocks pipeline-with-dataflow for free, adds
-**zero** new events); (3) `gather`; (4) `map`; (5) never, absent a hard wall: `reduce`,
-`select`/`when`.
+**Build order.** (1) **Complete:** dataflow core = Template + `let` over `agent`/`synthesize` +
+top-level injection + `emit`, one coherent slice (unlocks pipeline-with-dataflow for free, adds
+**zero** new events). (2) **DEFER:** `gather`. (3) **DEFER:** `map`. (4) **Never, absent a hard
+wall:** `reduce`, `select`/`when`. §9 `refine` remains an independent proposed extension.
 
 ### 10.3 Reconciliation — Principle 6 → 6′ and the proposed amendments
 
@@ -3146,37 +3169,31 @@ AtomName :: Letter (Letter | Digit | `_`)*   ; the §10.4.1 AssignName char clas
 Producer :
   - AgentStmt                 ; binds the agent's journaled result ({:node, addr})
   - SynthesizeStmt            ; synthesize's output is an ordinary agent output
-  - GatherStmt                ; §10.9 (when adopted) — binds one agent_committed
-  - `(` MapStmt `)`           ; §10.9 — binds the ORDERED LIST of the map's lane results ({:map, addr})
+  - GatherStmt                ; DEFER, §10.9 (when adopted) — binds one agent_committed
+  - `(` MapStmt `)`           ; DEFER, §10.9 — binds the ORDERED LIST of the map's lane results ({:map, addr})
 ```
 
-`AgentStmt`/`SynthesizeStmt`/`GatherStmt` are paren-call forms that need no extra parentheses.
-`MapStmt` is the **only** block-bearing producer and MUST be parenthesized —
-`let :xs = (map … do … end)` — because without parens the `do…end` attaches to `let` (the
-outermost paren-less call), leaving `map` bodyless. `parse/2` matches the uniform one-arg shape
+The implemented core accepts only `AgentStmt` and `SynthesizeStmt`. `GatherStmt` and `MapStmt`
+are listed here to keep the future extension closed and explicit, but both remain **DEFER** and
+MUST be rejected by the current compiler. `AgentStmt`/`SynthesizeStmt`/future `GatherStmt` are
+paren-call forms that need no extra parentheses. Future `MapStmt` is the **only** block-bearing
+producer and MUST be parenthesized — `let :xs = (map … do … end)` — because without parens the
+`do…end` attaches to `let` (the outermost paren-less call), leaving `map` bodyless.
+`parse/2` matches the uniform one-arg shape
 `{:let, meta, [{:=, _, [name_ast, producer_ast]}]}`, requires `name_ast` to be an atom literal,
 and dispatches `producer_ast` back through the ordinary per-form entry under the in-scope
 `binding_env`, so every producer kind lowers unchanged. It MUST reject the two-arg
 `{:let, _, [_, [do: _]]}` shape (an un-parenthesized `map`) with a caller-located hint (Rule L.5),
 never repair it by reattaching the block.
 
-**10.5.2 Inert node struct + addressing + idempotency.**
+**10.5.2 Inert representation + addressing + idempotency.**
 
-```
-%Workflow.Node.Let{
-  address :: address(),
-  name    :: atom(),
-  body    :: struct()          ; the single producer node (%Agent{}/%Synthesize{}/%Gather{}/%Map{})
-}
-```
-
-- A top-level `let` at position `i` has address `[i]`; its producer `body` is re-addressed to
-  `[i, 0]` (a one-child region, like a single-branch `parallel`). The `BindingEnv` records
-  `name → {:node, [i, 0]}` (agent/synthesize/gather) or `name → {:map, [i, 0]}` (map, whose lanes
-  are then at `[i, 0, e, 0]`).
-- `let` introduces **no key** of its own; the producer at `[i, 0]` keys exactly as any agent. The
-  bound value is **not** part of any key (keys stay value-free, Principle 2). `let` is additive and
-  never renumbers existing addresses (§4.2).
+The implemented core has **no `%Workflow.Node.Let{}` struct**. `let` is compile-time binding
+syntax: the producer node is inserted into the top-level node list at address `[i]`, exactly where
+an unbound producer would have appeared, and `BindingEnv` records `name → {:node, [i]}`. `let`
+therefore introduces **no key** of its own; the producer keys exactly as any agent/synthesize
+turn. The bound value is **not** part of any key (keys stay value-free, Principle 2). Future
+deferred `map` binding would record `name → {:map, [i]}`.
 
 **10.5.3 Validation rules (smallest counter-examples).**
 
@@ -3196,16 +3213,17 @@ never repair it by reattaching the block.
 **10.5.4 Execution algorithm.**
 
 ```
-RunLet(node, run_id, provider, prior, ctx):
-  - Let r be RunNode(node.body, run_id, provider, prior, ctx).   ; the producer's OWN path (§6.4 / RunMap)
-  - Return r.                                                     ; the binding is compile-time; nothing extra committed
+RunLet(producer, run_id, provider, prior, ctx):
+  - Let r be RunNode(producer, run_id, provider, prior, ctx).   ; the producer's OWN path (§6.4)
+  - Return r.                                                   ; the binding is compile-time; nothing extra committed
 ```
 
-`RunLet` is a pass-through to the producer's ordinary path. Determinism, exactly-once, and
-replay-safety are inherited verbatim. For an `agent`/`synthesize`/`gather` producer the producer
-commits one `agent_committed` at `[i, 0]`, keyed and resumable exactly as any agent; on resume the
-binding is re-derived by `ResolveRef` (`{:node} → BoundValue` folding that same event). For a `map`
-producer the producer commits its own `map_started`/`map_completed` (§10.9.2) and its lanes' per-lane
+`RunLet` is conceptual only in the implemented core: execution runs the producer's ordinary path.
+Determinism, exactly-once, and replay-safety are inherited verbatim. For an `agent`/`synthesize`
+producer the producer commits one `agent_committed` at `[i]`, keyed and resumable exactly as any
+agent; on resume the binding is re-derived by `ResolveRef` (`{:node} → BoundValue` folding that
+same event). For a future `gather`, the same one-`agent_committed` rule would apply. For a future
+`map` producer the producer commits its own `map_started`/`map_completed` (§10.9.2) and its lanes' per-lane
 `agent_committed`s; the binding is re-derived by `ResolveRef` (`{:map} → BoundList`, DF-M4) — `let`
 itself still commits nothing. `let` adds no effect and no non-determinism, and runs exactly one node
 (it does not iterate).
@@ -3216,11 +3234,12 @@ record (a `let_bound{…}` marker would be pure redundancy; omitted per Principl
 **10.5.6 Conformance.**
 
 - **DF-L1.** A `let` MUST bind a literal-atom name to a single producer node and MUST introduce
-  **no** journal event or key of its own. For an `agent`/`synthesize`/`gather` producer the binding
-  is the producer's own `agent_committed` (no new event); for a `map` producer the binding is the
-  ordered lane list resolved via `BoundList` per DF-M4, and the `map`'s `map_started`/`map_completed`
-  are the **producer's** events, not `let`'s. `let` is the sole value-binding construct admitted by
-  the narrowed Non-goal §1.2′.
+  **no** journal event or key of its own. In the implemented core, `agent` and `synthesize` are the
+  only bindable producers, and the binding is the producer's own `agent_committed` (no new event).
+  Future `gather` would follow the same rule; future `map` would bind the ordered lane list
+  resolved via `BoundList` per DF-M4, and the `map`'s `map_started`/`map_completed` would be the
+  **producer's** events, not `let`'s. `let` is the sole value-binding construct admitted by the
+  narrowed Non-goal §1.2′.
 - **DF-L2.** A bound value MUST be resolvable **only** by a pure fold over the journal via
   `ResolveRef` (`{:node} → BoundValue`, `{:map} → BoundList`); an implementation MUST NOT cache the
   value in process state.
@@ -3242,7 +3261,7 @@ agent acts on an upstream journaled result.
 AgentStmt : `agent` `(` Prompt AgentOpts? `)`
 Prompt :
   - StringLiteral            ; the existing literal form (§3.2) — unchanged
-  - TemplateLiteral          ; a ~P template (§10.4) — admissible ONLY when this agent is top-level or a map lane (Rule P.1)
+  - TemplateLiteral          ; a ~P template (§10.4) — implemented only for top-level agents; future map-lane position is DEFER (Rule P.1)
 ```
 
 `TemplateLiteral` is a **syntactic** symbol (single colon) denoting a `~P` sigil token whose raw
@@ -3266,14 +3285,13 @@ value-free: `(run_id, address, iteration, attempt)`; the **rendered** prompt is 
 `agent_committed.prompt`, never in the key.
 
 **10.6.3 Validation rules.** Assigns resolve (Rules T.4/T.5); interpolation is still rejected (a
-literal `"…#{}…"` is a call form, not a binary). **Rule P.1 — closed whitelist:** a `%Template{}`
-prompt is admissible in **exactly four position kinds** — a top-level `agent`, a `map`-lane
-`agent`, a top-level `gather`, a top-level `emit` — where **"top-level" includes the producer of a
-top-level `let`** (§10.5.2 re-addresses it to `[i, 0]`, so it is structurally a child of the `let`
-node yet is admissible exactly as its un-bound top-level form): a `let`-bound `agent`, a `let`-bound
-`gather` producer, and the lane `agent` of a `let`-bound `map` are each admissible, so
-the flagship `let :x = agent(~P…)` core (§10.8) is settled by this whitelist alone. A `%Template{}`
-prompt is rejected in two families, each by an **active guard**
+literal `"…#{}…"` is a call form, not a binary). **Rule P.1 — closed whitelist:** in the
+implemented core, a `%Template{}` prompt is admissible on a **top-level `agent`** and a
+top-level `emit` template. "Top-level" includes a `let`-bound producer, because implemented
+`let` lowers to the producer at the same top-level address (§10.5.2), so `let :x =
+agent(~P…)` is admissible exactly as the unbound top-level agent form is. The deferred future
+whitelist would add `map`-lane `agent` and top-level `gather` positions when those idioms are
+promoted. A `%Template{}` prompt is rejected in two families, each by an **active guard**
 matching `{:sigil_P, meta, _}`: (1) observational/literal-only positions (`verify`/`judge`
 subject/candidate, `return`, `phase`/`log`, and a `synthesize` prompt or inputs — a `let`-bound
 `synthesize` stays literal-only) — panels stay literal-only (Principle 8); (2) nested
@@ -3327,7 +3345,8 @@ host/version caveat under a cross-version resume). This is admitted by the amend
 
 - **DF-P1.** An `agent` prompt MUST be either a literal string or an inert `%Template{}` over
   in-scope bindings, rendered per §6.4.1′; interpolation and computed prompts remain rejected. A
-  `%Template{}` prompt is admissible **only** on a top-level or `map`-lane agent (Rule P.1).
+  `%Template{}` prompt is admissible **only** on a top-level agent in the implemented core; the
+  `map`-lane position is reserved for the deferred `map` proposal (Rule P.1).
 - **DF-P2.** The rendered prompt MUST be a deterministic `RenderTemplate` fold over the journal,
   materialized before the call and journaled verbatim at commit in the `prompt` payload of **every**
   prompt-bearing agent event (`agent_committed.prompt` **and** `agent_attempt_rejected.prompt`),
@@ -3369,9 +3388,10 @@ value flows into the terminal `run_completed` event.
 
 - **Rule E.1 — assigns resolve** (Rules T.4/T.5). `emit(~P"Result: <%= @answer %>")` with no
   preceding `let :answer` is rejected.
-- **Rule E.2 — terminal from `return` OR `emit`.** §5.10.2 is widened: a workflow MUST contain at
-  least one `return` **or** at least one `emit`; both set the terminal value, the **last executed**
-  wins (§6.3). A workflow with a `let` but no `return`/`emit` is rejected (no terminal value).
+- **Rule E.2 — final terminal from `return` OR `emit`.** §5.10.2 is widened: a workflow MUST end
+  with a final top-level `return` **or** `emit`; both set the terminal value. A workflow with a
+  `let` but no final `return`/`emit` is rejected (no terminal value), and any top-level node after
+  a `return`/`emit` is rejected.
 - **Rule E.3 — `emit` is top-level-only** (Tier-1 restriction), mirroring `let`/`map`/`gather`.
 - **Rule E.4 — `emit`'s argument MUST be a `~P` Template** (active guard). `parse/2`'s `emit`
   clause MUST match `{:emit, meta, [{:sigil_P, _, _}]}` and reject any other argument. The real
@@ -3389,13 +3409,14 @@ emit("done")     # a literal-string emit — REJECTED (that is `return`); write 
 ```
 RunEmit(node, run_id, ctx):
   - Let value be RenderTemplate(node.template, run_id, node.bindings, nil).   ; §10.4.5; emit is top-level, lane nil
-  - Return {:cont, ctx with return = value}.         ; sets the terminal value (bare, exactly as §6.3 `Return`); commits no event; does NOT halt
+  - Return {:cont, ctx with return = value}.         ; sets the terminal value (bare, exactly as §6.3 `Return`); commits no event
 ```
 
-`emit` mirrors `return` (§6.3): it sets `ctx.return` and does **not** halt, so a later
-`emit`/`return` overwrites it (last-executed wins); authors place the terminal `emit`/`return`
-**last**. The rendered string is a pure journal fold (§10.4.5) and flows into `run_completed.value`,
-so the terminal value is a deterministic function of journaled data. `emit` runs once.
+`emit` mirrors `return` (§6.3): it sets `ctx.return` and commits no event of its own. The compiler
+requires `emit`/`return` to be the final top-level node, so no later top-level node can overwrite
+that terminal value. The rendered string is a pure journal fold (§10.4.5) and flows into
+`run_completed.value`, so the terminal value is a deterministic function of journaled data. `emit`
+runs once.
 
 **10.7.5 Journal events. None new** — the rendered value is captured in the existing terminal
 `run_completed.value`, exactly as a `return` value is. (An optional `emit_rendered{address, value}`
@@ -3405,10 +3426,10 @@ marker is RECOMMENDED-not-required for observability.)
 
 - **DF-E1.** `emit` MUST set the terminal value to a deterministic `RenderTemplate` fold over the
   journal; the value MUST be journaled in `run_completed.value`.
-- **DF-E2.** A workflow MUST contain at least one `return` or `emit`; the last-executed one
-  supplies the terminal value.
-- **DF-E3.** `emit` MUST commit no paid effect and MUST NOT halt execution (last-wins, like
-  `return`).
+- **DF-E2.** A workflow MUST end with a final top-level `return` or `emit`; that final terminal
+  node supplies the terminal value.
+- **DF-E3.** `emit` MUST commit no paid effect and MUST NOT allow later top-level nodes; the
+  compiler enforces terminal-final placement.
 - **DF-E4.** `emit`'s argument MUST be a `~P` `Template`; `parse/2` MUST match `{:emit, meta,
   [{:sigil_P, _, _}]}` and actively reject any non-template argument with a caller-located `Finding`
   — never stringify it via `to_text/1`.
@@ -3701,24 +3722,27 @@ one new **runtime** failure `map` can raise — `MapOverNotAList` when `over:` r
 (§10.9.2) — is a crash of the live writer (exit 1), never a silent coercion, consistent with
 Principle 4 (fail closed).
 
-### 10.12 Proposed conformance (rollup)
+### 10.12 Conformance rollup
 
-An implementation that promotes §10 MUST satisfy DF-T1..DF-T4 (template), DF-L1..DF-L4 (`let`),
-DF-P1..DF-P3 (injection), DF-E1..DF-E4 (`emit`), DF-C1 (pipeline-by-composition), and — for the
-deferred idioms — DF-G1..DF-G2 (`gather`) and DF-M1..DF-M5 (`map`); and it MUST reject the two
-excluded idioms per DF-X1 (`select`/`when`) and DF-X2 (`reduce`). Promotion MUST also apply the
-§10.3 amendments in lockstep: it MUST NOT surface an inert `%Template{}` where a reader expects a
-prompt string (§6.4-commit′ / §7.2′ / §7.3′), and it MUST widen the closed-vocabulary count to 17
-— or to 18 when §9 (`refine`) is also promoted, per §10.3's baseline-relative count clause
-(Principle 1′, §2.4′, C1′) — without weakening any of C2–C9 — every amendment is a strengthening, so
-the observably-equivalent clause (§8) and every shipped invariant continue to hold.
+An implementation of the shipped dataflow core MUST satisfy DF-T1..DF-T4 (template),
+DF-L1..DF-L4 (`let` over `agent`/`synthesize`), DF-P1..DF-P3 (top-level injection),
+DF-E1..DF-E4 (`emit`), and DF-C1 (pipeline-by-composition). It MUST keep `gather` and `map`
+out of the accepted surface until those DEFER sections are promoted, and it MUST reject the two
+excluded idioms per DF-X1 (`select`/`when`) and DF-X2 (`reduce`). A future promotion of the
+deferred idioms MUST additionally satisfy DF-G1..DF-G2 (`gather`) and DF-M1..DF-M5 (`map`).
+
+Promotion of §10 into §1–§8 MUST also apply the §10.3 amendments in lockstep: it MUST NOT
+surface an inert `%Template{}` where a reader expects a prompt string (§6.4-commit′ / §7.2′ /
+§7.3′), and it MUST widen the closed-vocabulary count according to the live baseline without
+weakening any of C2–C9 — every amendment is a strengthening, so the observably-equivalent clause
+(§8) and every shipped invariant continue to hold.
 
 ---
 
 ## 11. Authoring guide for agents
 
 This section is a practical guide for an agent authoring a workflow. It is non-normative;
-§1–§8 are the binding rules.
+§1–§8 plus the implemented §10 dataflow core are binding; DEFER/PROPOSED parts of §10 are not.
 
 ### 11.1 How to write a valid workflow
 
@@ -3738,17 +3762,17 @@ end
 Requirements you MUST meet:
 
 1. `use Workflow`, then one `workflow "literal-name" do … end` block.
-2. Every prompt, name, and value is a **compile-time literal string/atom** — never a
-   variable, never `"… #{interpolation} …"`, never a function call.
-3. The block contains at least one `return(<literal>)`.
+2. Every base prompt, name, and value is a **compile-time literal string/atom** — never a
+   variable, never `"… #{interpolation} …"`, never a function call. For dataflow, use only
+   `let` over a previous `agent`/`synthesize` and render with `~P` holes like `<%= @draft %>`.
+3. The block terminates with a final `return(<literal>)` or `emit(~P"...")`.
 4. Inside a loop body use only `agent`, `log`, `phase`, `collect`.
 5. Compile with `mix compile`; every mistake is a located compile error.
 
-Note (`return` does not stop the workflow): `return` sets the terminal value but does **not**
-halt — statements after it still run, and with several `return`s the **last executed** one
-wins (§6.3). There is no early-exit or "return early on a condition" construct in this
-vocabulary; a conditional `return(:early)` in the middle does nothing special. Put the
-`return` you want as the result **last**.
+Note (terminal placement): `return` and `emit` set the terminal value and must be the final
+top-level statement. There is no early-exit or "return early on a condition" construct in this
+vocabulary; a `return(:early)` followed by more top-level work is rejected by the compiler.
+Put the `return`/`emit` you want as the result **last**.
 
 ### 11.2 The closed vocabulary at a glance
 
@@ -3758,7 +3782,11 @@ vocabulary; a conditional `return(:early)` in the middle does nothing special. P
 | `log("msg")` | literal string | emits a static log line |
 | `agent("prompt")` | literal string | one agent turn (schemaless) |
 | `agent("prompt", schema: …, retries: n)` | schema required with opts | fail-closed structured turn |
-| `return(:atom)` | literal | terminal value (required) |
+| `let :name = agent(…)` | top-level producer | binds the producer's journaled result for later `~P` rendering |
+| `let :name = synthesize(…)` | top-level producer | binds a synthesized result for later `~P` rendering |
+| `agent(~P"… <%= @name %> …")` | top-level only | renders previous `let` bindings into a prompt |
+| `emit(~P"… <%= @name %> …")` | final top-level only | terminal value rendered from previous `let` bindings |
+| `return(:atom)` | literal | terminal value |
 | `parallel([agent(…), …])` | list of agents | barrier fan-out |
 | `pipeline([items…], [agent(…), …])` | items × stages | per-item lanes, no barrier — **the item is a journal label only; it is NOT injected into stage prompts** (§3.4, §11.4 Use-case G) |
 | `verify("subject", voters: N \| lenses: [..], threshold: …)` | literal subject | verification panel |
@@ -3772,7 +3800,8 @@ vocabulary; a conditional `return(:early)` in the middle does nothing special. P
 Not combinators: `budget_slices(per: N)` (only a `fan_out` width); the `until:` predicate
 forms `count(:acc)`, `budget_remaining()`, `all_of([..])`, `any_of([..])`.
 
-> *(Proposed §10 — dataflow: a proposed extension would add four rows to this table — `let :name = <producer>`, `map :el, over: :xs, max: N do agent(…) end`, `gather(~P"…")`, and `emit(~P"…")`; see §10.)*
+> *(Proposed §10 — dataflow: `gather(~P"…")` and `map :el, over: :xs, max: N do agent(…) end`
+> remain DEFER; `reduce` and `select`/`when` remain REJECT.)*
 
 Note (`phase`/`log` inside a loop body fire **once for the whole loop**, not per iteration):
 both are keyed by `(type, address)` (§6.3), and a body node has one fixed address, so a body
@@ -3786,11 +3815,13 @@ body `log`; read the per-pass events instead — `iteration_started`, `loop_deci
 
 | Mistake | Error | Fix |
 |---|---|---|
-| Interpolated prompt `agent("do #{x}")` | invalid arguments / not a literal | Use a static string; move variation into the prompt text. |
+| Interpolated prompt `agent("do #{x}")` | interpolation is not allowed | Bind a previous producer with `let`, then render it with `agent(~P"do <%= @x %>")` or `emit(~P"do <%= @x %>")`. |
+| Unbound dataflow assign `emit(~P"Report: <%= @draft %>")` with no previous `let :draft` | unbound template assign | Add `let :draft = agent("Draft the report.")` before the template, or use a literal `return`. |
+| Template in a nested position `parallel([agent(~P"Improve <%= @draft %>")])` | template prompts are only allowed on top-level agents | Move the template agent to top level and bind its result with `let`, or keep nested agents literal-only. |
 | Calling a helper `agent(build_prompt())` | external module call raises | Inline the literal prompt. |
 | `agent("go", retries: 1)` with no schema | requires a `schema:` | Add `schema: %{…}` or drop the options. |
 | `agent("go", schema: %{type: "object"})` (atom keys) | *compiles*, but validation silently no-ops (accepts all output — `schema["type"]` is `nil`, §6.4.2) | Use **string** keys: `schema: %{"type" => "object", "properties" => %{…}, "required" => […]}`. |
-| `return` missing | workflow must contain a `return` | Add `return(:ok)` (or any literal). |
+| `return`/`emit` missing | workflow must terminate with `return` or `emit` | Add final `return(:ok)` (or any literal) or final `emit(~P"…")`. |
 | `collect` at top level | must appear inside a loop body | Put it inside `while_budget`/`until_dry`. |
 | `until_dry` body without `collect` | body must `collect` | Add `collect(into: :name)`. |
 | `verify("f", voters: 3, lenses: [:a])` | not both | Pick one panel selector. |
@@ -3801,6 +3832,63 @@ body `log`; read the per-pass events instead — `iteration_started`, `loop_deci
 | `while_budget reserve: 8 do return(:ok) end` | `return` not allowed in a body | Return after the loop, at top level. |
 
 ### 11.4 Worked use-cases
+
+**Use-case Dataflow 1 — draft → improve-this-draft → emit-report.** Bind the first
+agent's journaled output, render it into a second top-level agent, then render the terminal
+report with `emit`. No interpolation is used; the only dynamic holes are `~P` assigns over
+previous `let` bindings:
+
+```elixir
+workflow "draft-improve-report" do
+  let :draft = agent("Draft a concise project status update. Return prose.")
+
+  let :improved = agent(~P"""
+  Improve this draft for clarity and actionability.
+
+  Draft:
+  <%= @draft %>
+  """)
+
+  emit(~P"""
+  # Project Status Report
+
+  <%= @improved %>
+  """)
+end
+```
+
+**Use-case Dataflow 2 — review-gated pipeline by composition.** The DSL does not branch on
+the review result. Instead, write the review into the next prompt and ask one later agent to
+apply the gate semantically: if the review approves, return the draft unchanged; otherwise
+revise it. This is a sequential `let` chain plus injection, not a new `pipeline` combinator:
+
+```elixir
+workflow "review-gated-composition" do
+  let :draft = agent("Write a migration plan. Return prose.")
+
+  let :review = agent(~P"""
+  Review the migration plan. Return APPROVE or CHANGES plus brief rationale.
+
+  Draft:
+  <%= @draft %>
+  """)
+
+  let :final = agent(~P"""
+  Apply this review gate to the draft.
+
+  If the review says APPROVE, return the draft unchanged.
+  If it says CHANGES, revise the draft to address the rationale.
+
+  Draft:
+  <%= @draft %>
+
+  Review:
+  <%= @review %>
+  """)
+
+  emit(~P"<%= @final %>")
+end
+```
 
 **Use-case A — bounded iterative worker.** Do units of work until the budget runs low,
 reserving 8 units:
@@ -4026,7 +4114,7 @@ Syntactic (`:`) — the workflow surface:
 ```
 WorkflowDefinition : `workflow` StringLiteral `do` WorkflowBody `end`
 WorkflowBody : Statement*
-Statement : PhaseStmt | LogStmt | AgentStmt | ReturnStmt | ParallelStmt
+Statement : PhaseStmt | LogStmt | AgentStmt | LetStmt | EmitStmt | ReturnStmt | ParallelStmt
           | PipelineStmt | VerifyStmt | JudgeStmt | SynthesizeStmt
           | WhileBudgetStmt | UntilDryStmt | FanOutStmt
 LoopBody : BodyStatement+

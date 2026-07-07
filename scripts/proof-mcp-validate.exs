@@ -1,7 +1,10 @@
 defmodule ProofMCPValidate do
   @moduledoc false
 
-  @timeout_ms 500
+  @http_timeout_ms 500
+  @poll_attempts 100
+  @poll_interval_ms 100
+  @rpc_timeout_ms 15_000
 
   def run do
     repo_root = Path.expand("..", __DIR__)
@@ -27,83 +30,60 @@ defmodule ProofMCPValidate do
 
     workflow_path = Path.join(temp_root, "workflow.exs")
     missing_path = Path.join(temp_root, "missing-workflow.exs")
-    input_path = Path.join(temp_root, "requests.ndjson")
     journal_path = Path.join(temp_root, "runs.sqlite")
+    run_id = "mcp:proof_#{System.unique_integer([:positive])}"
     scheduler_url = "http://127.0.0.1:#{port}"
 
     try do
       File.write!(workflow_path, workflow_source())
 
-      env = [
-        {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
-        {"CODEX_LOOPS_SCHEDULER_PORT", port},
-        {"CODEX_LOOPS_JOURNAL_PATH", journal_path}
-      ]
+      with_mcp_client(entrypoint, repo_root, mcp_env(port, journal_path), fn client ->
+        {initialize, client} =
+          request!(client, 1, "initialize", %{
+            "protocolVersion" => "2024-11-05",
+            "capabilities" => %{},
+            "clientInfo" => %{"name" => "proof-mcp-validate", "version" => "0.0.0"}
+          })
 
-      input =
-        [
-          %{
-            "jsonrpc" => "2.0",
-            "id" => 1,
-            "method" => "initialize",
-            "params" => %{
-              "protocolVersion" => "2024-11-05",
-              "capabilities" => %{},
-              "clientInfo" => %{"name" => "proof-mcp-validate", "version" => "0.0.0"}
-            }
-          },
-          %{"jsonrpc" => "2.0", "method" => "notifications/initialized", "params" => %{}},
-          %{"jsonrpc" => "2.0", "id" => 2, "method" => "tools/list", "params" => %{}},
-          %{
-            "jsonrpc" => "2.0",
-            "id" => 3,
-            "method" => "tools/call",
-            "params" => %{
-              "name" => "workflow_validate",
-              "arguments" => %{"script_path" => workflow_path}
-            }
-          },
-          %{
-            "jsonrpc" => "2.0",
-            "id" => 4,
-            "method" => "tools/call",
-            "params" => %{
-              "name" => "workflow_validate",
-              "arguments" => %{"script_path" => missing_path}
-            }
-          },
-          %{"jsonrpc" => "2.0", "id" => 5, "method" => "shutdown", "params" => %{}}
-        ]
-        |> Enum.map_join("\n", &Jason.encode!/1)
-        |> Kernel.<>("\n")
+        assert_initialize!(initialize)
+        client = notify!(client, "notifications/initialized", %{})
 
-      File.write!(input_path, input)
+        {tools, client} = request!(client, 2, "tools/list", %{})
+        assert_tools_list!(tools)
 
-      {stdout, status} =
-        System.cmd(
-          "sh",
-          ["-c", "cat \"$1\" | \"$2\" --stdio", "proof-mcp", input_path, entrypoint],
-          cd: repo_root,
-          env: env,
-          stderr_to_stdout: false
-        )
+        {validation, client} =
+          call_tool!(client, 3, "workflow_validate", %{"script_path" => workflow_path})
 
-      assert!(status == 0, "MCP adapter exited with #{status}\n#{stdout}")
+        assert_successful_validation!(validation, workflow_path)
 
-      responses =
-        stdout
-        |> String.split("\n", trim: true)
-        |> Enum.map(&Jason.decode!/1)
-        |> Map.new(fn %{"id" => id} = message -> {id, message} end)
+        {missing_validation, client} =
+          call_tool!(client, 4, "workflow_validate", %{"script_path" => missing_path})
 
-      assert_initialize!(responses[1])
-      assert_tools_list!(responses[2])
-      assert_successful_validation!(responses[3], workflow_path)
-      assert_missing_script_validation!(responses[4], missing_path)
-      assert!(responses[5]["result"] == %{}, "shutdown should return an empty result")
+        assert_missing_script_validation!(missing_validation, missing_path)
+
+        {start, client} =
+          call_tool!(client, 5, "workflow_start", %{
+            "script_path" => workflow_path,
+            "run_id" => run_id,
+            "provider" => "mock",
+            "budget" => 0
+          })
+
+        assert_started_run!(start, run_id)
+
+        {client, status_payload} = poll_completed_status!(client, run_id, 6)
+        assert_completed_status!(status_payload, run_id)
+
+        {open_ui, client} = call_tool!(client, 200, "workflow_open_ui", %{"run_id" => run_id})
+        assert_open_ui!(open_ui, run_id, scheduler_url)
+
+        {shutdown, client} = request!(client, 201, "shutdown", %{})
+        assert!(shutdown["result"] == %{}, "shutdown should return an empty result")
+        await_port_exit!(client)
+      end)
 
       assert_scheduler_stopped!(scheduler_url)
-      IO.puts("MCP validation proof passed on #{scheduler_url}")
+      IO.puts("MCP validate/start/status/open-ui proof passed on #{scheduler_url}")
     after
       File.rm_rf(temp_root)
     end
@@ -123,14 +103,172 @@ defmodule ProofMCPValidate do
     Integer.to_string(port)
   end
 
+  defp mcp_env(port, journal_path) do
+    [
+      {~c"CODEX_LOOPS_SCHEDULER_URL", false},
+      {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
+      {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
+      {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
+      {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)}
+    ]
+  end
+
+  defp with_mcp_client(entrypoint, repo_root, env, fun) do
+    client =
+      %{
+        port:
+          Port.open({:spawn_executable, entrypoint}, [
+            :binary,
+            :exit_status,
+            {:args, ["--stdio"]},
+            {:cd, repo_root},
+            {:env, env}
+          ]),
+        buffer: ""
+      }
+
+    try do
+      fun.(client)
+    after
+      close_port(client.port)
+    end
+  end
+
+  defp request!(client, id, method, params) do
+    client =
+      send_message!(client, %{
+        "jsonrpc" => "2.0",
+        "id" => id,
+        "method" => method,
+        "params" => params
+      })
+
+    await_response!(client, id)
+  end
+
+  defp notify!(client, method, params) do
+    send_message!(client, %{"jsonrpc" => "2.0", "method" => method, "params" => params})
+  end
+
+  defp call_tool!(client, id, name, arguments) do
+    request!(client, id, "tools/call", %{"name" => name, "arguments" => arguments})
+  end
+
+  defp send_message!(%{port: port} = client, message) do
+    true = Port.command(port, Jason.encode!(message) <> "\n")
+    client
+  end
+
+  defp await_response!(client, id) do
+    deadline = System.monotonic_time(:millisecond) + @rpc_timeout_ms
+    do_await_response!(client, id, deadline)
+  end
+
+  defp do_await_response!(client, id, deadline) do
+    {message, client} = receive_message!(client, deadline)
+
+    if message["id"] == id do
+      {message, client}
+    else
+      do_await_response!(client, id, deadline)
+    end
+  end
+
+  defp receive_message!(client, deadline) do
+    case take_line(client.buffer) do
+      {:ok, line, rest} ->
+        {Jason.decode!(line), %{client | buffer: rest}}
+
+      :more ->
+        timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+        receive do
+          {port, {:data, data}} when port == client.port ->
+            receive_message!(%{client | buffer: client.buffer <> data}, deadline)
+
+          {port, {:exit_status, status}} when port == client.port ->
+            raise("MCP adapter exited before response with status #{status}")
+        after
+          timeout ->
+            raise("timed out waiting for MCP response")
+        end
+    end
+  end
+
+  defp take_line(buffer) do
+    case :binary.match(buffer, "\n") do
+      {index, 1} ->
+        <<line::binary-size(index), "\n", rest::binary>> = buffer
+
+        case String.trim(line) do
+          "" -> take_line(rest)
+          trimmed -> {:ok, trimmed, rest}
+        end
+
+      :nomatch ->
+        :more
+    end
+  end
+
+  defp await_port_exit!(client) do
+    receive do
+      {port, {:exit_status, 0}} when port == client.port ->
+        :ok
+
+      {port, {:exit_status, status}} when port == client.port ->
+        raise("MCP adapter exited with status #{status}")
+
+      {port, {:data, data}} when port == client.port ->
+        await_port_exit!(%{client | buffer: client.buffer <> data})
+    after
+      @rpc_timeout_ms ->
+        raise("timed out waiting for MCP adapter to exit")
+    end
+  end
+
+  defp close_port(port) do
+    if Port.info(port) do
+      Port.close(port)
+    end
+  rescue
+    ArgumentError -> :ok
+  end
+
+  defp poll_completed_status!(client, run_id, next_id) do
+    do_poll_completed_status!(client, run_id, next_id, @poll_attempts, nil)
+  end
+
+  defp do_poll_completed_status!(_client, run_id, _next_id, 0, last_payload) do
+    raise("run #{run_id} did not complete; last status: #{inspect(last_payload)}")
+  end
+
+  defp do_poll_completed_status!(client, run_id, next_id, attempts_left, _last_payload) do
+    {response, client} = call_tool!(client, next_id, "workflow_status", %{"run_id" => run_id})
+    payload = successful_tool_payload!(response, "workflow_status")
+    state = get_in(payload, ["data", "state"])
+
+    cond do
+      state == "completed" ->
+        {client, payload}
+
+      state in ["failed", "killed"] ->
+        raise("run #{run_id} reached terminal state #{state}: #{inspect(payload)}")
+
+      true ->
+        Process.sleep(@poll_interval_ms)
+        do_poll_completed_status!(client, run_id, next_id + 1, attempts_left - 1, payload)
+    end
+  end
+
   defp workflow_source do
     """
-    defmodule MCPValidateProofWorkflow do
+    defmodule MCPLifecycleProofWorkflow do
       use Workflow
 
-      workflow "mcp-validate-proof" do
+      workflow "mcp-lifecycle-proof" do
         phase "proof"
-        log "mcp validation proof"
+        log "mcp lifecycle proof"
+        agent "Reply with proof-ok"
         return :ok
       end
     end
@@ -142,15 +280,19 @@ defmodule ProofMCPValidate do
   defp assert_initialize!(message),
     do: raise("initialize response was not valid: #{inspect(message)}")
 
-  defp assert_tools_list!(%{"result" => %{"tools" => [%{"name" => "workflow_validate"}]}}),
-    do: :ok
+  defp assert_tools_list!(%{"result" => %{"tools" => tools}}) when is_list(tools) do
+    names = Enum.map(tools, & &1["name"])
+
+    for name <- ["workflow_validate", "workflow_start", "workflow_status", "workflow_open_ui"] do
+      assert!(name in names, "tools/list should include #{name}; got #{inspect(names)}")
+    end
+  end
 
   defp assert_tools_list!(message),
     do: raise("tools/list response was not valid: #{inspect(message)}")
 
-  defp assert_successful_validation!(%{"result" => result}, workflow_path) do
-    assert!(result["isError"] == false, "valid workflow should not be an MCP error")
-    payload = result["structuredContent"]
+  defp assert_successful_validation!(response, workflow_path) do
+    payload = successful_tool_payload!(response, "workflow_validate")
 
     assert!(
       payload["api_version"] == "scheduler.v1",
@@ -160,19 +302,15 @@ defmodule ProofMCPValidate do
     assert!(payload["data"]["valid"] == true, "valid workflow should be valid")
 
     assert!(
-      payload["data"]["workflow_name"] == "mcp-validate-proof",
+      payload["data"]["workflow_name"] == "mcp-lifecycle-proof",
       "workflow name should be preserved"
     )
 
     assert!(payload["data"]["script"]["path"] == workflow_path, "script path should be preserved")
   end
 
-  defp assert_successful_validation!(message, _workflow_path),
-    do: raise("workflow_validate success response was not valid: #{inspect(message)}")
-
-  defp assert_missing_script_validation!(%{"result" => result}, missing_path) do
-    assert!(result["isError"] == true, "missing workflow should be an MCP error")
-    payload = result["structuredContent"]
+  defp assert_missing_script_validation!(response, missing_path) do
+    payload = error_tool_payload!(response, "workflow_validate")
 
     assert!(
       payload["api_version"] == "scheduler.v1",
@@ -190,8 +328,90 @@ defmodule ProofMCPValidate do
     )
   end
 
-  defp assert_missing_script_validation!(message, _missing_path),
-    do: raise("workflow_validate error response was not valid: #{inspect(message)}")
+  defp assert_started_run!(response, run_id) do
+    payload = successful_tool_payload!(response, "workflow_start")
+
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "workflow_start should return scheduler envelope"
+    )
+
+    assert!(payload["data"]["run_id"] == run_id, "workflow_start should preserve run id")
+    assert!(payload["data"]["state"] == "accepted", "workflow_start should accept the run")
+    assert!(payload["data"]["ui_path"] == "/runs/#{run_id}", "ui_path should point at run")
+    assert!(payload["data"]["ui_url"] == "/runs/#{run_id}", "ui_url should point at run")
+  end
+
+  defp assert_completed_status!(payload, run_id) do
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "workflow_status should return scheduler envelope"
+    )
+
+    data = payload["data"]
+
+    assert!(data["run_id"] == run_id, "workflow_status should preserve run id")
+    assert!(data["state"] == "completed", "workflow_status should report completion")
+    assert!(data["workflow_name"] == "mcp-lifecycle-proof", "workflow name should be projected")
+    assert!(data["phase"] == "proof", "phase should be projected")
+    assert!(data["logs"] == ["mcp lifecycle proof"], "logs should be projected")
+    assert!(data["agent_count"] == 1, "agent_count should be projected")
+    assert!(data["event_count"] == 5, "event_count should be projected")
+    assert!(data["result"] == "ok", "result should be projected")
+    assert!(data["failure"] == nil, "failure should be nil for successful run")
+    assert!(data["ui_path"] == "/runs/#{run_id}", "status should include ui_path")
+    assert!(data["ui_url"] == "/runs/#{run_id}", "status should include ui_url")
+
+    assert!(
+      data["usage"] == %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+      "usage should be projected"
+    )
+  end
+
+  defp assert_open_ui!(response, run_id, scheduler_url) do
+    payload = successful_tool_payload!(response, "workflow_open_ui")
+
+    assert!(
+      payload["api_version"] == "codex-loops.mcp.v1",
+      "workflow_open_ui should return MCP envelope"
+    )
+
+    data = payload["data"]
+
+    assert!(data["run_id"] == run_id, "workflow_open_ui should preserve run id")
+    assert!(data["state"] == "completed", "workflow_open_ui should include status projection")
+    assert!(data["result"] == "ok", "workflow_open_ui should include result")
+    assert!(data["failure"] == nil, "workflow_open_ui should include failure")
+
+    assert!(
+      data["usage"] == %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+      "workflow_open_ui should include usage"
+    )
+
+    assert!(data["ui_path"] == "/runs/#{run_id}", "workflow_open_ui should include ui_path")
+    assert!(data["ui_url"] == "/runs/#{run_id}", "workflow_open_ui should include ui_url")
+
+    assert!(
+      data["open_url"] == "#{scheduler_url}/runs/#{run_id}",
+      "workflow_open_ui should include absolute open_url"
+    )
+  end
+
+  defp successful_tool_payload!(%{"result" => result}, tool_name) do
+    assert!(result["isError"] == false, "#{tool_name} should not be an MCP error")
+    result["structuredContent"]
+  end
+
+  defp successful_tool_payload!(message, tool_name),
+    do: raise("#{tool_name} success response was not valid: #{inspect(message)}")
+
+  defp error_tool_payload!(%{"result" => result}, tool_name) do
+    assert!(result["isError"] == true, "#{tool_name} should be an MCP error")
+    result["structuredContent"]
+  end
+
+  defp error_tool_payload!(message, tool_name),
+    do: raise("#{tool_name} error response was not valid: #{inspect(message)}")
 
   defp assert_scheduler_stopped!(scheduler_url) do
     {:ok, _apps} = Application.ensure_all_started(:inets)
@@ -215,7 +435,7 @@ defmodule ProofMCPValidate do
     :httpc.request(
       :get,
       {String.to_charlist(scheduler_url <> "/api/health"), []},
-      [timeout: @timeout_ms, connect_timeout: @timeout_ms],
+      [timeout: @http_timeout_ms, connect_timeout: @http_timeout_ms],
       body_format: :binary
     )
   end

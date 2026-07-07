@@ -30,6 +30,14 @@ release and runs `Workflow.MCP.Stdio`.
 It exposes:
 
 - `workflow_validate`: validates a workflow through `POST /api/workflows/validate`
+- `workflow_start`: starts a run through `POST /api/runs` for an existing
+  workflow script. Inputs are `script_path`, optional `run_id`, optional
+  `provider` (`mock`), and optional non-negative integer `budget`.
+- `workflow_status`: reads the scheduler projection through
+  `GET /api/runs/:id`, preserving run id, state, result, failure, usage, and UI
+  link fields.
+- `workflow_open_ui`: reads the run projection and returns `ui_path`, `ui_url`,
+  and an absolute `open_url` for the Phoenix LiveView run page.
 
 Before the tool call, the MCP adapter checks `GET /api/health`. If the scheduler
 is unreachable, it discovers a packaged release from:
@@ -46,6 +54,11 @@ When it owns the scheduler lifecycle, it starts the release with
 `CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
 `RELEASE_NODE`, and unique `RELEASE_TMP`. `CODEX_LOOPS_JOURNAL_PATH` is passed
 through when present.
+
+The MCP adapter stays on the scheduler HTTP boundary. It does not read SQLite,
+call `Workflow.Scheduler`, or reach into journal/runtime internals directly.
+Scheduler success envelopes are returned as MCP `structuredContent`; scheduler
+typed errors remain typed and are returned with `isError: true`.
 
 ## Legacy CLI Surface
 
@@ -106,8 +119,8 @@ make proof-mcp
 
 `make proof-live` spends one real Codex provider turn through the packaged
 release. `make proof-mcp` exercises MCP initialize, tools/list, lifecycle
-startup, and validation from a copied plugin package against its packaged
-scheduler release.
+startup, validation, mock start, status polling, and open-ui response from a
+copied plugin package against its packaged scheduler release.
 
 ## License
 

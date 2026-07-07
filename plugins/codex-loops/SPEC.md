@@ -21,6 +21,9 @@ Skill:
 MCP tools:
 
 - `workflow_validate`
+- `workflow_start`
+- `workflow_status`
+- `workflow_open_ui`
 
 Legacy CLI commands:
 
@@ -46,13 +49,28 @@ MCP behavior:
 - stdio JSON-RPC transport with newline-delimited messages
 - `initialize`, `tools/list`, `tools/call`, and notifications
 - `workflow_validate` input schema requires `script_path`
-- `tools/call` health-checks `GET /api/health` before validation
+- `workflow_start` input schema requires `script_path` and accepts optional
+  `run_id`, optional `provider` (`mock`), and optional non-negative integer
+  `budget`
+- `workflow_status` input schema requires `run_id`
+- `workflow_open_ui` input schema requires `run_id`
+- `tools/call` health-checks `GET /api/health` before scheduler operations
 - when health fails, the server discovers and starts a packaged scheduler
-  release before retrying validation
+  release before retrying the operation
+- `workflow_start` calls `POST /api/runs` and returns the scheduler success or
+  error envelope exactly as MCP `structuredContent`
+- `workflow_status` calls `GET /api/runs/:id` and returns the scheduler
+  projection exactly as MCP `structuredContent`
+- `workflow_open_ui` calls `GET /api/runs/:id` and returns an MCP envelope with
+  the scheduler projection plus absolute `open_url` based on the scheduler base
+  URL
 - scheduler success envelopes are returned as MCP `structuredContent`
 - scheduler typed errors remain typed and are returned as MCP `isError: true`
 - scheduler lifecycle failures use MCP-friendly `scheduler_unavailable` or
   `scheduler_start_failed` envelopes with actionable details
+- the MCP adapter reaches the scheduler only through HTTP API calls; it does not
+  read SQLite or call `Workflow.Scheduler`, `Workflow.Journal`, or runtime
+  internals directly
 - `make release` assembles the scheduler release into
   `plugins/codex-loops/scheduler/` so the MCP adapter can run from a copied
   plugin package without a sibling source `_build` directory
@@ -144,8 +162,8 @@ make proof-live
 
 `make proof-live` spends one real Codex provider turn through the packaged
 release. `make proof-mcp` copies the plugin package to a temp install location
-and proves MCP lifecycle plus validation against the copied package's scheduler
-release.
+and proves MCP lifecycle, validation, mock start, status polling, and open-ui
+response against the copied package's scheduler release.
 
 ## Safety And Testing
 

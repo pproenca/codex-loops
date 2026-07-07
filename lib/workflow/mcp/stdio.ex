@@ -11,6 +11,7 @@ defmodule Workflow.MCP.Stdio do
 
   @protocol_version "2024-11-05"
   @api_version "codex-loops.mcp.v1"
+  @start_argument_keys ["script_path", "run_id", "provider", "budget"]
 
   @spec main([String.t()]) :: :ok | no_return()
   def main(args \\ System.argv()) do
@@ -119,7 +120,7 @@ defmodule Workflow.MCP.Stdio do
   end
 
   defp handle_request("tools/list", _params, id, state) do
-    respond_result(id, %{"tools" => [workflow_validate_tool()]})
+    respond_result(id, %{"tools" => workflow_tools()})
     {:cont, state}
   end
 
@@ -154,53 +155,79 @@ defmodule Workflow.MCP.Stdio do
          state
        )
        when is_binary(script_path) do
-    with {:ok, state} <- Lifecycle.ensure_ready(state) do
-      case SchedulerClient.validate_workflow(script_path) do
-        {:ok, envelope} ->
-          {:ok, tool_result(envelope, false), state}
-
-        {:scheduler_error, envelope} ->
-          {:ok, tool_result(envelope, true), state}
-
-        {:unexpected, status, payload} ->
-          envelope =
-            error_envelope(
-              "scheduler_unexpected_response",
-              "Scheduler returned an unexpected response.",
-              %{
-                http_status: status,
-                payload: payload
-              }
-            )
-
-          {:ok, tool_result(envelope, true), state}
-
-        {:error, reason} ->
-          envelope =
-            error_envelope("scheduler_unavailable", "Scheduler could not be reached.", %{
-              scheduler_url: SchedulerClient.config().base_url,
-              reason: reason
-            })
-
-          {:ok, tool_result(envelope, true), state}
-      end
-    else
-      {:error, envelope, state} ->
-        {:ok, tool_result(envelope, true), state}
-    end
+    call_scheduler_tool(state, fn -> SchedulerClient.validate_workflow(script_path) end)
   end
 
   defp call_tool(%{"name" => "workflow_validate", "arguments" => arguments}, state) do
-    {:error, -32602, "Invalid params",
-     %{
-       "reason" => "workflow_validate requires arguments.script_path as a string",
-       "arguments" => arguments
-     }, state}
+    invalid_tool_params(
+      "workflow_validate requires arguments.script_path as a string",
+      arguments,
+      state
+    )
   end
 
   defp call_tool(%{"name" => "workflow_validate"}, state) do
-    {:error, -32602, "Invalid params",
-     %{"reason" => "workflow_validate requires arguments.script_path as a string"}, state}
+    invalid_tool_params(
+      "workflow_validate requires arguments.script_path as a string",
+      nil,
+      state
+    )
+  end
+
+  defp call_tool(%{"name" => "workflow_start", "arguments" => arguments}, state) do
+    case workflow_start_arguments(arguments) do
+      {:ok, attrs} ->
+        call_scheduler_tool(state, fn -> SchedulerClient.start_run(attrs) end)
+
+      {:error, reason} ->
+        invalid_tool_params(reason, arguments, state)
+    end
+  end
+
+  defp call_tool(%{"name" => "workflow_start"}, state) do
+    invalid_tool_params("workflow_start requires arguments.script_path as a string", nil, state)
+  end
+
+  defp call_tool(%{"name" => "workflow_status", "arguments" => %{"run_id" => run_id}}, state)
+       when is_binary(run_id) and byte_size(run_id) > 0 do
+    call_scheduler_tool(state, fn -> SchedulerClient.get_run(run_id) end)
+  end
+
+  defp call_tool(%{"name" => "workflow_status", "arguments" => arguments}, state) do
+    invalid_tool_params(
+      "workflow_status requires arguments.run_id as a non-empty string",
+      arguments,
+      state
+    )
+  end
+
+  defp call_tool(%{"name" => "workflow_status"}, state) do
+    invalid_tool_params(
+      "workflow_status requires arguments.run_id as a non-empty string",
+      nil,
+      state
+    )
+  end
+
+  defp call_tool(%{"name" => "workflow_open_ui", "arguments" => %{"run_id" => run_id}}, state)
+       when is_binary(run_id) and byte_size(run_id) > 0 do
+    call_open_ui_tool(state, run_id)
+  end
+
+  defp call_tool(%{"name" => "workflow_open_ui", "arguments" => arguments}, state) do
+    invalid_tool_params(
+      "workflow_open_ui requires arguments.run_id as a non-empty string",
+      arguments,
+      state
+    )
+  end
+
+  defp call_tool(%{"name" => "workflow_open_ui"}, state) do
+    invalid_tool_params(
+      "workflow_open_ui requires arguments.run_id as a non-empty string",
+      nil,
+      state
+    )
   end
 
   defp call_tool(%{"name" => name}, state) when is_binary(name) do
@@ -209,6 +236,82 @@ defmodule Workflow.MCP.Stdio do
 
   defp call_tool(_params, state) do
     {:error, -32602, "Invalid params", %{"reason" => "tools/call requires a tool name"}, state}
+  end
+
+  defp workflow_start_arguments(%{"script_path" => script_path} = arguments)
+       when is_binary(script_path) do
+    {:ok, Map.take(arguments, @start_argument_keys)}
+  end
+
+  defp workflow_start_arguments(_arguments) do
+    {:error, "workflow_start requires arguments.script_path as a string"}
+  end
+
+  defp call_scheduler_tool(state, scheduler_fun) when is_function(scheduler_fun, 0) do
+    with {:ok, state} <- Lifecycle.ensure_ready(state) do
+      scheduler_fun.()
+      |> scheduler_tool_response(state)
+    else
+      {:error, envelope, state} ->
+        {:ok, tool_result(envelope, true), state}
+    end
+  end
+
+  defp call_open_ui_tool(state, run_id) do
+    with {:ok, state} <- Lifecycle.ensure_ready(state) do
+      case SchedulerClient.get_run(run_id) do
+        {:ok, %{"data" => %{} = projection}} ->
+          {:ok, tool_result(open_ui_envelope(projection), false), state}
+
+        {:ok, envelope} ->
+          {:ok, tool_result(unexpected_response_envelope(200, envelope), true), state}
+
+        other ->
+          scheduler_tool_response(other, state)
+      end
+    else
+      {:error, envelope, state} ->
+        {:ok, tool_result(envelope, true), state}
+    end
+  end
+
+  defp scheduler_tool_response({:ok, envelope}, state) do
+    {:ok, tool_result(envelope, false), state}
+  end
+
+  defp scheduler_tool_response({:scheduler_error, envelope}, state) do
+    {:ok, tool_result(envelope, true), state}
+  end
+
+  defp scheduler_tool_response({:unexpected, status, payload}, state) do
+    {:ok, tool_result(unexpected_response_envelope(status, payload), true), state}
+  end
+
+  defp scheduler_tool_response({:error, reason}, state) do
+    envelope =
+      error_envelope("scheduler_unavailable", "Scheduler could not be reached.", %{
+        scheduler_url: SchedulerClient.config().base_url,
+        reason: reason
+      })
+
+    {:ok, tool_result(envelope, true), state}
+  end
+
+  defp invalid_tool_params(reason, nil, state) do
+    {:error, -32602, "Invalid params", %{"reason" => reason}, state}
+  end
+
+  defp invalid_tool_params(reason, arguments, state) do
+    {:error, -32602, "Invalid params", %{"reason" => reason, "arguments" => arguments}, state}
+  end
+
+  defp workflow_tools do
+    [
+      workflow_validate_tool(),
+      workflow_start_tool(),
+      workflow_status_tool(),
+      workflow_open_ui_tool()
+    ]
   end
 
   defp workflow_validate_tool do
@@ -224,6 +327,75 @@ defmodule Workflow.MCP.Stdio do
           }
         },
         "required" => ["script_path"],
+        "additionalProperties" => false
+      }
+    }
+  end
+
+  defp workflow_start_tool do
+    %{
+      "name" => "workflow_start",
+      "description" => "Start a Codex Loops workflow run through POST /api/runs.",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "script_path" => %{
+            "type" => "string",
+            "description" => "Path to the workflow .exs file to run."
+          },
+          "run_id" => %{
+            "type" => "string",
+            "description" => "Optional route-safe run id to preserve across status and UI links."
+          },
+          "provider" => %{
+            "type" => "string",
+            "enum" => ["mock"],
+            "description" =>
+              "Optional scheduler provider. The current scheduler API supports mock."
+          },
+          "budget" => %{
+            "type" => "integer",
+            "minimum" => 0,
+            "description" => "Optional non-negative scheduler budget."
+          }
+        },
+        "required" => ["script_path"],
+        "additionalProperties" => false
+      }
+    }
+  end
+
+  defp workflow_status_tool do
+    %{
+      "name" => "workflow_status",
+      "description" => "Read a scheduler run projection through GET /api/runs/:id.",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "run_id" => %{
+            "type" => "string",
+            "description" => "Run id returned by workflow_start."
+          }
+        },
+        "required" => ["run_id"],
+        "additionalProperties" => false
+      }
+    }
+  end
+
+  defp workflow_open_ui_tool do
+    %{
+      "name" => "workflow_open_ui",
+      "description" => "Return the Phoenix LiveView URL for a scheduler run.",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "run_id" => %{
+            "type" => "string",
+            "description" => "Run id returned by workflow_start."
+          }
+        },
+        "required" => ["run_id"],
         "additionalProperties" => false
       }
     }
@@ -272,6 +444,41 @@ defmodule Workflow.MCP.Stdio do
         "details" => details
       }
     }
+  end
+
+  defp unexpected_response_envelope(status, payload) do
+    error_envelope(
+      "scheduler_unexpected_response",
+      "Scheduler returned an unexpected response.",
+      %{
+        http_status: status,
+        payload: payload
+      }
+    )
+  end
+
+  defp open_ui_envelope(projection) do
+    ui_url = projection["ui_url"] || projection["ui_path"]
+
+    %{
+      "api_version" => @api_version,
+      "data" => Map.put(projection, "open_url", absolute_open_url(ui_url))
+    }
+  end
+
+  defp absolute_open_url(nil), do: SchedulerClient.config().base_url
+
+  defp absolute_open_url(url) when is_binary(url) do
+    uri = URI.parse(url)
+
+    if uri.scheme && uri.host do
+      url
+    else
+      SchedulerClient.config().base_url
+      |> Kernel.<>("/")
+      |> URI.merge(url)
+      |> URI.to_string()
+    end
   end
 
   defp app_version do

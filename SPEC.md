@@ -2405,6 +2405,10 @@ types (the log is versioned and additive).
 | `:fan_out_started` / `:fan_out_completed` | `address, per, width` / `address` |
 | `:run_completed` | `value` (terminal on success path; no address) |
 
+> *(Proposed §10 — dataflow: a proposed extension pins `agent_committed.prompt` and
+> `agent_attempt_rejected.prompt` to the materialized `EffectivePrompt` string for template-prompt
+> agents, never the inert `%Template{}`; see §10.)*
+
 Payload-value pins (each is observable output, so it is normative):
 
 - **`run_started.node_count`** is exactly `length(tree.nodes)` — the number of **top-level**

@@ -1274,7 +1274,8 @@ partial progress**:
   failure.** In `parallel`/`pipeline`/`verify`/`judge`/`fan_out` the provider call runs
   off-thread inside `BuildAgent`/`RunLane`/`ScoreLane`, whose result contract is only
   `{:ok, …}` or the schema-`{:failed, …}` lane result (§6.9). A **provider-level** crash —
-  `CallProvider` returning a non-`{:ok, output, usage}` shape or raising (§6.4.1) — is
+  `CallProvider` returning a shape that cannot normalize to `{:ok, output, usage, activity}`
+  or raising (§6.4.1) — is
   **not** a schema `{:failed, …}`: it is not caught and converted, it **propagates** off the
   lane task and **crashes the live writer**, exactly as a top-level provider crash does.
   Because the region commits nothing until every lane result is gathered and `CommitLanes`
@@ -1539,15 +1540,16 @@ ResolveIdempotency(events, node_path, iteration):
 ```
 CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Let {key} be IdempotencyKey(run_id, node.address, iteration, attempt).
-  - Let {output, usage} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
+  - Let {output, usage, activity} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
   - If {node.schema} is nil:                                 ; schemaless
-    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, output, usage), ctx).
+    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, output, usage, activity), ctx).
     - Return {:cont, ctx with last_result = output}.
   - Let {v} be Schema.Validate(node.schema, output).         ; schema-bound
   - If {v} is {:ok, validated}:
-    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, validated, usage), ctx).
+    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, validated, usage, activity), ctx).
     - Return {:cont, ctx with last_result = validated}.
-  - Let {ctx} be Commit(Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage), ctx).
+  - If {v} is {:error, reason}:
+    - Let {ctx} be Commit(Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity), ctx).
   - If {attempt} < node.retries:
     - Return CommitAttempt(node, run_id, provider, iteration, attempt + 1, ctx).  ; recurse with the advanced cursor
   - Let {ctx} be Commit(Event.agent_failed(node, iteration, attempt + 1, reason), ctx).
@@ -1568,22 +1570,37 @@ deterministic runner and a non-deterministic backend:
 
 ```
 CallProvider({module, opts}, prompt, schema, key):
-  - Return module.run_agent(prompt, schema, key, opts).
+  - Let {r} be module.run_agent(prompt, schema, key, opts).
+  - Return NormalizeProviderResult(r).
+```
+
+```
+NormalizeProviderResult(r):
+  - If {r} is {:ok, result, usage}:
+    - Return {:ok, result, usage, []}.
+  - If {r} is {:ok, result, usage, activity}:
+    - Return {:ok, result, usage, activity}.
+  - Return {r}.        ; the caller hard-matches success and treats this as a provider crash
 ```
 
 - **Inputs.** `prompt :: String.t()` (this node's literal prompt — never a splice of any
   other node's output), `schema :: map() | nil` (the node's JSON-schema map, or `nil` for a
   schemaless turn), `key :: IdempotencyKey` (§6.5), and the backend-specific `opts`.
-- **Success return.** A conforming backend MUST return exactly `{:ok, result, usage}` where
-  `result` is the decoded provider output (`term()`; for a schema-bound turn a decoded
-  JSON value — a map, list, or scalar) and `usage` is a `%Usage{input_tokens,
-  output_tokens, total_tokens}` of non-negative integers. The runner **hard-matches**
-  `{:ok, output, usage}`: `CallProvider` returning any other shape (an `{:error, …}` tuple,
-  a network failure, a raised exception) is **not** a schema-validation failure and is
-  **not** retried. It crashes the live writer, which the caller observes via its monitor as
-  `{:error, {:run_crashed, reason}}` (§6.1, §7.4) — mapped to exit 1 (or exit 130 when
-  `reason` is `:killed`) per §7.5. Fail-closed retry (§6.4) applies **only** to a successful call
-  whose `output` fails `Schema.Validate`; a provider-level failure is a crash, not a retry.
+- **Success return.** A conforming backend MUST return either legacy
+  `{:ok, result, usage}` or activity-bearing `{:ok, result, usage, activity}`. `result` is
+  the decoded provider output (`term()`; for a schema-bound turn a decoded JSON value — a
+  map, list, or scalar), `usage` is a `%Usage{input_tokens, output_tokens, total_tokens}`
+  of non-negative integers, and `activity` is an ordered list of provider activity entries
+  (§7.3.1). The runner MUST normalize the legacy 3-tuple to
+  `{:ok, result, usage, []}` and MUST pass a 4-tuple's `activity` through to the
+  `agent_committed` or `agent_attempt_rejected` journal event for the same paid attempt.
+  The runner **hard-matches** the normalized `{:ok, output, usage, activity}`: `CallProvider`
+  returning any other shape (an `{:error, …}` tuple, a network failure, a raised exception)
+  is **not** a schema-validation failure and is **not** retried. It crashes the live writer,
+  which the caller observes via its monitor as `{:error, {:run_crashed, reason}}` (§6.1,
+  §7.4) — mapped to exit 1 (or exit 130 when `reason` is `:killed`) per §7.5.
+  Fail-closed retry (§6.4) applies **only** to a successful call whose `output` fails
+  `Schema.Validate`; a provider-level failure is a crash, not a retry.
 - **Turn independence.** Because `CallProvider` receives only `(prompt, schema, key,
   opts)`, no conversation state, thread, or prior result is carried between turns. Every
   agent turn is independent; all context an agent needs MUST be present in its own literal
@@ -1596,7 +1613,7 @@ CallProvider({module, opts}, prompt, schema, key):
 
 | callback | signature | required? | when called |
 |---|---|---|---|
-| `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> {:ok, result, usage}` | **REQUIRED** | once per paid attempt (§6.4) |
+| `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> {:ok, result, usage} \| {:ok, result, usage, activity}` | **REQUIRED** | once per paid attempt (§6.4) |
 | `c:validate_config/1` | `validate_config(opts) -> :ok \| {:error, reason}` | OPTIONAL | once, **pre-run**, during `ResolveProvider` |
 
 **Provider resolution (pre-run gate, exit 4).** Before the run starts — before
@@ -1622,9 +1639,10 @@ The two failure classes are **disjoint and pinned**:
   is committed; no lease is taken. A provider with **no** `validate_config/1` is treated as
   `:ok` at this gate (it can only fail later, at call time).
 - **Call-time (`{:error, {:run_crashed, reason}}` ⇒ exit 1, or 130 when `reason` is
-  `:killed`).** A provider that **resolved** but whose `run_agent/4` later returns a non-
-  `{:ok, result, usage}` shape or raises (§6.4.1, "Success return"). This crashes the live
-  writer mid-run and is **never** an exit-4 `provider-config` failure.
+  `:killed`).** A provider that **resolved** but whose `run_agent/4` later returns a shape
+  that cannot normalize to `{:ok, result, usage, activity}` or raises (§6.4.1, "Success
+  return"). This crashes the live writer mid-run and is **never** an exit-4
+  `provider-config` failure.
 
 An **absent or `nil`** `:provider` option is neither of the above: it is a caller misuse of
 the run API (a missing REQUIRED option, §7.6), reported as `{:error, {:usage, :provider}}`
@@ -2344,8 +2362,8 @@ types (the log is versioned and additive).
 | `:run_started` | `tree_name, tree_version, node_count, budget, script_path` (no address) |
 | `:phase_entered` | `address, name` |
 | `:log_emitted` | `address, message` |
-| `:agent_committed` | `address, iteration, idempotency_key, prompt, result, usage` |
-| `:agent_attempt_rejected` | `address, iteration, attempt, prompt, output, reason, usage` |
+| `:agent_committed` | `address, iteration, idempotency_key, prompt, result, usage, activity` |
+| `:agent_attempt_rejected` | `address, iteration, attempt, prompt, output, reason, usage, activity` |
 | `:agent_failed` | `address, iteration, attempts, reason` (last event for a top-level fail; inside a concurrent region later lane events may follow it in seq order — the run's halt reason is the **first** `agent_failed` (§6.1), while the Status fold's `failure` is the **last** `agent_failed` in seq order (§7.3)) |
 | `:parallel_started` / `:parallel_completed` | `address, branch_count` / `address` |
 | `:pipeline_started` / `:pipeline_completed` | `address, items, item_count, stage_count` / `address` |
@@ -2387,6 +2405,13 @@ Payload-value pins (each is observable output, so it is normative):
   §7.3 `agents` projection both carry this map as-is. Because it is observable output, two
   conforming implementations journal byte-identical `idempotency_key` maps for the same
   effect.
+- **`agent_committed.activity` and `agent_attempt_rejected.activity`** are ordered provider
+  activity lists for that exact paid attempt (§6.4.1, §7.3.1). They are **normalized
+  activity**, not raw Codex JSONL, not provider-specific event blobs, and not a live stream of
+  in-progress tool calls. A writer that receives legacy provider success
+  `{:ok, result, usage}` MUST journal `activity: []` for the attempt. A fold over an older
+  schema-1 journal event that lacks the `activity` key MUST behave as if the key were present
+  with `[]`.
 
 `run_completed` is the terminal success event; on failure the terminal event is
 `agent_failed` and **no** `run_completed` is written. Control-flow outcomes
@@ -2405,37 +2430,54 @@ over the journal (it consults no process state). `state` transitions:
                                     --agent_failed---> :failed
 ```
 
-The fold accumulates `logs`, `agents`, `rejected`, `accumulators`, `verifications`,
-`judgments`, `usage` (summed only from `agent_committed` and `agent_attempt_rejected` —
-rejections still pay), and sets `result = value` on `run_completed`. Every clause increments
-`event_count`, so the fold is total.
+The fold accumulates `phases`, `logs`, `agents`, `rejected`, `accumulators`,
+`verifications`, `judgments`, `usage` (summed only from `agent_committed` and
+`agent_attempt_rejected` — rejections still pay), and sets `result = value` on
+`run_completed`. Every clause increments `event_count`, so the fold is total.
 
 **List-projection shapes (pinned).** These projections live in the `Workflow.Status` struct
-returned by `Workflow.Status.of/1` (§7.6). Of them, **only `logs` (verbatim) and
-`agentCount = length(agents)`** surface in the §7.5 run-projection envelope; the `agents`,
-`rejected`, `verifications`, and `judgments` lists are **not** envelope fields — they are
-reachable only through the `Workflow.Status` struct (§7.5). Each is an **ordered list
-appended in `seq` order** (one entry per matching event, in the order the fold visits them):
+returned by `Workflow.Status.of/1` (§7.6) and feed the inspector projection (§7.3.1). Of
+them, **only `logs` (verbatim) and `agentCount = length(agents)`** surface in the §7.5
+run-projection envelope; the `phases`, `agents`, `rejected`, `verifications`, and
+`judgments` lists are **not** envelope fields — they are reachable only through the
+`Workflow.Status` struct and derived inspector projection (§7.3.1). Each is an **ordered
+list appended in `seq` order** (one entry per matching event, in the order the fold visits
+them):
 
+- **`phases`** is an ordered list of phase groups. On each `phase_entered`, the fold appends
+  `%{id, name, address, agents}` where `id = "phase-" <> decimal(length(phases_before))`,
+  `name = payload.name`, `address = payload.address`, and `agents = []`; it also sets
+  `current_phase_id` to that `id` and `phase` to `name`. If an `agent_committed` or
+  `agent_attempt_rejected` is folded before any `phase_entered`, the fold first creates one
+  implicit group `%{id: "phase-default", name: "Default phase", address: nil, agents: []}`.
+  This implicit group is journal-derived read-model state; it is not a journal event.
 - **`logs`** is an ordered list of **bare `message` strings** — exactly the `log_emitted`
   payload's `message` binary (§7.2), **not** a map. On each `log_emitted` the fold appends
   `payload.message`. (Because a body `log` commits at most once per address, §6.3, a loop
   emits one entry, not one per iteration.)
 - **`agents`** is an ordered list appending, on each `agent_committed`, the map
-  `%{address, prompt, result, usage, idempotency_key}` (the projected `agent_committed`
-  payload). `agentCount` in the envelope (§7.5) is exactly `length(agents)`.
+  `%{address, iteration, prompt, result, usage, idempotency_key, activity, phase_id,
+  phase_name}`. `activity` is `payload.activity` when present and `[]` when absent; it is
+  normalized by the inspector projection (§7.3.1), not by this status fold. `phase_id` and
+  `phase_name` are the current phase group's `id` and `name` after the implicit/default phase
+  rule above, and the same agent map is appended to that phase group's `agents` list.
+  `agentCount` in the envelope (§7.5) is exactly `length(agents)`.
   *(Proposed §10 — dataflow: a proposed extension pins the projected `prompt` — and the `agent_committed.prompt` / `agent_attempt_rejected.prompt` payload keys (§7.2) — to the rendered `String.t()`, never an inert `%Template{}`; see §10.)*
 - **`rejected`** is an ordered list appending, on each `agent_attempt_rejected`, the map
-  `%{address, attempt, reason}`.
+  `%{address, iteration, attempt, prompt, output, reason, activity, phase_id, phase_name}`.
+  Rejected attempts are never dropped just because a later retry succeeds; they remain visible
+  to inspector projections and still contribute to `usage`.
 - **`verifications`** / **`judgments`** append, on each `verify_settled` / `judge_settled`,
   the map `%{address, confirmations, total, threshold, survived}` /
   `%{address, scores, pick, winner}` respectively.
 
 Two conforming implementations therefore emit **byte-identical** `logs` (and the other list
-projections) for the same journal.
+projections) for the same journal, modulo the host-scoped `inspect/1` caveats already called
+out for non-JSON Elixir terms (§4.4, §7.5).
 
 **Failure projection (last-wins, pinned).** On **every** `agent_failed` the fold sets
-`failure = %{address, attempts, reason}` and `state = :failed` **unconditionally** — there
+`failure = %{address, iteration, attempts, reason}` and `state = :failed`
+**unconditionally** — there
 is **no** state guard, so a later `agent_failed` **overwrites** an earlier one. The folded
 `failure` is therefore the **last** `agent_failed` in `seq` order. In the common case — a
 single `agent_failed` (a top-level fail-closed node, or a concurrent region with exactly one
@@ -2462,6 +2504,165 @@ The fold also tracks `phase`: on each `phase_entered` it sets `phase = payload.n
 `phase` is the `name` of the **most recent** `phase_entered` event, or `nil` when no phase
 has been entered. This is the value surfaced as the envelope's `phase` field (§7.5); it is
 a projection, computable from the journal alone.
+
+### 7.3.1 Run inspector projection
+
+The run inspector is a derived, normalized read model for human and UI inspection of agent
+turns. It is **not** a writer-side state object. A conforming implementation MUST construct
+it from `Workflow.Status.of(run_id)` (or an observably equivalent fold of the same committed
+journal events) and MUST NOT consult a live writer process, provider process, raw Codex JSONL
+stream, or uncommitted in-memory activity.
+
+```
+RunInspector(status):
+  - Let {agents} be Map(status.agents, InspectorAgent).
+  - Let {rejected_attempts} be Map(status.rejected, InspectorRejection).
+  - Return %{
+      run_id: status.run_id,
+      phases: Map(status.phases, InspectorPhase),
+      agents: agents,
+      rejected_attempts: rejected_attempts,
+      failed_rejected_attempts: FailedRejectedAttempts(status.failure, agents, rejected_attempts)
+    }.
+```
+
+```
+InspectorPhase(phase):
+  - Return %{
+      id: phase.id,
+      name: phase.name,
+      address: phase.address,
+      agents: Map(phase.agents, InspectorAgent)
+    }.
+```
+
+```
+InspectorAgent(agent):
+  - Let {iteration} be AgentIteration(agent).
+  - Let {projected} be %{
+      address: agent.address,
+      iteration: iteration,
+      prompt: agent.prompt,
+      outcome: agent.result,
+      result: agent.result,
+      usage: agent.usage,
+      idempotency_key: agent.idempotency_key,
+      activity: NormalizeActivity(agent.activity),
+      phase_id: agent.phase_id,
+      phase_name: agent.phase_name
+    }.
+  - Return {projected} with id = AgentId(projected) and slug = AgentSlug(projected).
+```
+
+`AgentId(agent)` returns `"agent-" <> JoinAddress(agent.address) <> "-i" <>
+decimal(agent.iteration)`. `JoinAddress(address)` renders each non-negative integer address
+segment in decimal and joins the rendered segments with `"-"`; for example
+`JoinAddress([1, 0, 2])` is `"1-0-2"`. This is the inspector-grade identity for an agent
+turn: **address plus iteration**. Address alone is insufficient because loop bodies reuse the
+same node address across iterations.
+
+```
+AgentSlug(agent):
+  - Let {slug} be agent.prompt lowercased, with every non-empty run of characters outside
+    ASCII lowercase letters (`a-z`) and ASCII digits (`0-9`) replaced by `"-"`, then with
+    leading and trailing `"-"` removed.
+  - If {slug} is the empty string: Return AgentId(agent).
+  - Return {slug} <> "-i" <> decimal(agent.iteration).
+```
+
+`AgentSlug` is for display/testing convenience only and MUST NOT replace `AgentId` as
+identity.
+
+```
+InspectorRejection(rejection):
+  - Let {iteration} be AgentIteration(rejection).
+  - Return %{
+      id: "rejection-" <> JoinAddress(rejection.address) <>
+          "-i" <> decimal(iteration) <> "-a" <> decimal(rejection.attempt),
+      address: rejection.address,
+      iteration: iteration,
+      attempt: rejection.attempt,
+      prompt: rejection.prompt,
+      output: rejection.output,
+      reason: rejection.reason,
+      activity: NormalizeActivity(rejection.activity),
+      phase_id: rejection.phase_id,
+      phase_name: rejection.phase_name
+    }.
+```
+
+```
+AgentIteration(map):
+  - If {map.iteration} is present: Return {map.iteration}.
+  - Return 0.
+```
+
+```
+FailedRejectedAttempts(failure, agents, rejected_attempts):
+  - If {failure} is nil: Return [].
+  - Let {address} be failure.address.
+  - Let {iteration} be failure.iteration.
+  - If any {agent} in {agents} has agent.address == address and agent.iteration == iteration:
+    - Return [].
+  - Return every {rejection} in {rejected_attempts} whose rejection.address == address and
+    rejection.iteration == iteration, preserving their original order.
+```
+
+Rejected attempts therefore remain observable in two cases:
+
+- If a later retry succeeds, the rejected attempts for the same `(address, iteration)` remain
+  in `rejected_attempts` and are selected with that committed agent turn.
+- If all attempts for `(address, iteration)` are rejected and the run fails before any
+  `agent_committed` exists for that identity, those rejected attempts MUST appear in
+  `failed_rejected_attempts` so a failed rejected-only iteration is still inspectable.
+
+```
+NormalizeActivity(activity):
+  - If {activity} is not a List: Return [].
+  - Return Map(activity, NormalizeActivityEntry).
+```
+
+```
+NormalizeActivityEntry(entry):
+  - If {entry} is not a Map:
+    - Return %{kind: "activity", label: "Activity", status: nil, summary: nil}.
+  - Return %{
+      kind: Text(entry[:kind] || entry["kind"] || "activity"),
+      label: Text(entry[:label] || entry["label"] || "Activity"),
+      status: OptionalText(entry[:status] || entry["status"]),
+      summary: OptionalText(entry[:summary] || entry["summary"])
+    }.
+```
+
+```
+OptionalText(value):
+  - If {value} is nil: Return nil.
+  - Return Text(value).
+```
+
+```
+Text(value):
+  - If {value} is a binary string: Return {value}.
+  - If {value} is an atom: Return Atom.to_string(value).
+  - Return inspect(value).        ; host-scoped as in §4.4 and §7.5
+```
+
+An activity entry's `kind` is a stable category such as `"reasoning"`, `"tool"`, or
+provider-defined `"event"`; `label` is the user-facing name; `summary` is a concise
+attempt-local description; and `status` is the provider-observed state text. The status
+value `"completed"` means the provider step completed within the paid attempt. The status
+value `"rejected"` means the activity belongs to an attempt whose provider output was
+rejected by `Schema.Validate`. Other status strings MAY be preserved for future providers,
+but consumers MUST treat unknown status strings as display text, not as control flow.
+
+**Stable serialization boundary.** The inspector projection serializes only the normalized
+fields above. It MUST NOT expose raw journal payload maps wholesale, raw Codex JSONL,
+provider-private event envelopes, or uncommitted live tool events. A compact scheduler
+event projection MAY expose only `%{seq, type, address?}` for each journal event; that
+projection is intentionally separate from the richer inspector projection. True live
+per-tool streaming, where tool-call progress is visible before an `agent_committed` or
+`agent_attempt_rejected` event is committed, is **outside this contract** and requires a
+separate future protocol change.
 
 ### 7.4 Result shape
 

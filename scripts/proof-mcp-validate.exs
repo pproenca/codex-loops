@@ -29,13 +29,19 @@ defmodule ProofMCPValidate do
     )
 
     workflow_path = Path.join(temp_root, "workflow.exs")
+    running_workflow_path = Path.join(temp_root, "running-workflow.exs")
+    invalid_workflow_path = Path.join(temp_root, "invalid-workflow.exs")
     missing_path = Path.join(temp_root, "missing-workflow.exs")
     journal_path = Path.join(temp_root, "runs.sqlite")
     run_id = "mcp:proof_#{System.unique_integer([:positive])}"
+    running_run_id = "mcp:proof_running_#{System.unique_integer([:positive])}"
+    unknown_run_id = "mcp:proof_missing_#{System.unique_integer([:positive])}"
     scheduler_url = "http://127.0.0.1:#{port}"
 
     try do
       File.write!(workflow_path, workflow_source())
+      File.write!(running_workflow_path, running_workflow_source())
+      File.write!(invalid_workflow_path, invalid_workflow_source())
 
       with_mcp_client(entrypoint, repo_root, mcp_env(port, journal_path), fn client ->
         {initialize, client} =
@@ -61,8 +67,27 @@ defmodule ProofMCPValidate do
 
         assert_missing_script_validation!(missing_validation, missing_path)
 
-        {start, client} =
+        {running_start, client} =
           call_tool!(client, 5, "workflow_start", %{
+            "script_path" => running_workflow_path,
+            "run_id" => running_run_id,
+            "provider" => "mock",
+            "budget" => 0
+          })
+
+        assert_started_run!(running_start, running_run_id)
+
+        {already_running, client} =
+          call_tool!(client, 6, "workflow_resume", %{
+            "run_id" => running_run_id,
+            "provider" => "mock"
+          })
+
+        assert_already_running_resume!(already_running, running_run_id)
+        {client, _running_status_payload} = poll_terminal_status!(client, running_run_id, 7)
+
+        {start, client} =
+          call_tool!(client, 150, "workflow_start", %{
             "script_path" => workflow_path,
             "run_id" => run_id,
             "provider" => "mock",
@@ -71,19 +96,69 @@ defmodule ProofMCPValidate do
 
         assert_started_run!(start, run_id)
 
-        {client, status_payload} = poll_completed_status!(client, run_id, 6)
+        {client, status_payload} = poll_completed_status!(client, run_id, 151)
         assert_completed_status!(status_payload, run_id)
 
-        {open_ui, client} = call_tool!(client, 200, "workflow_open_ui", %{"run_id" => run_id})
+        {inspect, client} = call_tool!(client, 250, "workflow_inspect", %{"run_id" => run_id})
+        assert_inspected_events!(inspect, run_id)
+
+        {resume, client} =
+          call_tool!(client, 251, "workflow_resume", %{
+            "run_id" => run_id,
+            "provider" => "mock"
+          })
+
+        assert_resumed_run!(resume, run_id)
+
+        {client, resumed_status_payload} = poll_completed_status!(client, run_id, 252)
+        assert_completed_status!(resumed_status_payload, run_id)
+
+        {inspect_after_resume, client} =
+          call_tool!(client, 350, "workflow_inspect", %{"run_id" => run_id})
+
+        assert_inspected_events!(inspect_after_resume, run_id)
+
+        {unknown_inspect, client} =
+          call_tool!(client, 351, "workflow_inspect", %{"run_id" => unknown_run_id})
+
+        assert_unknown_run_error!(unknown_inspect, "workflow_inspect", unknown_run_id)
+
+        {unknown_resume, client} =
+          call_tool!(client, 352, "workflow_resume", %{
+            "run_id" => unknown_run_id,
+            "provider" => "mock"
+          })
+
+        assert_unknown_run_error!(unknown_resume, "workflow_resume", unknown_run_id)
+
+        {missing_resume, client} =
+          call_tool!(client, 353, "workflow_resume", %{
+            "run_id" => run_id,
+            "script_path" => missing_path,
+            "provider" => "mock"
+          })
+
+        assert_missing_script_resume!(missing_resume, missing_path)
+
+        {validation_resume, client} =
+          call_tool!(client, 354, "workflow_resume", %{
+            "run_id" => run_id,
+            "script_path" => invalid_workflow_path,
+            "provider" => "mock"
+          })
+
+        assert_validation_failure_resume!(validation_resume)
+
+        {open_ui, client} = call_tool!(client, 450, "workflow_open_ui", %{"run_id" => run_id})
         assert_open_ui!(open_ui, run_id, scheduler_url)
 
-        {shutdown, client} = request!(client, 201, "shutdown", %{})
+        {shutdown, client} = request!(client, 451, "shutdown", %{})
         assert!(shutdown["result"] == %{}, "shutdown should return an empty result")
         await_port_exit!(client)
       end)
 
       assert_scheduler_stopped!(scheduler_url)
-      IO.puts("MCP validate/start/status/open-ui proof passed on #{scheduler_url}")
+      IO.puts("MCP validate/start/status/inspect/resume/open-ui proof passed on #{scheduler_url}")
     after
       File.rm_rf(temp_root)
     end
@@ -238,6 +313,10 @@ defmodule ProofMCPValidate do
     do_poll_completed_status!(client, run_id, next_id, @poll_attempts, nil)
   end
 
+  defp poll_terminal_status!(client, run_id, next_id) do
+    do_poll_terminal_status!(client, run_id, next_id, @poll_attempts, nil)
+  end
+
   defp do_poll_completed_status!(_client, run_id, _next_id, 0, last_payload) do
     raise("run #{run_id} did not complete; last status: #{inspect(last_payload)}")
   end
@@ -260,6 +339,23 @@ defmodule ProofMCPValidate do
     end
   end
 
+  defp do_poll_terminal_status!(_client, run_id, _next_id, 0, last_payload) do
+    raise("run #{run_id} did not reach a terminal state; last status: #{inspect(last_payload)}")
+  end
+
+  defp do_poll_terminal_status!(client, run_id, next_id, attempts_left, _last_payload) do
+    {response, client} = call_tool!(client, next_id, "workflow_status", %{"run_id" => run_id})
+    payload = successful_tool_payload!(response, "workflow_status")
+    state = get_in(payload, ["data", "state"])
+
+    if state in ["completed", "failed"] do
+      {client, payload}
+    else
+      Process.sleep(@poll_interval_ms)
+      do_poll_terminal_status!(client, run_id, next_id + 1, attempts_left - 1, payload)
+    end
+  end
+
   defp workflow_source do
     """
     defmodule MCPLifecycleProofWorkflow do
@@ -275,6 +371,37 @@ defmodule ProofMCPValidate do
     """
   end
 
+  defp running_workflow_source do
+    agents =
+      1..750
+      |> Enum.map_join("\n", fn index ->
+        ~s|        agent "keep lease #{index}"|
+      end)
+
+    """
+    defmodule MCPRunningProofWorkflow do
+      use Workflow
+
+      workflow "mcp-running-proof" do
+        #{agents}
+        return :ok
+      end
+    end
+    """
+  end
+
+  defp invalid_workflow_source do
+    """
+    defmodule MCPInvalidProofWorkflow do
+      use Workflow
+
+      workflow "mcp-invalid-proof" do
+        frobnicate "nope"
+      end
+    end
+    """
+  end
+
   defp assert_initialize!(%{"result" => %{"serverInfo" => %{"name" => "codex-loops"}}}), do: :ok
 
   defp assert_initialize!(message),
@@ -283,7 +410,14 @@ defmodule ProofMCPValidate do
   defp assert_tools_list!(%{"result" => %{"tools" => tools}}) when is_list(tools) do
     names = Enum.map(tools, & &1["name"])
 
-    for name <- ["workflow_validate", "workflow_start", "workflow_status", "workflow_open_ui"] do
+    for name <- [
+          "workflow_validate",
+          "workflow_start",
+          "workflow_status",
+          "workflow_inspect",
+          "workflow_resume",
+          "workflow_open_ui"
+        ] do
       assert!(name in names, "tools/list should include #{name}; got #{inspect(names)}")
     end
   end
@@ -342,6 +476,20 @@ defmodule ProofMCPValidate do
     assert!(payload["data"]["ui_url"] == "/runs/#{run_id}", "ui_url should point at run")
   end
 
+  defp assert_resumed_run!(response, run_id) do
+    payload = successful_tool_payload!(response, "workflow_resume")
+
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "workflow_resume should return scheduler envelope"
+    )
+
+    assert!(payload["data"]["run_id"] == run_id, "workflow_resume should preserve run id")
+    assert!(payload["data"]["state"] == "accepted", "workflow_resume should accept the run")
+    assert!(payload["data"]["ui_path"] == "/runs/#{run_id}", "resume ui_path should point at run")
+    assert!(payload["data"]["ui_url"] == "/runs/#{run_id}", "resume ui_url should point at run")
+  end
+
   defp assert_completed_status!(payload, run_id) do
     assert!(
       payload["api_version"] == "scheduler.v1",
@@ -365,6 +513,120 @@ defmodule ProofMCPValidate do
     assert!(
       data["usage"] == %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
       "usage should be projected"
+    )
+  end
+
+  defp assert_inspected_events!(response, run_id) do
+    payload = successful_tool_payload!(response, "workflow_inspect")
+
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "workflow_inspect should return scheduler envelope"
+    )
+
+    assert!(payload["data"]["run_id"] == run_id, "workflow_inspect should preserve run id")
+
+    events = payload["data"]["events"]
+    assert!(Enum.map(events, & &1["seq"]) == [0, 1, 2, 3, 4], "events should be ordered")
+
+    assert!(
+      Enum.map(events, & &1["type"]) == [
+        "run_started",
+        "phase_entered",
+        "log_emitted",
+        "agent_committed",
+        "run_completed"
+      ],
+      "events should preserve scheduler event types"
+    )
+
+    expected_events = [
+      %{"seq" => 0, "type" => "run_started"},
+      %{"seq" => 1, "type" => "phase_entered", "address" => [0]},
+      %{"seq" => 2, "type" => "log_emitted", "address" => [1]},
+      %{"seq" => 3, "type" => "agent_committed", "address" => [2]},
+      %{"seq" => 4, "type" => "run_completed"}
+    ]
+
+    assert!(
+      events == expected_events,
+      "workflow_inspect should return MCP-friendly event projections"
+    )
+  end
+
+  defp assert_unknown_run_error!(response, tool_name, run_id) do
+    payload = error_tool_payload!(response, tool_name)
+
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "#{tool_name} should return scheduler envelope"
+    )
+
+    assert!(
+      payload["error"]["code"] == "scheduler.run.not_found",
+      "#{tool_name} should preserve unknown-run scheduler error"
+    )
+
+    assert!(
+      payload["error"]["details"]["run_id"] == run_id,
+      "#{tool_name} should preserve unknown run id"
+    )
+  end
+
+  defp assert_missing_script_resume!(response, missing_path) do
+    payload = error_tool_payload!(response, "workflow_resume")
+
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "missing resume script should return scheduler envelope"
+    )
+
+    assert!(
+      payload["error"]["code"] == "scheduler.validation.script_not_found",
+      "missing resume script should preserve typed scheduler error"
+    )
+
+    assert!(
+      payload["error"]["details"]["path"] == missing_path,
+      "missing resume script path should be preserved"
+    )
+  end
+
+  defp assert_validation_failure_resume!(response) do
+    payload = error_tool_payload!(response, "workflow_resume")
+
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "invalid resume script should return scheduler envelope"
+    )
+
+    assert!(
+      payload["error"]["code"] == "scheduler.validation.workflow_dsl",
+      "invalid resume script should preserve typed scheduler validation error"
+    )
+
+    assert!(
+      payload["error"]["details"]["reason"] =~ "unknown combinator `frobnicate`",
+      "invalid resume script should preserve validation details"
+    )
+  end
+
+  defp assert_already_running_resume!(response, run_id) do
+    payload = error_tool_payload!(response, "workflow_resume")
+
+    assert!(
+      payload["api_version"] == "scheduler.v1",
+      "already-running resume should return scheduler envelope"
+    )
+
+    assert!(
+      payload["error"]["code"] == "scheduler.run.already_running",
+      "already-running resume should preserve typed scheduler error"
+    )
+
+    assert!(
+      payload["error"]["details"]["run_id"] == run_id,
+      "already-running resume should preserve run id"
     )
   end
 

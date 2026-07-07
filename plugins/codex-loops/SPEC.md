@@ -23,6 +23,8 @@ MCP tools:
 - `workflow_validate`
 - `workflow_start`
 - `workflow_status`
+- `workflow_inspect`
+- `workflow_resume`
 - `workflow_open_ui`
 
 Legacy CLI commands:
@@ -53,6 +55,10 @@ MCP behavior:
   `run_id`, optional `provider` (`mock`), and optional non-negative integer
   `budget`
 - `workflow_status` input schema requires `run_id`
+- `workflow_inspect` input schema requires `run_id`
+- `workflow_resume` input schema requires `run_id` and accepts optional
+  `script_path`, optional scheduler-supported `script` alias, and optional
+  `provider` (`mock`)
 - `workflow_open_ui` input schema requires `run_id`
 - `tools/call` health-checks `GET /api/health` before scheduler operations
 - when health fails, the server discovers and starts a packaged scheduler
@@ -61,6 +67,10 @@ MCP behavior:
   error envelope exactly as MCP `structuredContent`
 - `workflow_status` calls `GET /api/runs/:id` and returns the scheduler
   projection exactly as MCP `structuredContent`
+- `workflow_inspect` calls `GET /api/runs/:id/events` and returns the ordered
+  scheduler event projection exactly as MCP `structuredContent`
+- `workflow_resume` calls `POST /api/runs/:id/resume` and returns the scheduler
+  success or error envelope exactly as MCP `structuredContent`
 - `workflow_open_ui` calls `GET /api/runs/:id` and returns an MCP envelope with
   the scheduler projection plus absolute `open_url` based on the scheduler base
   URL
@@ -162,8 +172,9 @@ make proof-live
 
 `make proof-live` spends one real Codex provider turn through the packaged
 release. `make proof-mcp` copies the plugin package to a temp install location
-and proves MCP lifecycle, validation, mock start, status polling, and open-ui
-response against the copied package's scheduler release.
+and proves MCP lifecycle, validation, mock start, status polling, event
+inspection, resume, typed scheduler errors, and open-ui response against the
+copied package's scheduler release.
 
 ## Safety And Testing
 

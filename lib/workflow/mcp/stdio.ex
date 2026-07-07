@@ -12,6 +12,7 @@ defmodule Workflow.MCP.Stdio do
   @protocol_version "2024-11-05"
   @api_version "codex-loops.mcp.v1"
   @start_argument_keys ["script_path", "run_id", "provider", "budget"]
+  @resume_argument_keys ["script_path", "script", "provider"]
 
   @spec main([String.t()]) :: :ok | no_return()
   def main(args \\ System.argv()) do
@@ -209,6 +210,45 @@ defmodule Workflow.MCP.Stdio do
     )
   end
 
+  defp call_tool(%{"name" => "workflow_inspect", "arguments" => %{"run_id" => run_id}}, state)
+       when is_binary(run_id) and byte_size(run_id) > 0 do
+    call_scheduler_tool(state, fn -> SchedulerClient.get_run_events(run_id) end)
+  end
+
+  defp call_tool(%{"name" => "workflow_inspect", "arguments" => arguments}, state) do
+    invalid_tool_params(
+      "workflow_inspect requires arguments.run_id as a non-empty string",
+      arguments,
+      state
+    )
+  end
+
+  defp call_tool(%{"name" => "workflow_inspect"}, state) do
+    invalid_tool_params(
+      "workflow_inspect requires arguments.run_id as a non-empty string",
+      nil,
+      state
+    )
+  end
+
+  defp call_tool(%{"name" => "workflow_resume", "arguments" => arguments}, state) do
+    case workflow_resume_arguments(arguments) do
+      {:ok, run_id, attrs} ->
+        call_scheduler_tool(state, fn -> SchedulerClient.resume_run(run_id, attrs) end)
+
+      {:error, reason} ->
+        invalid_tool_params(reason, arguments, state)
+    end
+  end
+
+  defp call_tool(%{"name" => "workflow_resume"}, state) do
+    invalid_tool_params(
+      "workflow_resume requires arguments.run_id as a non-empty string",
+      nil,
+      state
+    )
+  end
+
   defp call_tool(%{"name" => "workflow_open_ui", "arguments" => %{"run_id" => run_id}}, state)
        when is_binary(run_id) and byte_size(run_id) > 0 do
     call_open_ui_tool(state, run_id)
@@ -245,6 +285,15 @@ defmodule Workflow.MCP.Stdio do
 
   defp workflow_start_arguments(_arguments) do
     {:error, "workflow_start requires arguments.script_path as a string"}
+  end
+
+  defp workflow_resume_arguments(%{"run_id" => run_id} = arguments)
+       when is_binary(run_id) and byte_size(run_id) > 0 do
+    {:ok, run_id, Map.take(arguments, @resume_argument_keys)}
+  end
+
+  defp workflow_resume_arguments(_arguments) do
+    {:error, "workflow_resume requires arguments.run_id as a non-empty string"}
   end
 
   defp call_scheduler_tool(state, scheduler_fun) when is_function(scheduler_fun, 0) do
@@ -310,6 +359,8 @@ defmodule Workflow.MCP.Stdio do
       workflow_validate_tool(),
       workflow_start_tool(),
       workflow_status_tool(),
+      workflow_inspect_tool(),
+      workflow_resume_tool(),
       workflow_open_ui_tool()
     ]
   end
@@ -375,6 +426,58 @@ defmodule Workflow.MCP.Stdio do
           "run_id" => %{
             "type" => "string",
             "description" => "Run id returned by workflow_start."
+          }
+        },
+        "required" => ["run_id"],
+        "additionalProperties" => false
+      }
+    }
+  end
+
+  defp workflow_inspect_tool do
+    %{
+      "name" => "workflow_inspect",
+      "description" =>
+        "Read ordered scheduler event projections through GET /api/runs/:id/events.",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "run_id" => %{
+            "type" => "string",
+            "description" => "Run id returned by workflow_start or workflow_resume."
+          }
+        },
+        "required" => ["run_id"],
+        "additionalProperties" => false
+      }
+    }
+  end
+
+  defp workflow_resume_tool do
+    %{
+      "name" => "workflow_resume",
+      "description" => "Resume an existing scheduler run through POST /api/runs/:id/resume.",
+      "inputSchema" => %{
+        "type" => "object",
+        "properties" => %{
+          "run_id" => %{
+            "type" => "string",
+            "description" => "Existing run id to resume."
+          },
+          "script_path" => %{
+            "type" => "string",
+            "description" =>
+              "Optional workflow .exs path to use instead of the journaled script path."
+          },
+          "script" => %{
+            "type" => "string",
+            "description" => "Optional scheduler-supported alias for script_path."
+          },
+          "provider" => %{
+            "type" => "string",
+            "enum" => ["mock"],
+            "description" =>
+              "Optional scheduler provider. The current scheduler API supports mock."
           }
         },
         "required" => ["run_id"],

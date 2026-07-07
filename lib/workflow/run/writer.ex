@@ -184,10 +184,10 @@ defmodule Workflow.Run.Writer do
       # Mid-flight resume: pick the retry loop back up at the first un-journaled
       # attempt rather than re-calling the provider for already-ledgered rejections.
       {:resume, next} ->
-        commit_attempt(node, run_id, provider, ctx, iteration, next)
+        commit_attempt(materialize_agent(node, run_id), run_id, provider, ctx, iteration, next)
 
       :none ->
-        commit_attempt(node, run_id, provider, ctx, iteration, 0)
+        commit_attempt(materialize_agent(node, run_id), run_id, provider, ctx, iteration, 0)
     end
   end
 
@@ -621,10 +621,17 @@ defmodule Workflow.Run.Writer do
 
   defp build_agent(%Agent{} = node, run_id, provider, prior, iteration) do
     case Idempotency.resolve(prior, node.address, iteration) do
-      {:committed, result, _usage} -> {:ok, [], result}
-      {:failed, reason} -> {:failed, [], {:malformed_output, node.address, reason}}
-      {:resume, next} -> build_attempt(node, run_id, provider, iteration, next, [])
-      :none -> build_attempt(node, run_id, provider, iteration, 0, [])
+      {:committed, result, _usage} ->
+        {:ok, [], result}
+
+      {:failed, reason} ->
+        {:failed, [], {:malformed_output, node.address, reason}}
+
+      {:resume, next} ->
+        build_attempt(materialize_agent(node, run_id), run_id, provider, iteration, next, [])
+
+      :none ->
+        build_attempt(materialize_agent(node, run_id), run_id, provider, iteration, 0, [])
     end
   end
 
@@ -670,6 +677,22 @@ defmodule Workflow.Run.Writer do
 
   defp call_provider({module, opts}, prompt, schema, key),
     do: module.run_agent(prompt, schema, key, opts)
+
+  defp materialize_agent(%Agent{} = node, run_id) do
+    %{node | prompt: materialize_prompt(node, run_id)}
+  end
+
+  defp materialize_prompt(%Agent{prompt: prompt}, _run_id) when is_binary(prompt), do: prompt
+
+  defp materialize_prompt(%Agent{prompt: %Template{} = template, bindings: bindings}, run_id) do
+    case RenderText.of(run_id, Template.to_parts(template, bindings)) do
+      {:ok, prompt} ->
+        prompt
+
+      {:error, reason} ->
+        raise ArgumentError, "unable to render agent template prompt: #{inspect(reason)}"
+    end
+  end
 
   # --- Journal idempotency for positional (non-paid) events ---
 

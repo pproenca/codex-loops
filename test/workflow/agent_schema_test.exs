@@ -24,6 +24,21 @@ defmodule Workflow.AgentSchemaTest do
     end
   end
 
+  defmodule InjectedClassify do
+    use Workflow
+
+    workflow "injected-classify" do
+      let(:draft = agent("draft"))
+
+      agent(~P"classify: <%= @draft %>",
+        schema: %{"type" => "object", "required" => ["label"]},
+        retries: 1
+      )
+
+      return(:ok)
+    end
+  end
+
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
 
   defp provider(outputs) do
@@ -278,5 +293,29 @@ defmodule Workflow.AgentSchemaTest do
 
     committed = Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
     assert [%{payload: %{result: %{"label" => "ok"}}}] = committed
+  end
+
+  test "a schema-backed injected agent journals a byte-identical rendered prompt across rejection and commit" do
+    id = run_id()
+    outputs = ["READY", %{"wrong" => 1}, %{"label" => "ok"}]
+
+    assert {:ok, ^id} = Run.run(InjectedClassify, run_id: id, provider: provider(outputs))
+
+    assert_received {:agent_called, "draft"}
+    assert_received {:agent_called, "classify: READY"}
+    assert_received {:agent_called, "classify: READY"}
+    refute_received {:agent_called, _}
+
+    events = Journal.fold(id)
+
+    rejected =
+      Enum.find(events, &(&1.type == :agent_attempt_rejected and &1.payload.address == [1]))
+
+    committed =
+      Enum.find(events, &(&1.type == :agent_committed and &1.payload.address == [1]))
+
+    assert rejected.payload.prompt == "classify: READY"
+    assert committed.payload.prompt == "classify: READY"
+    assert rejected.payload.prompt == committed.payload.prompt
   end
 end

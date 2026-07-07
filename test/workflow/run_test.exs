@@ -59,6 +59,19 @@ defmodule Workflow.RunTest do
              %IdempotencyKey{run_id: id, node_path: [2], iteration: 0}
   end
 
+  test "a legacy literal-prompt agent still sends and journals the exact binary prompt" do
+    id = run_id()
+
+    assert {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())
+
+    assert_received {:agent_called, "say hello"}
+    refute_received {:agent_called, _}
+
+    committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
+    assert committed.payload.prompt == "say hello"
+    assert is_binary(committed.payload.prompt)
+  end
+
   test "status reconstructs run state purely by folding the journal" do
     id = run_id()
     {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())

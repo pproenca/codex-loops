@@ -49,8 +49,10 @@ end
 
 defmodule Workflow.Node.Agent do
   @moduledoc """
-  An agent turn. The prompt is a static literal; execution is a paid effect keyed
-  for exactly-once by `(run_id, address, iteration)`.
+  An agent turn. The prompt is either a static literal or an inert `~P` template
+  over earlier journal bindings; execution materializes any template to a string
+  before the paid effect, still keyed for exactly-once by
+  `(run_id, address, iteration)`.
 
   `schema` is an inert, raw JSON-schema **map** (or `nil` for a schemaless turn),
   materialized at compile time from either a map literal or a `schema … do … end`
@@ -61,11 +63,12 @@ defmodule Workflow.Node.Agent do
   serializable — no closure is ever captured.
   """
   @enforce_keys [:address, :prompt]
-  defstruct [:address, :prompt, schema: nil, retries: 2]
+  defstruct [:address, :prompt, bindings: %{}, schema: nil, retries: 2]
 
   @type t :: %__MODULE__{
           address: Workflow.Node.address(),
-          prompt: String.t(),
+          prompt: String.t() | Workflow.Template.t(),
+          bindings: %{atom() => Workflow.Node.binding_ref()},
           schema: map() | nil,
           retries: non_neg_integer()
         }

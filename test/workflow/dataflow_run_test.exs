@@ -36,6 +36,16 @@ defmodule Workflow.DataflowRunTest do
     end
   end
 
+  defmodule InjectedAgent do
+    use Workflow
+
+    workflow "injected-agent" do
+      let(:draft = agent("Write a draft."))
+      agent(~P"Improve this draft: <%= @draft %>")
+      return(:ok)
+    end
+  end
+
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
 
@@ -88,5 +98,31 @@ defmodule Workflow.DataflowRunTest do
     assert String.starts_with?(rendered, "Final draft: %{")
     assert rendered =~ ~s|"echo" => "Write a draft."|
     assert Status.of(id).result == rendered
+  end
+
+  test "a top-level agent template prompt renders journal-bound values before provider call and commit" do
+    id = run_id()
+    {:ok, script} = ScriptedProvider.start(["READY", "done"])
+
+    assert {:ok, ^id} =
+             Run.run(InjectedAgent,
+               run_id: id,
+               provider: {ScriptedProvider, script: script, sink: self()}
+             )
+
+    assert_received {:agent_called, "Write a draft."}
+    assert_received {:agent_called, "Improve this draft: READY"}
+    refute_received {:agent_called, _}
+
+    committed =
+      Journal.fold(id)
+      |> Enum.filter(&(&1.type == :agent_committed))
+
+    assert [
+             %Event{payload: %{address: [0], prompt: "Write a draft.", result: "READY"}},
+             %Event{
+               payload: %{address: [1], prompt: "Improve this draft: READY", result: "done"}
+             }
+           ] = committed
   end
 end

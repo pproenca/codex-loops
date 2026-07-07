@@ -62,6 +62,28 @@ defmodule Workflow.DataflowCompilerTest do
                tree.nodes
     end
 
+    test "a top-level agent may use a ~P template prompt over an earlier binding" do
+      assert {:ok, tree} =
+               parse("""
+               let :draft = agent("Write a draft.")
+               agent(~P"Improve this draft: <%= @draft %>")
+               return(:ok)
+               """)
+
+      assert [
+               %Agent{address: [0], prompt: "Write a draft."},
+               %Agent{
+                 address: [1],
+                 prompt: %Template{
+                   segments: ["Improve this draft: ", ""],
+                   assigns: ["draft"]
+                 },
+                 bindings: %{draft: {:node, [0]}}
+               },
+               %Workflow.Node.Return{address: [2], value: :ok}
+             ] = tree.nodes
+    end
+
     test "a workflow without a terminal return or emit is a located finding" do
       env = %{__ENV__ | file: "workflows/dataflow.ex", line: 7}
 
@@ -178,6 +200,53 @@ defmodule Workflow.DataflowCompilerTest do
                parse(~s|let :done! = synthesize(["x"], "merge")\nreturn(:ok)|)
 
       assert f.message =~ "inadmissible binding name"
+    end
+
+    test "rejects template prompts in nested agent positions with caller-located findings" do
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :draft = agent("Write a draft.")
+               parallel([agent(~P"Improve: <%= @draft %>")])
+               return(:ok)
+               """)
+
+      assert f.message =~ "template prompts are only allowed on top-level agents"
+      assert f.message =~ "parallel"
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :draft = agent("Write a draft.")
+               pipeline(["x"], [agent(~P"Improve: <%= @draft %>")])
+               return(:ok)
+               """)
+
+      assert f.message =~ "template prompts are only allowed on top-level agents"
+      assert f.message =~ "pipeline"
+
+      assert {:error, %Finding{line: 3} = f} =
+               parse("""
+               let :draft = agent("Write a draft.")
+               fan_out width: budget_slices(per: 1) do
+                 agent(~P"Improve: <%= @draft %>")
+               end
+               return(:ok)
+               """)
+
+      assert f.message =~ "template prompts are only allowed on top-level agents"
+      assert f.message =~ "fan_out"
+
+      assert {:error, %Finding{line: 3} = f} =
+               parse("""
+               let :draft = agent("Write a draft.")
+               while_budget reserve: 0 do
+                 agent(~P"Improve: <%= @draft %>")
+                 collect into: :items
+               end
+               return(:ok)
+               """)
+
+      assert f.message =~ "template prompts are only allowed on top-level agents"
+      assert f.message =~ "loop body"
     end
   end
 

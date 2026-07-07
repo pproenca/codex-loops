@@ -123,6 +123,21 @@ defmodule Workflow.LoopCompilerTest do
 
       assert f.message =~ "collect"
     end
+
+    test "template prompts are rejected in until_dry loop bodies with the top-level-only finding" do
+      assert {:error, %Finding{} = f} =
+               parse("""
+               let :draft = agent("Write a draft.")
+               until_dry rounds: 1, seen_by: [:id] do
+                 agent(~P"Improve: <%= @draft %>")
+                 collect into: :items
+               end
+               return(:ok)
+               """)
+
+      assert f.message =~ "template prompts are only allowed on top-level agents"
+      assert f.message =~ "loop body"
+    end
   end
 
   describe "collect placement and shape" do

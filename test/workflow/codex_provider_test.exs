@@ -169,7 +169,13 @@ defmodule Workflow.CodexProviderTest do
     # No live turn is spent: this pins the untested production wiring. The default
     # command resolves to the real `codex` binary's one-shot JSONL entrypoint — the
     # protocol the stub above faithfully mimics.
-    assert {path, ["exec", "--json", "--skip-git-repo-check"]} =
+    assert {path,
+            [
+              "exec",
+              "--json",
+              "--dangerously-bypass-approvals-and-sandbox",
+              "--skip-git-repo-check"
+            ]} =
              Workflow.Provider.Codex.default_command()
 
     assert Path.basename(path) == "codex"

@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "codex-loops": {
+      "command": "./mcp/codex-loops-mcp",
+      "args": ["--stdio"],
+      "cwd": ".",
+      "tool_timeout_sec": 120
+    }
+  }
+}

@@ -1,7 +1,8 @@
-.PHONY: setup test build release proof proof-live clean-release
+.PHONY: setup test build release proof proof-live proof-mcp clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
+PLUGIN_SCHEDULER_DIR = plugins/codex-loops/scheduler
 
 setup:
 	mix local.hex --if-missing --force
@@ -19,6 +20,10 @@ release:
 	MIX_ENV=prod mix deps.get --only prod
 	MIX_ENV=prod mix release $(RELEASE_NAME) --overwrite
 	test -x "$(RELEASE_CTL)"
+	mkdir -p "$(PLUGIN_SCHEDULER_DIR)"
+	rm -rf "$(PLUGIN_SCHEDULER_DIR)/bin" "$(PLUGIN_SCHEDULER_DIR)"/erts-* "$(PLUGIN_SCHEDULER_DIR)/lib" "$(PLUGIN_SCHEDULER_DIR)/releases"
+	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(PLUGIN_SCHEDULER_DIR)/"
+	test -x "$(PLUGIN_SCHEDULER_DIR)/bin/$(RELEASE_NAME)"
 
 proof: release
 	scripts/proof-release.sh
@@ -26,5 +31,9 @@ proof: release
 proof-live: release
 	scripts/proof-release-live.sh
 
+proof-mcp: release
+	MIX_ENV=dev mix run --no-start scripts/proof-mcp-validate.exs
+
 clean-release:
 	rm -rf _build/prod/rel/$(RELEASE_NAME)
+	rm -rf "$(PLUGIN_SCHEDULER_DIR)/bin" "$(PLUGIN_SCHEDULER_DIR)"/erts-* "$(PLUGIN_SCHEDULER_DIR)/lib" "$(PLUGIN_SCHEDULER_DIR)/releases"

@@ -50,6 +50,8 @@ make proof
 make proof-live
 ```
 
-`make proof` builds the release and runs packaged `validate`, `test`, `status`,
-and `inspect` against a temporary workflow and SQLite journal. `make proof-live`
-does the same but runs one live Codex-backed turn and asserts nonzero usage.
+`make proof` builds the release, starts the packaged Phoenix scheduler, and
+proves the API/UI path against an isolated temporary workflow and SQLite journal:
+health, validate, start mock run, read status/events, and fetch the run UI.
+`make proof-live` keeps the compatible CLI wrapper path covered by running one
+live Codex-backed turn and asserting nonzero usage.

@@ -1,7 +1,7 @@
 .PHONY: setup test build release proof proof-live clean-release
 
 RELEASE_NAME ?= agent_loops
-RELEASE_BIN = _build/prod/rel/$(RELEASE_NAME)/bin/agent-loops
+RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
 
 setup:
 	mix local.hex --if-missing --force
@@ -18,7 +18,7 @@ build:
 release:
 	MIX_ENV=prod mix deps.get --only prod
 	MIX_ENV=prod mix release $(RELEASE_NAME) --overwrite
-	test -x "$(RELEASE_BIN)"
+	test -x "$(RELEASE_CTL)"
 
 proof: release
 	scripts/proof-release.sh

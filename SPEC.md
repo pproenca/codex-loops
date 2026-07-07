@@ -1540,7 +1540,7 @@ ResolveIdempotency(events, node_path, iteration):
 ```
 CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Let {key} be IdempotencyKey(run_id, node.address, iteration, attempt).
-  - Let {output, usage, activity} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
+  - Let {:ok, output, usage, activity} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
   - If {node.schema} is nil:                                 ; schemaless
     - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, output, usage, activity), ctx).
     - Return {:cont, ctx with last_result = output}.
@@ -1580,7 +1580,7 @@ NormalizeProviderResult(r):
     - Return {:ok, result, usage, []}.
   - If {r} is {:ok, result, usage, activity}:
     - Return {:ok, result, usage, activity}.
-  - Return {r}.        ; the caller hard-matches success and treats this as a provider crash
+  - Return {r}.        ; the caller hard-matches {:ok, result, usage, activity}; otherwise provider crash
 ```
 
 - **Inputs.** `prompt :: String.t()` (this node's literal prompt — never a splice of any
@@ -1590,8 +1590,8 @@ NormalizeProviderResult(r):
   `{:ok, result, usage}` or activity-bearing `{:ok, result, usage, activity}`. `result` is
   the decoded provider output (`term()`; for a schema-bound turn a decoded JSON value — a
   map, list, or scalar), `usage` is a `%Usage{input_tokens, output_tokens, total_tokens}`
-  of non-negative integers, and `activity` is an ordered list of provider activity entries
-  (§7.3.1). The runner MUST normalize the legacy 3-tuple to
+  of non-negative integers, and `activity` is an ordered list of provider activity-entry
+  maps (§7.3.1). The runner MUST normalize the legacy 3-tuple to
   `{:ok, result, usage, []}` and MUST pass a 4-tuple's `activity` through to the
   `agent_committed` or `agent_attempt_rejected` journal event for the same paid attempt.
   The runner **hard-matches** the normalized `{:ok, output, usage, activity}`: `CallProvider`
@@ -1601,6 +1601,23 @@ NormalizeProviderResult(r):
   §7.4) — mapped to exit 1 (or exit 130 when `reason` is `:killed`) per §7.5.
   Fail-closed retry (§6.4) applies **only** to a successful call whose `output` fails
   `Schema.Validate`; a provider-level failure is a crash, not a retry.
+- **Activity normalization boundary.** Provider activity is normalized at the provider
+  boundary, then preserved until the inspector projection. A provider that consumes a
+  backend-specific event stream MUST translate that stream to provider activity-entry maps
+  before returning; the Codex provider, specifically, MUST fold raw `codex exec` JSONL
+  events into activity entries and MUST NOT return raw JSONL lines or maps as `activity`.
+  Generic richer providers that use the 4-tuple form MUST return an ordered List whose
+  members are maps shaped like activity entries: public keys `kind`, `label`, `summary`,
+  and `status` MAY be atom or string keys, values are display values coerced by the
+  inspector's `Text`/`OptionalText` rules (§7.3.1), and omitted display fields are defaulted
+  only by `NormalizeActivityEntry` (§7.3.1). Providers MUST NOT use `activity` to return
+  raw Codex JSONL, provider-private envelopes, or backend transcripts; they MUST either
+  summarize such data into the public fields or omit it. The writer MUST journal the
+  activity list it receives for the same paid attempt without normalizing it. The Status
+  fold MUST preserve that journaled list, defaulting absent legacy event keys to `[]`, and
+  MUST NOT coerce keys or display fields. The run inspector projection is the only read
+  surface that normalizes activity key shape and default display fields, and it exposes
+  only the normalized entry fields.
 - **Turn independence.** Because `CallProvider` receives only `(prompt, schema, key,
   opts)`, no conversation state, thread, or prior result is carried between turns. Every
   agent turn is independent; all context an agent needs MUST be present in its own literal
@@ -2405,13 +2422,15 @@ Payload-value pins (each is observable output, so it is normative):
   §7.3 `agents` projection both carry this map as-is. Because it is observable output, two
   conforming implementations journal byte-identical `idempotency_key` maps for the same
   effect.
-- **`agent_committed.activity` and `agent_attempt_rejected.activity`** are ordered provider
-  activity lists for that exact paid attempt (§6.4.1, §7.3.1). They are **normalized
-  activity**, not raw Codex JSONL, not provider-specific event blobs, and not a live stream of
-  in-progress tool calls. A writer that receives legacy provider success
+- **`agent_committed.activity` and `agent_attempt_rejected.activity`** are ordered
+  provider-normalized activity-entry lists for that exact paid attempt (§6.4.1, §7.3.1).
+  They are **activity protocol data**, not raw Codex JSONL, not provider-specific event
+  blobs, and not a live stream of in-progress tool calls. A writer that receives legacy
+  provider success
   `{:ok, result, usage}` MUST journal `activity: []` for the attempt. A fold over an older
   schema-1 journal event that lacks the `activity` key MUST behave as if the key were present
-  with `[]`.
+  with `[]`. The writer records the provider activity list on the event field; it does not
+  coerce keys, fill display defaults, or wrap the list in a provider-private envelope.
 
 `run_completed` is the terminal success event; on failure the terminal event is
 `agent_failed` and **no** `run_completed` is written. Control-flow outcomes
@@ -2449,8 +2468,10 @@ them):
   `name = payload.name`, `address = payload.address`, and `agents = []`; it also sets
   `current_phase_id` to that `id` and `phase` to `name`. If an `agent_committed` or
   `agent_attempt_rejected` is folded before any `phase_entered`, the fold first creates one
-  implicit group `%{id: "phase-default", name: "Default phase", address: nil, agents: []}`.
-  This implicit group is journal-derived read-model state; it is not a journal event.
+  implicit group `%{id: "phase-default", name: "Default phase", address: nil, agents: []}`
+  and sets `current_phase_id` to `"phase-default"`. This implicit group is journal-derived
+  read-model state; it is not a journal event and it does not change the envelope `phase`
+  field, which remains `nil` until a `phase_entered` event is folded.
 - **`logs`** is an ordered list of **bare `message` strings** — exactly the `log_emitted`
   payload's `message` binary (§7.2), **not** a map. On each `log_emitted` the fold appends
   `payload.message`. (Because a body `log` commits at most once per address, §6.3, a loop
@@ -2465,8 +2486,10 @@ them):
   *(Proposed §10 — dataflow: a proposed extension pins the projected `prompt` — and the `agent_committed.prompt` / `agent_attempt_rejected.prompt` payload keys (§7.2) — to the rendered `String.t()`, never an inert `%Template{}`; see §10.)*
 - **`rejected`** is an ordered list appending, on each `agent_attempt_rejected`, the map
   `%{address, iteration, attempt, prompt, output, reason, activity, phase_id, phase_name}`.
-  Rejected attempts are never dropped just because a later retry succeeds; they remain visible
-  to inspector projections and still contribute to `usage`.
+  `activity` is `payload.activity` when present and `[]` when absent; as for committed
+  agents, the Status fold preserves it and does not normalize it. Rejected attempts are
+  never dropped just because a later retry succeeds; they remain visible to inspector
+  projections and still contribute to `usage`.
 - **`verifications`** / **`judgments`** append, on each `verify_settled` / `judge_settled`,
   the map `%{address, confirmations, total, threshold, survived}` /
   `%{address, scores, pick, winner}` respectively.
@@ -2511,7 +2534,10 @@ The run inspector is a derived, normalized read model for human and UI inspectio
 turns. It is **not** a writer-side state object. A conforming implementation MUST construct
 it from `Workflow.Status.of(run_id)` (or an observably equivalent fold of the same committed
 journal events) and MUST NOT consult a live writer process, provider process, raw Codex JSONL
-stream, or uncommitted in-memory activity.
+stream, or uncommitted in-memory activity. This projection is the activity normalization
+boundary for read surfaces: it accepts the provider activity lists preserved by the Status
+fold, normalizes key shape and missing display fields with `NormalizeActivity`, and exposes
+only the normalized activity-entry fields defined below.
 
 ```
 RunInspector(status):
@@ -2608,19 +2634,32 @@ FailedRejectedAttempts(failure, agents, rejected_attempts):
     rejection.iteration == iteration, preserving their original order.
 ```
 
+The `failure` argument above is the folded `status.failure` from §7.3: the **last**
+`agent_failed` in journal `seq` order. `FailedRejectedAttempts` is intentionally scoped to
+that folded terminal failure identity. It MUST NOT scan the journal for every failed
+rejected-only identity and MUST NOT derive additional identities from earlier `agent_failed`
+events in a concurrent multi-failure run.
+
 Rejected attempts therefore remain observable in two cases:
 
 - If a later retry succeeds, the rejected attempts for the same `(address, iteration)` remain
   in `rejected_attempts` and are selected with that committed agent turn.
-- If all attempts for `(address, iteration)` are rejected and the run fails before any
-  `agent_committed` exists for that identity, those rejected attempts MUST appear in
-  `failed_rejected_attempts` so a failed rejected-only iteration is still inspectable.
+- If all attempts for the folded terminal `(address, iteration)` are rejected and the run
+  fails before any `agent_committed` exists for that identity, those rejected attempts MUST
+  appear in `failed_rejected_attempts` so the terminal failed rejected-only iteration is
+  still inspectable. Earlier failed identities in a multi-failure run remain visible in
+  `rejected_attempts` but are not duplicated into `failed_rejected_attempts` unless they are
+  also the folded terminal failure identity.
 
 ```
 NormalizeActivity(activity):
   - If {activity} is not a List: Return [].
   - Return Map(activity, NormalizeActivityEntry).
 ```
+
+A normalized activity entry is exactly the map shape returned by `NormalizeActivityEntry`:
+`%{kind, label, status, summary}`. No raw provider event, raw journal payload map, or
+provider-private field is part of the inspector activity projection.
 
 ```
 NormalizeActivityEntry(entry):
@@ -2646,6 +2685,13 @@ Text(value):
   - If {value} is an atom: Return Atom.to_string(value).
   - Return inspect(value).        ; host-scoped as in §4.4 and §7.5
 ```
+
+`NormalizeActivity` is a read-projection normalization only. A conforming provider MUST
+already have converted backend-specific events to activity-entry-shaped maps before the
+writer journals them (§6.4.1). If non-conforming or legacy activity data reaches the
+inspector, the inspector MUST still project only the four public fields above; it MUST NOT
+pass through raw Codex JSONL maps, backend transcripts, provider-private envelopes, or extra
+activity keys.
 
 An activity entry's `kind` is a stable category such as `"reasoning"`, `"tool"`, or
 provider-defined `"event"`; `label` is the user-facing name; `summary` is a concise
@@ -2797,12 +2843,15 @@ uppercase**. All content is normative except clearly marked examples, counter-ex
 and notes, which are non-normative.
 
 **Observably-equivalent clause.** The algorithms in this document describe required
-*observable* behavior — the sequence of committed journal events, the run result, and the
-exit code. A conforming implementation MAY use any internal strategy (any concurrency
-schedule, any storage engine, any host language) provided the observable result is
-identical to what these algorithms produce. In particular, because every concurrent region
-commits in input order (§6.11), a conforming implementation MAY execute lanes sequentially
-or in parallel — the journal MUST be the same either way.
+*observable* behavior — the sequence of committed journal events, the §7.3 Status fold, the
+§7.3.1 run inspector projection, the §7.5 run-projection envelope and error/exit-code
+mapping, the §7.6 run API result tuples, and any other read projection whose output shape
+this spec defines. A conforming implementation MAY use any internal strategy (any
+concurrency schedule, any storage engine, any host language) provided the observable result
+is identical to what these algorithms produce. In particular, because every concurrent
+region commits in input order (§6.11), a conforming implementation MAY execute lanes
+sequentially or in parallel — the journal, Status fold, and derived read projections MUST be
+the same either way.
 
 Normative requirements a conforming implementation MUST satisfy:
 
@@ -2825,6 +2874,12 @@ Normative requirements a conforming implementation MUST satisfy:
     while resume/status return the **last** (last-wins Status fold). A conforming
     implementation MUST reproduce **both** projections exactly; this is the single,
     pinned exception to "resume replays journaled decisions" (§6.1, §7.3).
+  - **C4c (defined read projections).** Where this spec defines a read output shape — the
+    Status fold (§7.3), run inspector projection (§7.3.1), run-projection envelope (§7.5),
+    compact scheduler event projection (§7.3.1), or public run API tuples (§7.6) — that
+    shape is normative observable output. A conforming implementation MUST NOT expose raw
+    Codex JSONL, provider-private activity envelopes, or raw journal payload maps through
+    the inspector projection.
 - **C5 (exactly-once).** A paid effect MUST be identified by `(run_id, node_path,
   iteration)` and refined by `attempt`; a backend MUST use the idempotency key so an
   effect is paid at most once and its result is never dropped.

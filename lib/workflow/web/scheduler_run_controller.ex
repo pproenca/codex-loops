@@ -4,7 +4,7 @@ defmodule Workflow.Web.SchedulerRunController do
   use Phoenix.Controller, formats: [:json]
 
   alias Workflow.Scheduler
-  alias Workflow.Scheduler.{RunProjection, RunStart}
+  alias Workflow.Scheduler.{RunEventsProjection, RunProjection, RunStart}
   alias Workflow.Web.SchedulerAPI
 
   def create(conn, params) do
@@ -17,6 +17,13 @@ defmodule Workflow.Web.SchedulerRunController do
   def show(conn, %{"id" => id}) do
     case Scheduler.get_run(id) do
       {:ok, projection} -> SchedulerAPI.ok(conn, RunProjection.to_map(projection))
+      {:error, error} -> SchedulerAPI.error(conn, error)
+    end
+  end
+
+  def events(conn, %{"id" => id}) do
+    case Scheduler.get_run_events(id) do
+      {:ok, projection} -> SchedulerAPI.ok(conn, RunEventsProjection.to_map(projection))
       {:error, error} -> SchedulerAPI.error(conn, error)
     end
   end

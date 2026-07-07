@@ -309,6 +309,39 @@ defmodule Workflow.Web.SchedulerAPITest do
       wait_for_api_projection(id, attempts - 1)
   end
 
+  defp wait_for_api_events(id, attempts \\ 50)
+
+  defp wait_for_api_events(id, 0),
+    do: flunk("expected GET /api/runs/#{id}/events to return completed run events")
+
+  defp wait_for_api_events(id, attempts) do
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+
+    case json_response(conn, 200) do
+      %{
+        "data" => %{
+          "run_id" => ^id,
+          "events" => [
+            _run_started,
+            _phase_entered,
+            _log_emitted,
+            _agent_committed,
+            %{"type" => "run_completed"}
+          ]
+        }
+      } = response ->
+        response
+
+      _other ->
+        Process.sleep(10)
+        wait_for_api_events(id, attempts - 1)
+    end
+  rescue
+    ExUnit.AssertionError ->
+      Process.sleep(10)
+      wait_for_api_events(id, attempts - 1)
+  end
+
   test "GET /api/health returns a versioned ready response" do
     conn = get(json_conn(), "/api/health")
 
@@ -378,6 +411,85 @@ defmodule Workflow.Web.SchedulerAPITest do
              "ui_path" => "/runs/" <> ^id,
              "ui_url" => "/runs/" <> ^id
            } = wait_for_api_projection(id)
+  end
+
+  test "GET /api/runs/:id/events returns ordered event projections for a known run" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_events")
+
+    assert {:ok, _start} =
+             Workflow.Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock"
+             })
+
+    wait_for_api_projection(id)
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "data" => %{
+               "run_id" => ^id,
+               "events" => events
+             }
+           } = wait_for_api_events(id)
+
+    assert Enum.map(events, & &1["seq"]) == [0, 1, 2, 3, 4]
+
+    assert Enum.map(events, & &1["type"]) == [
+             "run_started",
+             "phase_entered",
+             "log_emitted",
+             "agent_committed",
+             "run_completed"
+           ]
+
+    assert [
+             %{"seq" => 0, "type" => "run_started"},
+             %{"seq" => 1, "type" => "phase_entered", "address" => [0]},
+             %{"seq" => 2, "type" => "log_emitted", "address" => [1]},
+             %{"seq" => 3, "type" => "agent_committed", "address" => [2]},
+             %{"seq" => 4, "type" => "run_completed"}
+           ] = events
+  end
+
+  test "GET /api/runs/:id/events returns a typed not-found error for unknown runs" do
+    id = run_id("scheduler_api_events_missing")
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "error" => %{
+               "code" => "scheduler.run.not_found",
+               "message" => "Workflow run not found.",
+               "details" => %{"run_id" => ^id}
+             }
+           } = json_response(conn, 404)
+  end
+
+  test "a run started through POST /api/runs can be inspected through event polling" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_post_events")
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+
+    assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
+
+    assert %{
+             "data" => %{
+               "run_id" => ^id,
+               "events" => [
+                 %{"type" => "run_started"},
+                 %{"type" => "phase_entered"},
+                 %{"type" => "log_emitted"},
+                 %{"type" => "agent_committed"},
+                 %{"type" => "run_completed"}
+               ]
+             }
+           } = wait_for_api_events(id)
   end
 
   test "POST /api/runs rejects run ids that would break returned UI/API links" do

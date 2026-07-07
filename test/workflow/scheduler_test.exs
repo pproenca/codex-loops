@@ -366,6 +366,41 @@ defmodule Workflow.SchedulerTest do
     assert projection.ui_url == "/runs/#{id}"
   end
 
+  test "get_run_events returns ordered scheduler-owned event projections" do
+    path = demo_workflow()
+    id = run_id("scheduler_events")
+
+    assert {:ok, start} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock"
+             })
+
+    assert start.run_id == id
+    wait_for_projection(id)
+
+    assert {:ok, %{run_id: ^id, events: events}} = Scheduler.get_run_events(id)
+
+    assert Enum.map(events, & &1.seq) == [0, 1, 2, 3, 4]
+
+    assert Enum.map(events, & &1.type) == [
+             "run_started",
+             "phase_entered",
+             "log_emitted",
+             "agent_committed",
+             "run_completed"
+           ]
+
+    assert [
+             %{seq: 0, type: "run_started"},
+             %{seq: 1, type: "phase_entered", address: [0]},
+             %{seq: 2, type: "log_emitted", address: [1]},
+             %{seq: 3, type: "agent_committed", address: [2]},
+             %{seq: 4, type: "run_completed"}
+           ] = events
+  end
+
   test "starts a mock-provider run with a generated run id" do
     path = demo_workflow()
 

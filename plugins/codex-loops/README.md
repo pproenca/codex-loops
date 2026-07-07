@@ -69,24 +69,6 @@ call `Workflow.Scheduler`, or reach into journal/runtime internals directly.
 Scheduler success envelopes are returned as MCP `structuredContent`; scheduler
 typed errors remain typed and are returned with `isError: true`.
 
-## Legacy CLI Surface
-
-```bash
-agent-loops validate <script> [--json]
-agent-loops test <script> [--run-id <id>] [--budget <n>] [--json]
-agent-loops run <script> [--run-id <id>] [--provider mock|codex] [--budget <n>] [--json]
-agent-loops workflow <script> [--run-id <id>] [--provider mock|codex] [--budget <n>] [--json]
-agent-loops resume [<script>] [--run-id <id>] [--provider mock|codex] [--json]
-agent-loops status [--run-id <id>] [--event-limit <n>] [--json]
-agent-loops inspect [--run-id <id>] [--json]
-agent-loops list [--limit <n>] [--json]
-agent-loops help
-```
-
-`workflow` aliases `run`; `test` is always offline and mock-backed. This direct
-terminal wrapper remains for compatibility and release proofing while Codex uses
-the MCP adapter as the product control surface.
-
 ## Workflow Scripts
 
 Executable workflows are Elixir `.exs` files:
@@ -138,8 +120,7 @@ packaged scheduler release. `make proof-mcp-live` validates through MCP, starts
 or reuses the packaged scheduler through MCP lifecycle handling, starts a live
 `provider: "codex"` run through `workflow_start`, polls `workflow_status`, and
 asserts nonzero token usage in the scheduler projection. It spends one real
-Codex provider turn. `make proof-live` is an alias for `make proof-mcp-live`;
-`make proof-release-live` keeps the legacy direct packaged-release live proof.
+Codex provider turn. `make proof-live` is an alias for `make proof-mcp-live`.
 
 ## License
 

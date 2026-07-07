@@ -6,17 +6,14 @@ packaged Elixir/Phoenix scheduler. MCP manages local lifecycle and tool calls;
 Elixir owns runtime supervision, workflow workers, Phoenix PubSub/LiveView, and
 the SQLite journal.
 
-The distributable scheduler artifact is the `agent_loops` Mix release. Its
-`agent-loops` command remains as a compatibility/developer wrapper, not the
-primary integration surface.
+The distributable scheduler artifact is the `agent_loops` Mix release. The old
+`agent-loops` CLI surface has been removed; Codex and agents use MCP tools.
 
 ## Canonical Subdocs
 
-- `docs/cli.md`: compatibility command surface, JSON output, exit codes, release proofs.
 - `docs/runtime.md`: architecture, journal model, packaging, providers.
 - `docs/workflow-authoring.md`: `.exs` workflow authoring and testing gate.
 - `docs/operations.md`: setup, build, release, proof, live proof.
-- `docs/schemas.md`: legacy schema artifact notes, not product command surface.
 
 ## Quick Start
 

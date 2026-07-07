@@ -1,5 +1,0 @@
-packages:
-  - apps/runtime
-  - apps/status-ui
-allowBuilds:
-  esbuild: true

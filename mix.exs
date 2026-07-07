@@ -9,7 +9,6 @@ defmodule CodexLoops.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       elixirc_options: [warnings_as_errors: true],
       start_permanent: Mix.env() == :prod,
-      escript: [main_module: Workflow.CLI, name: "agent-loops"],
       releases: releases(),
       deps: deps()
     ]
@@ -28,8 +27,7 @@ defmodule CodexLoops.MixProject do
   defp releases do
     [
       agent_loops: [
-        include_executables_for: [:unix],
-        overlays: ["rel/overlays"]
+        include_executables_for: [:unix]
       ]
     ]
   end

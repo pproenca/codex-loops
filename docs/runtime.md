@@ -32,10 +32,8 @@ test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
 The release includes the generated `bin/agent_loops` script used by the MCP
-adapter. It also includes a small `bin/agent-loops` wrapper over the generated
-script for developer diagnostics and legacy scripts. The wrapper forwards the
-original argv through `Workflow.ReleaseCLI` and calls `Workflow.CLI.exec/1`; it
-is not the product integration surface.
+adapter and by release lifecycle commands. It does not include the old
+hyphenated compatibility CLI.
 
 Run the scheduler server from the release by enabling the endpoint at runtime:
 
@@ -87,8 +85,8 @@ The application supervises:
 - `Workflow.PubSub`: post-commit notifications.
 - `Workflow.Journal`: SQLite owner process.
 - `Workflow.Run.Supervisor`: dynamic supervisor for run writers.
-- `Workflow.Web.Endpoint`: optional endpoint, disabled by default in release CLI
-  mode unless `CODEX_LOOPS_SERVER=1` or `true`.
+- `Workflow.Web.Endpoint`: optional endpoint, disabled by default unless
+  `CODEX_LOOPS_SERVER=1` or `true`.
 
 ## Scope
 
@@ -97,4 +95,4 @@ Codex runs, SQLite-backed scheduler projections, scheduler API/UI reads, and
 release packaging.
 
 Not currently shipped: draft scaffolding, hosted workflow services, and
-per-agent skip controls. The compatible Elixir CLI remains developer-only.
+per-agent skip controls.

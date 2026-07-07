@@ -27,25 +27,6 @@ MCP tools:
 - `workflow_resume`
 - `workflow_open_ui`
 
-Legacy CLI commands:
-
-```bash
-agent-loops validate <script> [--json]
-agent-loops test <script> [--run-id <id>] [--budget <n>] [--json]
-agent-loops run <script> [--run-id <id>] [--provider mock|codex] [--budget <n>] [--json]
-agent-loops workflow <script> [--run-id <id>] [--provider mock|codex] [--budget <n>] [--json]
-agent-loops resume [<script>] [--run-id <id>] [--provider mock|codex] [--json]
-agent-loops status [--run-id <id>] [--event-limit <n>] [--json]
-agent-loops inspect [--run-id <id>] [--json]
-agent-loops list [--limit <n>] [--json]
-agent-loops help
-```
-
-`workflow` aliases `run`. `test` is always mock-backed. `run`, `workflow`, and
-`resume` default to the live `codex` provider unless `--provider mock` is
-supplied. The plugin product surface is MCP; this direct terminal wrapper
-remains only as a compatibility and release-proofing path during the rewrite.
-
 MCP behavior:
 
 - stdio JSON-RPC transport with newline-delimited messages
@@ -148,8 +129,7 @@ Expected authoring loop:
 Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`, unless
 `CODEX_LOOPS_JOURNAL_PATH` is set. Scheduler status, inspect, and resume
 projections are folds over the journal. Completed nodes replay from the journal
-on resume. The compatible CLI-only `list` command is also a journal fold, but it
-is not exposed as an MCP product tool.
+on resume.
 
 The live provider shells out to `codex exec --json --skip-git-repo-check`.
 Schema-backed agents pass `--output-schema`; the writer validates outputs and
@@ -165,8 +145,7 @@ test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
 The MCP adapter launches the generated `agent_loops` release script when it
-owns scheduler lifecycle. The compatible `agent-loops` wrapper remains only for
-terminal diagnostics, legacy scripts, and release-wrapper proofing.
+owns scheduler lifecycle.
 
 Development and proof commands:
 
@@ -177,7 +156,6 @@ make proof
 make proof-mcp
 make proof-mcp-live
 make proof-live
-make proof-release-live
 ```
 
 `make proof-mcp` copies the plugin package to a temp install location and proves
@@ -188,8 +166,7 @@ starts or reuses the packaged scheduler through MCP lifecycle handling, starts a
 live `provider: "codex"` run through `workflow_start`, observes completion
 through `workflow_status`, and asserts nonzero token usage from the scheduler
 projection. It spends one real Codex provider turn. `make proof-live` aliases
-the MCP live proof; `make proof-release-live` keeps the legacy direct
-packaged-release live proof.
+the MCP live proof.
 
 ## Safety And Testing
 
@@ -206,6 +183,4 @@ Generated workflows that can mutate files should return closed plans or declare
 live write scope, exact file paths, and verification commands before the caller
 authorizes live execution.
 
-When an MCP tool fails, preserve its typed scheduler error envelope. When a
-legacy `--json` terminal invocation fails, parse the last stderr line as the
-JSON error object instead of scraping prose diagnostics.
+When an MCP tool fails, preserve its typed scheduler error envelope.

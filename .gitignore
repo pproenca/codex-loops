@@ -22,5 +22,6 @@ tmp/
 _build/
 deps/
 *.beam
+!plugins/codex-loops/scheduler/**/*.beam
 erl_crash.dump
 .elixir_ls/

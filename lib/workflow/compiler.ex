@@ -31,12 +31,13 @@ defmodule Workflow.Compiler do
   failure.
   """
 
-  alias Workflow.{Tree, Predicate, RenderText}
+  alias Workflow.{Tree, Predicate, RenderText, Template}
 
   alias Workflow.Node.{
     Phase,
     Log,
     Agent,
+    Emit,
     Return,
     Parallel,
     Pipeline,
@@ -61,6 +62,7 @@ defmodule Workflow.Compiler do
     :parallel,
     :pipeline,
     :return,
+    :emit,
     :collect,
     :while_budget,
     :until_dry,
@@ -119,24 +121,100 @@ defmodule Workflow.Compiler do
   defp build([], _index, acc, _seen, _env, _binding_env), do: {:ok, Enum.reverse(acc)}
 
   defp build([stmt | rest], index, acc, seen, env, binding_env) do
-    case node(stmt, [index], env, binding_env) do
-      {:ok, %Phase{name: name} = phase} ->
-        if MapSet.member?(seen, name) do
-          {:error,
-           Finding.at(env, stmt, "duplicate phase name #{inspect(name)}",
-             hint: "phase names must be unique within a workflow"
-           )}
-        else
-          build(rest, index + 1, [phase | acc], MapSet.put(seen, name), env, binding_env)
-        end
+    case let_node(stmt, [index], env, binding_env) do
+      {:ok, node, next_binding_env} ->
+        finish_build(node, stmt, rest, index, acc, seen, env, next_binding_env)
 
-      {:ok, node} ->
-        build(rest, index + 1, [node | acc], seen, env, binding_env)
+      :no_match ->
+        case node(stmt, [index], env, binding_env) do
+          {:ok, node} ->
+            finish_build(node, stmt, rest, index, acc, seen, env, binding_env)
+
+          {:error, finding} ->
+            {:error, finding}
+        end
 
       {:error, finding} ->
         {:error, finding}
     end
   end
+
+  defp finish_build(%Phase{name: name} = phase, stmt, rest, index, acc, seen, env, binding_env) do
+    if MapSet.member?(seen, name) do
+      {:error,
+       Finding.at(env, stmt, "duplicate phase name #{inspect(name)}",
+         hint: "phase names must be unique within a workflow"
+       )}
+    else
+      build(rest, index + 1, [phase | acc], MapSet.put(seen, name), env, binding_env)
+    end
+  end
+
+  defp finish_build(%node{} = built, stmt, rest, index, acc, seen, env, binding_env)
+       when node in [Return, Emit] do
+    if rest == [] do
+      build(rest, index + 1, [built | acc], seen, env, binding_env)
+    else
+      {:error,
+       Finding.at(env, stmt, "`#{terminal_name(built)}` must be the final top-level node",
+         hint: "a workflow terminates with `return` or `emit`"
+       )}
+    end
+  end
+
+  defp finish_build(node, _stmt, rest, index, acc, seen, env, binding_env) do
+    build(rest, index + 1, [node | acc], seen, env, binding_env)
+  end
+
+  defp let_node(
+         {:let, _meta, [{:=, _eq_meta, [name, producer]}]} = form,
+         address,
+         env,
+         binding_env
+       ) do
+    with :ok <- binding_name(name, form, env),
+         {:ok, node} <- node(producer, address, env, binding_env),
+         :ok <- bindable_producer(node, form, env) do
+      {:ok, node, Map.put(binding_env, name, {:node, address})}
+    end
+  end
+
+  defp let_node({:let, _meta, _args} = form, _address, env, _binding_env) do
+    {:error,
+     Finding.at(
+       env,
+       form,
+       "`let` requires `let :name = agent(...)` or `let :name = synthesize(...)`"
+     )}
+  end
+
+  defp let_node(_stmt, _address, _env, _binding_env), do: :no_match
+
+  defp binding_name(name, form, env) when is_atom(name) do
+    if String.match?(Atom.to_string(name), ~r/^[a-z_][a-zA-Z0-9_]*$/) do
+      :ok
+    else
+      {:error,
+       Finding.at(env, form, "inadmissible binding name #{inspect(name)}",
+         hint: "binding names must look like `:draft` or `:summary`"
+       )}
+    end
+  end
+
+  defp binding_name(_name, form, env) do
+    {:error, Finding.at(env, form, "`let` binding name must be an atom literal")}
+  end
+
+  defp bindable_producer(%Agent{}, _form, _env), do: :ok
+  defp bindable_producer(%Synthesize{}, _form, _env), do: :ok
+
+  defp bindable_producer(_other, form, env) do
+    {:error,
+     Finding.at(env, form, "`let` only binds `agent(...)` or `synthesize(...)` producers")}
+  end
+
+  defp terminal_name(%Return{}), do: "return"
+  defp terminal_name(%Emit{}), do: "emit"
 
   # --- The closed combinator vocabulary ---
 
@@ -146,20 +224,31 @@ defmodule Workflow.Compiler do
   defp node({:log, _meta, [message]}, address, _env, _binding_env) when is_binary(message),
     do: {:ok, %Log{address: address, message: message}}
 
-  defp node({:agent, _meta, [prompt]}, address, _env, _binding_env) when is_binary(prompt),
-    do: {:ok, %Agent{address: address, prompt: prompt, schema: nil, retries: @default_retries}}
+  defp node({:agent, _meta, [prompt]} = form, address, env, _binding_env)
+       when is_binary(prompt) do
+    with {:ok, prompt} <- prompt_text(prompt, form, env, "agent prompt") do
+      {:ok, %Agent{address: address, prompt: prompt, schema: nil, retries: @default_retries}}
+    end
+  end
+
+  defp node({:agent, _meta, [{:<<>>, _, _parts}]} = form, _address, env, _binding_env),
+    do: {:error, interpolation_finding(form, env, "agent prompt")}
 
   # A schema-backed agent: `agent "…", schema: %{…}, retries: n`. The options must
   # be a literal keyword list drawn from @agent_option_keys; the schema must be a
   # literal map (materialized to its runtime value so the node stays inert data).
   defp node({:agent, _meta, [prompt, opts]} = form, address, env, _binding_env)
        when is_binary(prompt) do
-    with {:ok, kw} <- agent_options(opts, form, env),
+    with {:ok, prompt} <- prompt_text(prompt, form, env, "agent prompt"),
+         {:ok, kw} <- agent_options(opts, form, env),
          {:ok, schema} <- agent_schema(kw, form, env),
          {:ok, retries} <- agent_retries(kw, form, env) do
       {:ok, %Agent{address: address, prompt: prompt, schema: schema, retries: retries}}
     end
   end
+
+  defp node({:agent, _meta, [{:<<>>, _, _parts}, _opts]} = form, _address, env, _binding_env),
+    do: {:error, interpolation_finding(form, env, "agent prompt")}
 
   defp node({:return, _meta, [value]} = form, address, env, _binding_env) do
     if Macro.quoted_literal?(value) do
@@ -169,6 +258,13 @@ defmodule Workflow.Compiler do
        Finding.at(env, form, "`return` expects a literal value",
          hint: "return only compile-time constants; a workflow cannot compute at runtime"
        )}
+    end
+  end
+
+  defp node({:emit, _meta, [template_ast]} = form, address, env, binding_env) do
+    with {:ok, template} <- emit_template(template_ast, env),
+         {:ok, bindings} <- emit_bindings(template, binding_env, form, env) do
+      {:ok, %Emit{address: address, template: template, bindings: bindings}}
     end
   end
 
@@ -278,12 +374,30 @@ defmodule Workflow.Compiler do
   # static prompt. Both are compile-time literals, so the node stays inert.
   defp node({:synthesize, _meta, [inputs, prompt]} = form, address, env, _binding_env)
        when is_binary(prompt) do
+    with {:ok, prompt} <- prompt_text(prompt, form, env, "synthesize prompt") do
+      if Macro.quoted_literal?(inputs) do
+        {:ok, %Synthesize{address: address, inputs: materialize(inputs), prompt: prompt}}
+      else
+        {:error,
+         Finding.at(env, form, "`synthesize` inputs must be a literal",
+           hint: "pass compile-time constants; a workflow cannot compute inputs at runtime"
+         )}
+      end
+    end
+  end
+
+  defp node(
+         {:synthesize, _meta, [inputs, {:<<>>, _, _parts}]} = form,
+         _address,
+         env,
+         _binding_env
+       ) do
     if Macro.quoted_literal?(inputs) do
-      {:ok, %Synthesize{address: address, inputs: materialize(inputs), prompt: prompt}}
+      {:error, interpolation_finding(form, env, "synthesize prompt")}
     else
       {:error,
-       Finding.at(env, form, "`synthesize` inputs must be a literal",
-         hint: "pass compile-time constants; a workflow cannot compute inputs at runtime"
+       Finding.at(env, form, "`synthesize` prompt must be a literal string",
+         hint: ~s|synthesize inputs, "a static instruction"|
        )}
     end
   end
@@ -651,6 +765,12 @@ defmodule Workflow.Compiler do
 
   defp body_node({:collect, _meta, _args} = form, _address, env, _binding_env),
     do: {:error, Finding.at(env, form, "`collect` requires `into: :name`")}
+
+  defp body_node({:let, _meta, _args} = form, _address, env, _binding_env),
+    do: {:error, Finding.at(env, form, "`let` is not allowed inside a loop body")}
+
+  defp body_node({:emit, _meta, _args} = form, _address, env, _binding_env),
+    do: {:error, Finding.at(env, form, "`emit` is not allowed inside a loop body")}
 
   defp body_node({combinator, _meta, _args} = form, _address, env, _binding_env)
        when combinator in [
@@ -1022,13 +1142,69 @@ defmodule Workflow.Compiler do
   # --- Whole-DSL invariants ---
 
   defp validate_tree(nodes, env) do
-    if Enum.any?(nodes, &match?(%Return{}, &1)) do
-      :ok
+    case List.last(nodes) do
+      %Return{} ->
+        :ok
+
+      %Emit{} ->
+        :ok
+
+      _other ->
+        {:error,
+         Finding.at(env, nil, "workflow must terminate with `return` or `emit`",
+           hint: "end the workflow with `return literal` or `emit(~P\"...\")`"
+         )}
+    end
+  end
+
+  defp prompt_text(prompt, form, env, subject) when is_binary(prompt) do
+    if String.contains?(prompt, "\#{") do
+      {:error, interpolation_finding(form, env, subject)}
     else
-      {:error,
-       Finding.at(env, nil, "workflow must contain a `return`",
-         hint: "add a `return <literal>` so the run terminates with a value"
-       )}
+      {:ok, prompt}
+    end
+  end
+
+  defp interpolation_finding(form, env, subject) do
+    Finding.at(env, form, "#{subject} interpolation is not allowed",
+      hint: "bind producer results with `let`, then render them with `emit(~P\"...\")`"
+    )
+  end
+
+  defp emit_template({:sigil_P, meta, [{:<<>>, _content_meta, [source]}, _mods]}, env)
+       when is_binary(source) do
+    Template.parse(source, %{env | line: Keyword.get(meta, :line, env.line)})
+  end
+
+  defp emit_template(_other, env) do
+    {:error,
+     Finding.at(env, nil, "`emit` expects a `~P` template",
+       hint: ~s|emit(~P"Final: <%= @draft %>")|
+     )}
+  end
+
+  defp emit_bindings(%Template{assigns: assigns}, binding_env, form, env) do
+    assigns
+    |> Enum.uniq()
+    |> Enum.reduce_while({:ok, %{}}, fn assign, {:ok, acc} ->
+      case resolve_binding(assign, binding_env) do
+        {:ok, name, ref} ->
+          {:cont, {:ok, Map.put(acc, name, ref)}}
+
+        :error ->
+          {:halt,
+           {:error,
+            Finding.at(env, form, "unbound template assign @#{assign}",
+              hint: "bind it earlier with `let :#{assign} = agent(...)` or `synthesize(...)`"
+            )}}
+      end
+    end)
+  end
+
+  defp resolve_binding(assign, binding_env) do
+    case Enum.find(binding_env, fn {name, _ref} -> Atom.to_string(name) == assign end) do
+      {name, ref} -> {:ok, name, ref}
+      nil -> :error
     end
   end
 

@@ -39,13 +39,15 @@ defmodule Workflow.Run.Writer do
     Accumulator,
     Predicate,
     PubSub,
-    RenderText
+    RenderText,
+    Template
   }
 
   alias Workflow.Node.{
     Phase,
     Log,
     Agent,
+    Emit,
     Return,
     Parallel,
     Pipeline,
@@ -149,6 +151,19 @@ defmodule Workflow.Run.Writer do
 
   defp run_node(%Return{} = node, _run_id, _provider, _prior, ctx),
     do: {:cont, %{ctx | return: node.value}}
+
+  defp run_node(%Emit{} = node, run_id, _provider, _prior, ctx) do
+    rendered =
+      case RenderText.of(run_id, Template.to_parts(node.template, node.bindings)) do
+        {:ok, value} ->
+          value
+
+        {:error, reason} ->
+          raise ArgumentError, "unable to render terminal template: #{inspect(reason)}"
+      end
+
+    {:cont, %{ctx | return: rendered}}
+  end
 
   # The sequential agent path commits each paid attempt *incrementally* — a rejection
   # lands in the journal before the next paid call runs — so a crash mid-retry

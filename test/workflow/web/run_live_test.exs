@@ -33,9 +33,9 @@ defmodule Workflow.Web.RunLiveTest do
 
     workflow "inspector-demo" do
       phase("plan")
-      agent("research")
+      agent("research", label: "read:research")
       phase("build")
-      agent("ship")
+      agent("ship", label: "build:ship")
       return(:ok)
     end
   end
@@ -98,6 +98,39 @@ defmodule Workflow.Web.RunLiveTest do
 
       {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
        activity}
+    end
+  end
+
+  defmodule StreamingGateProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, _key, opts) do
+      sink = Keyword.fetch!(opts, :sink)
+      activity_sink = Keyword.fetch!(opts, :activity_sink)
+
+      activity_sink.(%{
+        kind: "lifecycle",
+        label: "Turn started",
+        summary: "Streaming #{prompt}",
+        status: "running"
+      })
+
+      send(sink, {:at_agent, self()})
+
+      receive do: (:proceed -> :ok)
+
+      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
+       [
+         %{
+           kind: "reasoning",
+           label: "Reasoning",
+           summary: "Finished #{prompt}",
+           status: "completed"
+         }
+       ]}
     end
   end
 
@@ -231,7 +264,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert html =~ "running"
     assert html =~ "plan"
     assert html =~ "starting up"
-    refute html =~ "completed"
+    refute has_element?(view, "[data-testid=result]")
 
     # Let the run finish; the writer commits agent_committed + run_completed and
     # broadcasts each. The already-mounted view re-folds and reflects them live —
@@ -242,9 +275,33 @@ defmodule Workflow.Web.RunLiveTest do
     assert updated =~ "completed"
     assert updated =~ "result: :ok"
     # The committed agent turn (address [2]) now appears; usage folds to 2 tokens.
-    assert has_element?(view, "[data-testid=agents] li[data-address='[2]']")
+    assert has_element?(view, "[data-testid=agents] [data-address='[2]']")
     assert has_element?(view, "[data-testid=agents] h2", "Agents (1)")
-    assert has_element?(view, "[data-testid=usage]", "2")
+  end
+
+  test "in-flight provider activity is journaled and visible before the agent commits" do
+    id = run_id()
+
+    {:ok, ^id, writer} =
+      Run.start(DemoWorkflow,
+        run_id: id,
+        provider: {StreamingGateProvider, sink: self()}
+      )
+
+    assert_receive {:at_agent, turn}
+
+    {:ok, view, html} = live(conn(), "/runs/#{id}")
+
+    assert html =~ "running"
+    assert has_element?(view, "[data-testid=agents] h2", "Agents (1)")
+    assert has_element?(view, "[data-testid=agent-detail]", "Running")
+    assert has_element?(view, "[data-testid=agent-detail]", "Streaming say hello")
+
+    finish(writer, turn)
+
+    updated = wait_for_render(view, "result: :ok")
+    assert updated =~ "Finished say hello"
+    assert has_element?(view, "[data-testid=agent-detail]", "Completed")
   end
 
   test "the rendered state equals a fold of the journal at every point" do
@@ -257,11 +314,10 @@ defmodule Workflow.Web.RunLiveTest do
     # Every rendered field is sourced from the fold — assert the render carries the
     # folded values, none invented by the LiveView process.
     rendered = render(view)
-    assert has_element?(view, "[data-testid=run-state]", to_string(status.state))
-    assert has_element?(view, "[data-testid=tree-name]", status.tree_name)
-    assert has_element?(view, "[data-testid=phase]", status.phase)
-    assert has_element?(view, "[data-testid=usage]", to_string(status.usage.total_tokens))
-    assert has_element?(view, "[data-testid=event-count]", to_string(status.event_count))
+    assert has_element?(view, "[data-testid=run-header]", status.tree_name)
+    assert has_element?(view, "[data-testid=phase-list]", "plan")
+    assert has_element?(view, "[data-testid=agents] h2", "Agents (1)")
+    assert has_element?(view, "[data-testid=result]", "result: :ok")
     assert Enum.all?(status.logs, &(rendered =~ &1))
   end
 
@@ -308,7 +364,7 @@ defmodule Workflow.Web.RunLiveTest do
              "data" => %{"run_id" => ^id, "state" => "accepted"}
            } = json_response(conn, 200)
 
-    updated = wait_for_render(view, "completed")
+    updated = wait_for_render(view, "result: :ok")
 
     assert view.pid == view_pid
     assert Process.alive?(view_pid)
@@ -343,18 +399,14 @@ defmodule Workflow.Web.RunLiveTest do
     {:ok, view, _html} = live(conn(), "/runs/#{id}")
 
     assert has_element?(view, "[data-testid=run-header]", "inspector-demo")
-    assert has_element?(view, "[data-testid=run-header]", "completed")
-    assert has_element?(view, "[data-testid=agent-count]", "2 agents")
-    assert has_element?(view, "[data-testid=event-count]", "6")
-    assert has_element?(view, "[data-testid=usage]", "4")
-
     assert has_element?(view, "[data-testid=phase-list]", "plan")
     assert has_element?(view, "[data-testid=phase-list]", "build")
-    assert has_element?(view, "[data-testid=phase-agents]", "research")
-    refute render(view) =~ ~s(data-testid="phase-agent-ship")
+    assert has_element?(view, "[data-testid=phase-agents]", "read:research")
+    refute render(view) =~ ~s(<ol data-testid="phase-agents")
+    refute render(view) =~ ~s(data-testid="phase-agent-build-ship)
 
     assert has_element?(view, "[data-testid=agent-detail]", "Prompt")
-    assert has_element?(view, "[data-testid=agent-detail]", "research")
+    assert has_element?(view, "[data-testid=agent-detail]", "read:research")
     assert has_element?(view, "[data-testid=agent-detail]", "Activity")
     assert has_element?(view, "[data-testid=agent-detail]", "Checked research")
     assert has_element?(view, "[data-testid=agent-detail]", "Outcome")
@@ -364,8 +416,8 @@ defmodule Workflow.Web.RunLiveTest do
     |> element("[data-testid=phase-item][phx-value-id=phase-1]", "build")
     |> render_click()
 
-    assert has_element?(view, "[data-testid=phase-agents]", "ship")
-    refute render(view) =~ ~s(data-testid="phase-agent-research")
+    assert has_element?(view, "[data-testid=phase-agents]", "build:ship")
+    refute render(view) =~ ~s(data-testid="phase-agent-read-research)
     assert has_element?(view, "[data-testid=agent-detail]", "Checked ship")
   end
 
@@ -399,7 +451,9 @@ defmodule Workflow.Web.RunLiveTest do
 
     {:ok, view, _html} = live(conn(), "/runs/#{id}")
 
-    assert has_element?(view, "[data-testid=run-state]", "failed")
+    assert has_element?(view, "[data-testid=phase-list] [data-status=failed]", "validate")
+    assert has_element?(view, "[data-testid=phase-agents]", "classify")
+    assert has_element?(view, "[data-testid=agent-detail]", "Failed")
     assert has_element?(view, "[data-testid=agent-detail]", "Rejected attempts")
     assert has_element?(view, "[data-testid=agent-detail]", "attempt 0")
     assert has_element?(view, "[data-testid=agent-detail]", "missing_required")

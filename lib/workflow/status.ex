@@ -52,47 +52,117 @@ defmodule Workflow.Status do
 
   defp apply_event(%Event{type: :agent_committed, payload: p}, s) do
     s = ensure_phase(s)
+    attempt = idempotency_attempt(p.idempotency_key)
+    existing = find_agent_attempt(s.agents, p.address, p.iteration, attempt)
+    activity = indexed_activity(Map.get(p, :activity, []))
 
     agent = %{
       address: p.address,
       iteration: p.iteration,
+      label: Map.get(p, :label),
       prompt: p.prompt,
       result: p.result,
       usage: p.usage,
       idempotency_key: p.idempotency_key,
-      activity: Map.get(p, :activity, []),
+      status: :completed,
+      activity: merge_activity(existing && existing.activity, activity),
       phase_id: s.current_phase_id,
       phase_name: phase_name(s)
     }
 
     %{
       s
-      | agents: s.agents ++ [agent],
-        phases: append_agent_to_phase(s.phases, s.current_phase_id, agent),
+      | agents: upsert_settled_agent(s.agents, agent),
+        phases: upsert_settled_agent_in_phase(s.phases, s.current_phase_id, agent),
         usage: Usage.add(s.usage, p.usage)
+    }
+    |> tick()
+  end
+
+  defp apply_event(%Event{type: :agent_activity, payload: p}, s) do
+    s = ensure_phase(s)
+    existing = find_agent_attempt(s.agents, p.address, p.iteration, p.attempt)
+    entry = maybe_put_activity_index(p.entry, Map.get(p, :activity_index))
+
+    agent = %{
+      address: p.address,
+      iteration: p.iteration,
+      attempt: p.attempt,
+      label: Map.get(p, :label) || (existing && Map.get(existing, :label)),
+      prompt: p.prompt,
+      result: existing && Map.get(existing, :result),
+      usage: (existing && Map.get(existing, :usage)) || %Usage{},
+      idempotency_key: existing && Map.get(existing, :idempotency_key),
+      status: (existing && Map.get(existing, :status)) || :running,
+      activity: merge_activity(existing && existing.activity, [entry]),
+      phase_id: (existing && existing.phase_id) || s.current_phase_id,
+      phase_name: (existing && existing.phase_name) || phase_name(s)
+    }
+
+    %{
+      s
+      | agents: upsert_in_flight_agent(s.agents, agent),
+        phases: upsert_in_flight_agent_in_phase(s.phases, agent.phase_id, agent)
     }
     |> tick()
   end
 
   defp apply_event(%Event{type: :agent_attempt_rejected, payload: p}, s) do
     s = ensure_phase(s)
+    existing = find_agent_attempt(s.agents, p.address, p.iteration, p.attempt)
+    activity = indexed_activity(Map.get(p, :activity, []))
+    phase_id = (existing && existing.phase_id) || s.current_phase_id
+    phase_name = (existing && existing.phase_name) || phase_name(s)
 
     rejection = %{
       address: p.address,
       iteration: p.iteration,
       attempt: p.attempt,
+      label: Map.get(p, :label) || (existing && Map.get(existing, :label)),
       prompt: p.prompt,
       output: p.output,
       reason: p.reason,
-      activity: Map.get(p, :activity, []),
-      phase_id: s.current_phase_id,
-      phase_name: phase_name(s)
+      activity: merge_activity(existing && existing.activity, activity),
+      phase_id: phase_id,
+      phase_name: phase_name
     }
 
-    %{s | rejected: s.rejected ++ [rejection], usage: Usage.add(s.usage, p.usage)} |> tick()
+    %{
+      s
+      | agents: remove_rejected_agent(s.agents, p.address, p.iteration, p.attempt),
+        phases: remove_rejected_agent_from_phases(s.phases, p.address, p.iteration, p.attempt),
+        rejected: s.rejected ++ [rejection],
+        usage: Usage.add(s.usage, p.usage)
+    }
+    |> tick()
   end
 
   defp apply_event(%Event{type: :agent_failed, payload: p}, s) do
+    s = ensure_phase(s)
+    existing = find_agent_attempt(s.agents, p.address, p.iteration, p.attempts - 1)
+    rejection = latest_rejection(s.rejected, p.address, p.iteration)
+
+    phase_id =
+      (existing && existing.phase_id) || (rejection && rejection.phase_id) || s.current_phase_id
+
+    phase_name =
+      (existing && existing.phase_name) || (rejection && rejection.phase_name) || phase_name(s)
+
+    agent = %{
+      address: p.address,
+      iteration: p.iteration,
+      label: (existing && Map.get(existing, :label)) || (rejection && Map.get(rejection, :label)),
+      prompt:
+        (existing && Map.get(existing, :prompt)) || (rejection && Map.get(rejection, :prompt)),
+      result: existing && Map.get(existing, :result),
+      usage: (existing && Map.get(existing, :usage)) || %Usage{},
+      idempotency_key: existing && Map.get(existing, :idempotency_key),
+      status: :failed,
+      activity: (existing && existing.activity) || (rejection && rejection.activity) || [],
+      phase_id: phase_id,
+      phase_name: phase_name
+    }
+
     failure = %{
       address: p.address,
       iteration: p.iteration,
@@ -100,7 +170,14 @@ defmodule Workflow.Status do
       reason: p.reason
     }
 
-    %{s | state: :failed, failure: failure} |> tick()
+    %{
+      s
+      | state: :failed,
+        failure: failure,
+        agents: upsert_settled_agent(s.agents, agent),
+        phases: upsert_settled_agent_in_phase(s.phases, phase_id, agent)
+    }
+    |> tick()
   end
 
   # Fan-out markers are structural brackets; the branch/lane agent turns they enclose
@@ -167,11 +244,123 @@ defmodule Workflow.Status do
 
   defp ensure_phase(%__MODULE__{} = s), do: s
 
-  defp append_agent_to_phase(phases, phase_id, agent) do
+  defp find_agent_attempt(agents, address, iteration, attempt) do
+    Enum.find(agents, &agent_attempt_match?(&1, address, iteration, attempt))
+  end
+
+  defp upsert_in_flight_agent(agents, agent) do
+    if Enum.any?(agents, &agent_attempt_match?(&1, agent.address, agent.iteration, agent.attempt)) do
+      Enum.map(agents, fn
+        existing
+        when existing.address == agent.address and existing.iteration == agent.iteration and
+               existing.attempt == agent.attempt ->
+          agent
+
+        existing ->
+          existing
+      end)
+    else
+      agents ++ [agent]
+    end
+  end
+
+  defp upsert_settled_agent(agents, agent) do
+    {agents, inserted?} =
+      Enum.reduce(agents, {[], false}, fn existing, {acc, inserted?} ->
+        if agent_match?(existing, agent.address, agent.iteration) do
+          if inserted?, do: {acc, inserted?}, else: {[agent | acc], true}
+        else
+          {[existing | acc], inserted?}
+        end
+      end)
+
+    agents = Enum.reverse(agents)
+
+    if inserted?, do: agents, else: agents ++ [agent]
+  end
+
+  defp remove_rejected_agent(agents, address, iteration, attempt) do
+    Enum.reject(agents, &rejected_agent_match?(&1, address, iteration, attempt))
+  end
+
+  defp upsert_in_flight_agent_in_phase(phases, phase_id, agent) do
     Enum.map(phases, fn
-      %{id: ^phase_id, agents: agents} = phase -> %{phase | agents: agents ++ [agent]}
-      phase -> phase
+      %{id: ^phase_id, agents: agents} = phase ->
+        %{phase | agents: upsert_in_flight_agent(agents, agent)}
+
+      phase ->
+        phase
     end)
+  end
+
+  defp upsert_settled_agent_in_phase(phases, phase_id, agent) do
+    Enum.map(phases, fn
+      %{id: ^phase_id, agents: agents} = phase ->
+        %{phase | agents: upsert_settled_agent(agents, agent)}
+
+      phase ->
+        phase
+    end)
+  end
+
+  defp remove_rejected_agent_from_phases(phases, address, iteration, attempt) do
+    Enum.map(phases, fn phase ->
+      %{phase | agents: remove_rejected_agent(phase.agents, address, iteration, attempt)}
+    end)
+  end
+
+  defp agent_match?(agent, address, iteration),
+    do: agent.address == address and agent.iteration == iteration
+
+  defp agent_attempt_match?(agent, address, iteration, attempt),
+    do: agent_match?(agent, address, iteration) and Map.get(agent, :attempt) == attempt
+
+  defp rejected_agent_match?(agent, address, iteration, attempt),
+    do: agent_match?(agent, address, iteration) and Map.get(agent, :attempt) in [nil, attempt]
+
+  defp idempotency_attempt(%{attempt: attempt}), do: attempt
+  defp idempotency_attempt(_key), do: nil
+
+  defp latest_rejection(rejections, address, iteration) do
+    rejections
+    |> Enum.filter(&(&1.address == address and &1.iteration == iteration))
+    |> List.last()
+  end
+
+  defp indexed_activity(activity) do
+    activity
+    |> List.wrap()
+    |> Enum.with_index()
+    |> Enum.map(fn {entry, index} -> maybe_put_activity_index(entry, index) end)
+  end
+
+  defp maybe_put_activity_index(entry, nil), do: entry
+
+  defp maybe_put_activity_index(entry, index) when is_map(entry),
+    do: Map.put_new(entry, :activity_index, index)
+
+  defp merge_activity(left, right) do
+    Enum.reduce(List.wrap(right), List.wrap(left), fn entry, acc ->
+      if activity_index(entry) != nil and Enum.any?(acc, &same_activity?(&1, entry)) do
+        acc
+      else
+        acc ++ [entry]
+      end
+    end)
+  end
+
+  defp activity_index(entry),
+    do: Map.get(entry, :activity_index) || Map.get(entry, "activity_index")
+
+  defp same_activity?(left, right) do
+    activity_index(left) == activity_index(right) and
+      strip_activity_index(left) == strip_activity_index(right)
+  end
+
+  defp strip_activity_index(entry) do
+    entry
+    |> Map.delete(:activity_index)
+    |> Map.delete("activity_index")
   end
 
   defp phase_name(%__MODULE__{phases: phases, current_phase_id: phase_id}) do

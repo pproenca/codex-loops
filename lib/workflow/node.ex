@@ -63,11 +63,12 @@ defmodule Workflow.Node.Agent do
   serializable — no closure is ever captured.
   """
   @enforce_keys [:address, :prompt]
-  defstruct [:address, :prompt, bindings: %{}, schema: nil, retries: 2]
+  defstruct [:address, :prompt, :label, bindings: %{}, schema: nil, retries: 2]
 
   @type t :: %__MODULE__{
           address: Workflow.Node.address(),
           prompt: String.t() | Workflow.Template.t(),
+          label: String.t() | nil,
           bindings: %{atom() => Workflow.Node.binding_ref()},
           schema: map() | nil,
           retries: non_neg_integer()

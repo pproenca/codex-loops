@@ -48,7 +48,8 @@ defmodule Workflow.Provider.Codex do
     try do
       case Containment.run_turn(prompt,
              command: command,
-             timeout: Keyword.get(opts, :timeout, :infinity)
+             timeout: Keyword.get(opts, :timeout, :infinity),
+             on_line: line_observer(opts)
            ) do
         {:ok, stdout} -> parse_turn(stdout, schema)
         {:error, reason} -> raise "codex turn failed: #{inspect(reason)}"
@@ -86,11 +87,44 @@ defmodule Workflow.Provider.Codex do
 
   defp base_command(opts), do: Keyword.get(opts, :command) || default_command()
 
+  defp line_observer(opts) do
+    case Keyword.get(opts, :activity_sink) do
+      nil -> nil
+      sink -> &stream_activity(&1, sink)
+    end
+  end
+
+  defp stream_activity(line, sink) do
+    with {:ok, event} <- JSON.decode(line) do
+      event
+      |> stream_activity_entries()
+      |> Enum.each(sink)
+    end
+  end
+
   defp write_schema(schema) do
     path = Path.join(System.tmp_dir!(), "codex_schema_#{System.unique_integer([:positive])}.json")
-    File.write!(path, JSON.encode!(schema))
+    File.write!(path, JSON.encode!(strict_schema(schema)))
     path
   end
+
+  defp strict_schema(%{"type" => "object"} = schema) do
+    schema
+    |> Map.update("properties", %{}, &strict_schema/1)
+    |> Map.put("additionalProperties", false)
+  end
+
+  defp strict_schema(%{"type" => "array"} = schema) do
+    Map.update(schema, "items", %{}, &strict_schema/1)
+  end
+
+  defp strict_schema(schema) when is_map(schema) do
+    Map.new(schema, fn {key, value} -> {key, strict_schema(value)} end)
+  end
+
+  defp strict_schema([head | tail]), do: [strict_schema(head) | strict_schema(tail)]
+  defp strict_schema([]), do: []
+  defp strict_schema(value), do: value
 
   # Fold the `codex exec` JSONL stream into {result, usage, activity}. A
   # `turn.failed` or a stream-level `error` event is a real backend fault and raises.
@@ -148,6 +182,23 @@ defmodule Workflow.Provider.Codex do
     |> Enum.flat_map(&activity_entry/1)
     |> Enum.reject(&is_nil/1)
   end
+
+  defp stream_activity_entries(%{"type" => "thread.started", "thread_id" => thread_id}) do
+    [
+      %{
+        kind: "lifecycle",
+        label: "Thread started",
+        summary: thread_id,
+        status: "running"
+      }
+    ]
+  end
+
+  defp stream_activity_entries(%{"type" => "turn.started"}) do
+    [%{kind: "lifecycle", label: "Turn started", summary: nil, status: "running"}]
+  end
+
+  defp stream_activity_entries(event), do: activity_entry(event)
 
   defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "agent_message"}}),
     do: []

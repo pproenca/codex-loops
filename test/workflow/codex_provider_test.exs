@@ -35,6 +35,16 @@ defmodule Workflow.CodexProviderTest do
     case mode do
       "echo" -> prompt
       "activity" -> prompt
+      "schema_file" ->
+        schema_file =
+          rest
+          |> Enum.chunk_every(2, 1, :discard)
+          |> Enum.find_value(fn
+            ["--output-schema", file] -> file
+            _ -> nil
+          end)
+
+        File.read!(schema_file)
       "always_invalid" -> JSON.encode!(invalid)
       "retry" ->
         counter = Enum.at(rest, 0)
@@ -144,6 +154,7 @@ defmodule Workflow.CodexProviderTest do
     do: Provider.select(:codex, command: {elixir, [stub, mode | extra]})
 
   defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+  defp settled_types(id), do: id |> types() |> Enum.reject(&(&1 == :agent_activity))
 
   test "--provider codex executes a real agent turn and journals its result + usage", ctx do
     id = run_id()
@@ -162,7 +173,8 @@ defmodule Workflow.CodexProviderTest do
     status = Status.of(id)
     assert status.state == :completed
     assert status.usage.total_tokens == 8
-    assert types(id) == [:run_started, :agent_committed, :run_completed]
+    assert settled_types(id) == [:run_started, :agent_committed, :run_completed]
+    assert Enum.count(types(id), &(&1 == :agent_activity)) == 2
   end
 
   test "the production default backend is the real codex exec one-shot entrypoint" do
@@ -198,7 +210,7 @@ defmodule Workflow.CodexProviderTest do
 
     # Same inert tree, same interpreter: swapping the backend leaves the committed
     # event shape identical — only the backend module differs.
-    assert types(mock_id) == types(codex_id)
+    assert types(mock_id) == settled_types(codex_id)
     assert Status.of(mock_id).state == Status.of(codex_id).state
   end
 
@@ -211,7 +223,7 @@ defmodule Workflow.CodexProviderTest do
 
     assert committed.payload.result == "say hello"
 
-    assert committed.payload.activity == [
+    assert Enum.map(committed.payload.activity, &Map.delete(&1, :activity_index)) == [
              %{
                kind: "reasoning",
                label: "Reasoning",
@@ -225,6 +237,8 @@ defmodule Workflow.CodexProviderTest do
                status: "completed"
              }
            ]
+
+    assert Enum.map(committed.payload.activity, & &1.activity_index) == [2, 3]
   end
 
   test "a schema-backed turn against the real provider honours fail-closed retry", ctx do
@@ -237,7 +251,12 @@ defmodule Workflow.CodexProviderTest do
     assert {:ok, ^id} =
              Run.run(SchemaWorkflow, run_id: id, provider: codex(ctx, "retry", [counter]))
 
-    assert types(id) == [:run_started, :agent_attempt_rejected, :agent_committed, :run_completed]
+    assert settled_types(id) == [
+             :run_started,
+             :agent_attempt_rejected,
+             :agent_committed,
+             :run_completed
+           ]
 
     committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
     assert committed.payload.result == %{"bugs" => [%{"file" => "lib/a.ex", "line" => 3}]}
@@ -252,7 +271,7 @@ defmodule Workflow.CodexProviderTest do
 
     # Default budget: three paid attempts across the real boundary, then a terminal
     # failure — the same fail-closed contract the mock proves, now end-to-end.
-    assert types(id) ==
+    assert settled_types(id) ==
              [
                :run_started,
                :agent_attempt_rejected,
@@ -272,5 +291,37 @@ defmodule Workflow.CodexProviderTest do
     # decides validity.
     assert [%Workflow.Node.Agent{schema: schema} | _] = SchemaWorkflow.__workflow__(:tree).nodes
     assert schema == @bugs_schema
+  end
+
+  test "schemas handed to --output-schema are strict object schemas", ctx do
+    schema = %{
+      "type" => "object",
+      "additionalProperties" => true,
+      "properties" => %{
+        "items" => %{
+          "type" => "array",
+          "items" => %{
+            "type" => "object",
+            "additionalProperties" => true,
+            "properties" => %{"name" => %{"type" => "string"}},
+            "required" => ["name"]
+          }
+        }
+      },
+      "required" => ["items"]
+    }
+
+    key = %Workflow.IdempotencyKey{run_id: "schema", node_path: [0], iteration: 0}
+
+    assert {:ok, written, %Provider.Usage{}, _activity} =
+             Workflow.Provider.Codex.run_agent(
+               "show schema",
+               schema,
+               key,
+               elem(codex(ctx, "schema_file"), 1)
+             )
+
+    assert written["additionalProperties"] == false
+    assert written["properties"]["items"]["items"]["additionalProperties"] == false
   end
 end

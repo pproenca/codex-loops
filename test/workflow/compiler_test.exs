@@ -49,7 +49,31 @@ defmodule Workflow.CompilerTest do
 
     test "a schemaless agent carries a nil schema and the default retry budget" do
       {:ok, tree} = parse(~s|agent("go")\nreturn(:ok)|)
-      assert [%Agent{schema: nil, retries: 2}, %Return{}] = tree.nodes
+      assert [%Agent{schema: nil, retries: 2, label: nil}, %Return{}] = tree.nodes
+    end
+
+    test "an agent label is inert display metadata and does not require a schema" do
+      {:ok, tree} = parse(~s|agent("go", label: "read:docs")\nreturn(:ok)|)
+
+      assert [%Agent{prompt: "go", label: "read:docs", schema: nil, retries: 2}, %Return{}] =
+               tree.nodes
+    end
+
+    test "an agent label composes with schema-backed options" do
+      {:ok, tree} =
+        parse(
+          ~s|agent("go", schema: %{"type" => "object"}, label: "gate:consensus")\nreturn(:ok)|
+        )
+
+      assert [
+               %Agent{
+                 prompt: "go",
+                 label: "gate:consensus",
+                 schema: %{"type" => "object"},
+                 retries: 2
+               },
+               %Return{}
+             ] = tree.nodes
     end
   end
 
@@ -97,6 +121,13 @@ defmodule Workflow.CompilerTest do
     test "agent options with no schema fail closed (located finding)" do
       assert {:error, %Finding{line: 1} = f} = parse("agent(\"go\", retries: 2)\nreturn(:ok)")
       assert f.message =~ "requires a `schema:`"
+    end
+
+    test "a non-string label is rejected" do
+      assert {:error, %Finding{line: 1} = f} =
+               parse("agent(\"go\", schema: %{\"type\" => \"object\"}, label: :bad)\nreturn(:ok)")
+
+      assert f.message =~ "label must be a string literal"
     end
 
     test "a non-literal / non-map schema is a located finding" do

@@ -584,7 +584,18 @@ defmodule Workflow.Run.Writer do
 
   defp commit_attempt(%Agent{schema: nil} = node, run_id, provider, ctx, iteration, attempt) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, result, usage, activity} = call_provider(provider, node.prompt, nil, key)
+    {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
+
+    {:ok, result, usage, activity} =
+      call_provider(
+        provider,
+        node.prompt,
+        nil,
+        key,
+        activity_sink
+      )
+
+    activity = finalize_activity.(activity)
 
     seq =
       commit(
@@ -598,7 +609,18 @@ defmodule Workflow.Run.Writer do
 
   defp commit_attempt(%Agent{} = node, run_id, provider, ctx, iteration, attempt) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, output, usage, activity} = call_provider(provider, node.prompt, node.schema, key)
+    {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
+
+    {:ok, output, usage, activity} =
+      call_provider(
+        provider,
+        node.prompt,
+        node.schema,
+        key,
+        activity_sink
+      )
+
+    activity = finalize_activity.(activity)
 
     case Schema.validate(node.schema, output) do
       {:ok, validated} ->
@@ -656,13 +678,36 @@ defmodule Workflow.Run.Writer do
 
   defp build_attempt(%Agent{schema: nil} = node, run_id, provider, iteration, attempt, _acc) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, result, usage, activity} = call_provider(provider, node.prompt, nil, key)
+    {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
+
+    {:ok, result, usage, activity} =
+      call_provider(
+        provider,
+        node.prompt,
+        nil,
+        key,
+        activity_sink
+      )
+
+    activity = finalize_activity.(activity)
+
     {:ok, [Event.agent_committed(node, iteration, key, result, usage, activity)], result}
   end
 
   defp build_attempt(%Agent{} = node, run_id, provider, iteration, attempt, acc) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, output, usage, activity} = call_provider(provider, node.prompt, node.schema, key)
+    {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
+
+    {:ok, output, usage, activity} =
+      call_provider(
+        provider,
+        node.prompt,
+        node.schema,
+        key,
+        activity_sink
+      )
+
+    activity = finalize_activity.(activity)
 
     case Schema.validate(node.schema, output) do
       {:ok, validated} ->
@@ -695,8 +740,59 @@ defmodule Workflow.Run.Writer do
   defp commit_all(run_id, seq, events),
     do: Enum.reduce(events, seq, fn event, seq -> commit(run_id, seq, event) end)
 
-  defp call_provider({module, opts}, prompt, schema, key),
-    do: normalize_provider_result(module.run_agent(prompt, schema, key, opts))
+  defp activity_tracker(run_id, %Agent{} = node, iteration, attempt) do
+    counter = :counters.new(1, [])
+    table = :ets.new(:workflow_activity, [:ordered_set, :private])
+
+    sink = fn entry ->
+      :counters.add(counter, 1, 1)
+      activity_index = :counters.get(counter, 1) - 1
+      :ets.insert(table, {activity_index, entry})
+      event = Event.agent_activity(node, iteration, attempt, activity_index, entry)
+      {:ok, event} = Journal.append_next(run_id, event)
+      Phoenix.PubSub.broadcast(PubSub, "run:" <> run_id, {:journal_committed, run_id, event})
+      :ok
+    end
+
+    finalize = fn activity ->
+      streamed = :ets.tab2list(table) |> Enum.sort_by(fn {index, _entry} -> index end)
+      index_final_activity(List.wrap(activity), streamed)
+    end
+
+    {sink, finalize}
+  end
+
+  defp index_final_activity(activity, streamed) do
+    {indexed, _used, _next} =
+      Enum.reduce(activity, {[], MapSet.new(), next_activity_index(streamed)}, fn entry,
+                                                                                  {acc, used,
+                                                                                   next} ->
+        case matching_streamed_index(entry, streamed, used) do
+          nil ->
+            {[Map.put_new(entry, :activity_index, next) | acc], used, next + 1}
+
+          index ->
+            {[Map.put_new(entry, :activity_index, index) | acc], MapSet.put(used, index), next}
+        end
+      end)
+
+    Enum.reverse(indexed)
+  end
+
+  defp next_activity_index([]), do: 0
+  defp next_activity_index(streamed), do: streamed |> List.last() |> elem(0) |> Kernel.+(1)
+
+  defp matching_streamed_index(entry, streamed, used) do
+    Enum.find_value(streamed, fn {index, streamed_entry} ->
+      if index not in used and streamed_entry == entry, do: index
+    end)
+  end
+
+  defp call_provider({module, opts}, prompt, schema, key, activity_sink),
+    do:
+      normalize_provider_result(
+        module.run_agent(prompt, schema, key, Keyword.put(opts, :activity_sink, activity_sink))
+      )
 
   defp normalize_provider_result({:ok, result, usage}), do: {:ok, result, usage, []}
 
@@ -768,10 +864,9 @@ defmodule Workflow.Run.Writer do
   end
 
   defp commit(run_id, seq, %Event{} = event) do
-    event = %{event | run_id: run_id, seq: seq}
-    :ok = Journal.append(run_id, seq, event)
+    {:ok, event} = Journal.append_next(run_id, event)
     # Post-commit broadcast so live read surfaces can subscribe.
     Phoenix.PubSub.broadcast(PubSub, "run:" <> run_id, {:journal_committed, run_id, event})
-    seq + 1
+    max(seq, event.seq + 1)
   end
 end

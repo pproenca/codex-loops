@@ -39,7 +39,7 @@ defmodule Workflow.Containment do
 
     try do
       port = Port.open({:spawn, shell_command(path, args, stdin_file)}, [:binary, :exit_status])
-      collect(port, "", timeout)
+      collect(port, "", "", timeout, Keyword.get(opts, :on_line))
     after
       File.rm(stdin_file)
     end
@@ -47,15 +47,23 @@ defmodule Workflow.Containment do
 
   # Accumulate stdout until the child exits; the OS/port guarantees every `:data`
   # arrives before `:exit_status`, so the buffer is complete at exit.
-  defp collect(port, buffer, timeout) do
+  defp collect(port, buffer, line_buffer, timeout, on_line) do
     receive do
       {^port, {:data, data}} ->
-        collect(port, buffer <> data, timeout)
+        collect(
+          port,
+          buffer <> data,
+          observe_lines(line_buffer <> data, on_line),
+          timeout,
+          on_line
+        )
 
       {^port, {:exit_status, 0}} ->
+        flush_line(line_buffer, on_line)
         {:ok, buffer}
 
       {^port, {:exit_status, status}} ->
+        flush_line(line_buffer, on_line)
         {:error, {:backend_exit, status, buffer}}
     after
       timeout ->
@@ -63,6 +71,22 @@ defmodule Workflow.Containment do
         {:error, :timeout}
     end
   end
+
+  defp observe_lines(_data, nil), do: ""
+
+  defp observe_lines(data, on_line) do
+    parts = String.split(data, "\n")
+    {complete, [tail]} = Enum.split(parts, length(parts) - 1)
+    Enum.each(complete, &emit_line(&1, on_line))
+    tail
+  end
+
+  defp flush_line("", _on_line), do: :ok
+  defp flush_line(_line, nil), do: :ok
+  defp flush_line(line, on_line), do: emit_line(line, on_line)
+
+  defp emit_line("", _on_line), do: :ok
+  defp emit_line(line, on_line), do: on_line.(line)
 
   defp write_stdin(stdin) do
     path = Path.join(System.tmp_dir!(), "codex_turn_#{System.unique_integer([:positive])}.stdin")

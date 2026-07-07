@@ -21,17 +21,29 @@ defmodule Workflow.Web.RunLive do
 
   alias Workflow.Status
 
+  @refresh_ms 1_000
+
   @impl true
   def mount(%{"run_id" => run_id}, _session, socket) do
     # Subscribe before the first fold so no commit slips through the gap between
     # folding and subscribing; the idempotent re-fold absorbs any overlap.
-    if connected?(socket), do: Phoenix.PubSub.subscribe(Workflow.PubSub, "run:" <> run_id)
+    if connected?(socket) do
+      Phoenix.PubSub.subscribe(Workflow.PubSub, "run:" <> run_id)
+      schedule_refresh()
+    end
+
     {:ok, assign_projection(socket, run_id)}
   end
 
   @impl true
   def handle_info({:journal_committed, run_id, _event}, socket) do
     {:noreply, assign_projection(socket, run_id)}
+  end
+
+  def handle_info(:refresh, socket) do
+    socket = assign_projection(socket, socket.assigns.run_id)
+    if socket.assigns.status.state == :running, do: schedule_refresh()
+    {:noreply, socket}
   end
 
   @impl true
@@ -59,6 +71,8 @@ defmodule Workflow.Web.RunLive do
       selected_agent_id: agent_id
     )
   end
+
+  defp schedule_refresh, do: Process.send_after(self(), :refresh, @refresh_ms)
 
   defp focus_phase(socket, phase_id) do
     status = socket.assigns.status
@@ -124,11 +138,6 @@ defmodule Workflow.Web.RunLive do
       }
 
       [data-testid="run-header"] {
-        display: flex;
-        flex-wrap: wrap;
-        align-items: flex-start;
-        justify-content: space-between;
-        gap: 18px 28px;
         padding-bottom: 20px;
         border-bottom: 1px solid #d8dee8;
       }
@@ -145,7 +154,6 @@ defmodule Workflow.Web.RunLive do
         flex-wrap: wrap;
         gap: 8px;
         align-items: baseline;
-        max-width: 520px;
         margin-bottom: 0;
         font-size: 24px;
         line-height: 1.2;
@@ -185,42 +193,23 @@ defmodule Workflow.Web.RunLive do
       pre {
         max-width: 100%;
         margin: 0 0 16px;
-        padding: 10px 12px;
         overflow: auto;
-        border: 1px solid #d8dee8;
-        border-radius: 8px;
-        background: #fbfcfe;
         font-size: 12px;
         line-height: 1.45;
         white-space: pre-wrap;
         overflow-wrap: anywhere;
       }
 
-      dl {
-        display: grid;
-        grid-template-columns: repeat(6, minmax(76px, 1fr));
-        gap: 10px;
-        min-width: min(100%, 540px);
-        margin: 0;
+      .sr-only {
+        position: absolute;
+        width: 1px;
+        height: 1px;
+        padding: 0;
+        overflow: hidden;
+        clip: rect(0, 0, 0, 0);
+        white-space: nowrap;
+        border: 0;
       }
-
-      dt {
-        margin-bottom: 4px;
-        color: #6b7280;
-        font-size: 11px;
-        font-weight: 700;
-        letter-spacing: 0;
-        text-transform: uppercase;
-      }
-
-      dd {
-        margin: 0;
-        font-size: 14px;
-        font-weight: 650;
-        overflow-wrap: normal;
-        word-break: normal;
-      }
-
       [data-testid="inspector"] {
         display: grid;
         grid-template-columns: 160px minmax(220px, 280px) minmax(0, 1fr);
@@ -277,6 +266,54 @@ defmodule Workflow.Web.RunLive do
         font-weight: 680;
       }
 
+      .phase-chip[data-status="pending"] {
+        border-color: #d8dee8;
+        background: #f8fafc;
+        color: #667085;
+      }
+
+      .phase-chip[data-status="running"] {
+        border-color: #f59e0b;
+        background: #fffbeb;
+        color: #92400e;
+      }
+
+      .phase-chip[data-status="completed"] {
+        border-color: #22c55e;
+        background: #f0fdf4;
+        color: #166534;
+      }
+
+      .phase-chip[data-status="failed"] {
+        border-color: #ef4444;
+        background: #fef2f2;
+        color: #991b1b;
+      }
+
+      .agent-chip[data-status="pending"] {
+        border-color: #d8dee8;
+        background: #f8fafc;
+        color: #667085;
+      }
+
+      .agent-chip[data-status="running"] {
+        border-color: #f59e0b;
+        background: #fffbeb;
+        color: #92400e;
+      }
+
+      .agent-chip[data-status="completed"] {
+        border-color: #22c55e;
+        background: #f0fdf4;
+        color: #166534;
+      }
+
+      .agent-chip[data-status="failed"] {
+        border-color: #ef4444;
+        background: #fef2f2;
+        color: #991b1b;
+      }
+
       [data-testid="phase-list"] button {
         padding: 9px 10px;
       }
@@ -285,21 +322,92 @@ defmodule Workflow.Web.RunLive do
         display: grid;
         gap: 8px;
         margin: 0;
-        padding-left: 20px;
-      }
-
-      [data-testid="phase-agents"] li {
-        padding-left: 2px;
+        padding-left: 0;
       }
 
       [data-testid="phase-agents"] button {
         padding: 9px 10px;
       }
 
+      .agent-main {
+        display: flex;
+        align-items: baseline;
+        justify-content: space-between;
+        gap: 10px;
+        min-width: 0;
+      }
+
+      .agent-name {
+        min-width: 0;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+        font-weight: 720;
+      }
+
+      .agent-meta {
+        flex: 0 0 auto;
+        color: #667085;
+        font-size: 12px;
+        font-weight: 520;
+      }
+
+      .agent-activity {
+        display: grid;
+        gap: 3px;
+        margin-top: 6px;
+        color: #475467;
+        font-size: 12px;
+        line-height: 1.35;
+      }
+
+      .agent-activity-line {
+        display: block;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+
       [data-testid="agent-detail"] > section {
         margin-top: 14px;
         padding-left: 12px;
         border-left: 3px solid #d8dee8;
+      }
+
+      .detail-kicker {
+        margin-bottom: 4px;
+        color: #667085;
+        font-size: 13px;
+      }
+
+      .detail-meta {
+        margin-bottom: 18px;
+        color: #475467;
+        font-size: 13px;
+        font-weight: 620;
+      }
+
+      .preview-more {
+        color: #667085;
+      }
+
+      .detail-text {
+        margin: 0 0 12px;
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font-size: 12px;
+        line-height: 1.45;
+        white-space: pre-wrap;
+        overflow-wrap: anywhere;
+      }
+
+      .activity-list {
+        display: grid;
+        gap: 7px;
+        margin-bottom: 16px;
+      }
+
+      .activity-row {
+        line-height: 1.35;
       }
 
       [data-testid="agent-detail"] ol,
@@ -385,33 +493,22 @@ defmodule Workflow.Web.RunLive do
     <main id="run" data-run-id={@run_id}>
       <header data-testid="run-header">
         <h1>{@status.tree_name || "Run"} <code data-testid="run-id">{@run_id}</code></h1>
-        <dl>
-          <dt>state</dt>
-          <dd data-testid="run-state">{@status.state}</dd>
-          <dt :if={@status.tree_name}>workflow</dt>
-          <dd :if={@status.tree_name} data-testid="tree-name">{@status.tree_name}</dd>
-          <dt :if={@status.phase}>phase</dt>
-          <dd :if={@status.phase} data-testid="phase">{@status.phase}</dd>
-          <dt>agents</dt>
-          <dd data-testid="agent-count">{plural_count(length(@status.agents), "agent")}</dd>
-          <dt>tokens</dt>
-          <dd data-testid="usage">{@status.usage.total_tokens}</dd>
-          <dt>events</dt>
-          <dd data-testid="event-count">{@status.event_count}</dd>
-        </dl>
       </header>
 
       <section data-testid="inspector">
         <nav data-testid="phase-list" aria-label="Phases">
+          <h2>Phases</h2>
           <button
             :for={phase <- @status.phases}
             type="button"
             phx-click="focus_phase"
             phx-value-id={phase.id}
             data-testid="phase-item"
+            class="phase-chip"
+            data-status={phase_status(@status, phase)}
             aria-pressed={phase.id == @focused_phase_id}
           >
-            {phase.name} ({length(phase.agents)})
+            {phase.name} ({completed_count(phase)}/{length(phase.agents)})
           </button>
           <p :if={@status.phases == []}>No phases yet</p>
         </nav>
@@ -420,8 +517,8 @@ defmodule Workflow.Web.RunLive do
           <% phase = focused_phase(@status, @focused_phase_id) %>
           <% agents = if phase, do: phase.agents, else: [] %>
           <h2>Agents ({length(agents)})</h2>
-          <ol data-testid="phase-agents">
-            <li
+          <div data-testid="phase-agents">
+            <div
               :for={agent <- agents}
               data-address={inspect(agent.address)}
               data-iteration={agent.iteration}
@@ -431,12 +528,18 @@ defmodule Workflow.Web.RunLive do
                 type="button"
                 phx-click="select_agent"
                 phx-value-id={agent_id(agent)}
+                class="agent-chip"
+                data-status={agent_status(agent)}
                 aria-pressed={agent_id(agent) == @selected_agent_id}
               >
-                {agent.prompt}
+                <span class="agent-main">
+                  <span class="agent-name">
+                    {agent_title(agent)}
+                  </span>
+                </span>
               </button>
-            </li>
-          </ol>
+            </div>
+          </div>
         </section>
 
         <section data-testid="agent-detail">
@@ -444,21 +547,23 @@ defmodule Workflow.Web.RunLive do
           <% rejections = detail_rejections(@status, @focused_phase_id, @selected_agent_id) %>
           <% failed_rejections = failed_rejections(@status, rejections) %>
           <%= if agent do %>
-            <h2>Agent {inspect(agent.address)}</h2>
-            <p>iteration {agent.iteration}</p>
-            <h3>Prompt</h3>
-            <pre>{agent.prompt}</pre>
-            <h3>Activity</h3>
-            <ol>
-              <li :for={entry <- agent.activity}>
-                <strong>{activity_label(entry)}</strong>
-                <span :if={activity_status(entry)}> {activity_status(entry)}</span>
-                <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
-              </li>
-            </ol>
+            <h2>{agent_title(agent)}</h2>
+            <p class="detail-kicker">{status_label(agent)} · {agent_meta(agent)}</p>
+            <p class="detail-meta">iteration {agent.iteration} · address {inspect(agent.address)}</p>
+            <h3>Prompt · {line_count(agent.prompt)} lines</h3>
+            <p class="detail-text">{prompt_preview(agent.prompt)}</p>
+            <p class="preview-more" :if={hidden_line_count(agent.prompt, 2) > 0}>
+              ... {hidden_line_count(agent.prompt, 2)} more lines
+            </p>
+            <h3>Activity · last {length(recent_activity(agent))} of {length(agent.activity)}</h3>
+            <div class="activity-list">
+              <div :for={entry <- recent_activity(agent)} class="activity-row">
+                {activity_line(entry)}
+              </div>
+            </div>
             <p :if={agent.activity == []}>No activity recorded</p>
             <h3>Outcome</h3>
-            <pre>{inspect(agent.result)}</pre>
+            <p class="detail-text">{outcome_preview(agent)}</p>
           <% else %>
             <p :if={rejections == []}>No agent selected</p>
           <% end %>
@@ -551,6 +656,40 @@ defmodule Workflow.Web.RunLive do
   defp focused_phase(%Status{} = status, phase_id),
     do: Enum.find(status.phases, &(&1.id == phase_id))
 
+  defp phase_status(%Status{state: :failed, failure: %{address: address}}, phase) do
+    if Enum.any?(phase.agents, &List.starts_with?(address, &1.address)) do
+      "failed"
+    else
+      completed_or_pending_phase(phase)
+    end
+  end
+
+  defp phase_status(%Status{state: :completed}, phase), do: completed_or_pending_phase(phase)
+
+  defp phase_status(%Status{current_phase_id: current_phase_id}, %{id: current_phase_id} = phase) do
+    if Enum.any?(phase.agents, &(Map.get(&1, :status) in [:running, "running"])) do
+      "running"
+    else
+      completed_or_pending_phase(phase)
+    end
+  end
+
+  defp phase_status(_status, phase), do: completed_or_pending_phase(phase)
+
+  defp completed_count(phase) do
+    Enum.count(phase.agents, &(Map.get(&1, :status) in [:completed, "completed"]))
+  end
+
+  defp completed_or_pending_phase(%{agents: []}), do: "pending"
+
+  defp completed_or_pending_phase(%{agents: agents}) do
+    if Enum.all?(agents, &(Map.get(&1, :status) in [:completed, "completed"])) do
+      "completed"
+    else
+      "running"
+    end
+  end
+
   defp selected_agent(%Status{} = status, phase_id, agent_id) do
     status
     |> focused_phase(phase_id)
@@ -591,7 +730,7 @@ defmodule Workflow.Web.RunLive do
 
   defp agent_slug(agent) do
     slug =
-      agent.prompt
+      agent_title(agent)
       |> String.downcase()
       |> String.replace(~r/[^a-z0-9]+/, "-")
       |> String.trim("-")
@@ -609,7 +748,150 @@ defmodule Workflow.Web.RunLive do
 
   defp csrf_token, do: Plug.CSRFProtection.get_csrf_token()
 
+  defp agent_title(%{label: label}) when is_binary(label) and label != "", do: label
+
+  defp agent_title(%{prompt: prompt}),
+    do: prompt |> String.split(~r/\s+/, trim: true) |> Enum.take(4) |> Enum.join(" ")
+
+  defp agent_status(%{status: status}) when status in [:completed, "completed"], do: "completed"
+  defp agent_status(%{status: status}) when status in [:running, "running"], do: "running"
+  defp agent_status(%{status: status}) when status in [:failed, "failed"], do: "failed"
+  defp agent_status(_agent), do: "pending"
+
+  defp status_label(%{status: :completed}), do: "Completed"
+  defp status_label(%{status: "completed"}), do: "Completed"
+  defp status_label(%{status: :running}), do: "Running"
+  defp status_label(%{status: "running"}), do: "Running"
+  defp status_label(%{status: :failed}), do: "Failed"
+  defp status_label(%{status: "failed"}), do: "Failed"
+  defp status_label(_agent), do: "Running"
+
+  defp agent_meta(agent) do
+    [
+      "Codex",
+      format_tokens(total_tokens(Map.get(agent, :usage))),
+      plural_count(tool_count(agent), "tool")
+    ]
+    |> Enum.join(" · ")
+  end
+
+  defp recent_activity(agent), do: agent |> Map.get(:activity, []) |> Enum.take(-4)
+
+  defp activity_line(entry) do
+    case formatted_tool_call(entry) do
+      nil -> generic_activity_line(entry)
+      formatted -> formatted
+    end
+  end
+
+  defp generic_activity_line(entry) do
+    [activity_label(entry), activity_status(entry), activity_summary(entry)]
+    |> Enum.reject(&blank?/1)
+    |> Enum.join(" · ")
+  end
+
   defp activity_label(entry), do: Map.get(entry, :label) || Map.get(entry, "label") || "Activity"
   defp activity_status(entry), do: Map.get(entry, :status) || Map.get(entry, "status")
   defp activity_summary(entry), do: Map.get(entry, :summary) || Map.get(entry, "summary")
+
+  defp formatted_tool_call(entry) do
+    label = activity_label(entry)
+    summary = activity_summary(entry) || ""
+
+    cond do
+      String.downcase(label) in ["bash", "shell"] ->
+        "Bash(" <> truncate_arg(summary) <> ")"
+
+      String.downcase(label) == "command execution" ->
+        "Bash(" <> truncate_arg(shell_command_arg(summary)) <> ")"
+
+      true ->
+        nil
+    end
+  end
+
+  defp shell_command_arg(summary) do
+    case Regex.run(~r/(?:\/bin\/)?(?:zsh|bash|sh)\s+-lc\s+(.+)$/, summary) do
+      [_, arg] -> unquote_shell(arg)
+      _match -> summary
+    end
+  end
+
+  defp unquote_shell("'" <> rest) do
+    rest
+    |> String.trim_trailing("'")
+    |> String.replace("'\"'\"'", "'")
+  end
+
+  defp unquote_shell("\"" <> rest), do: String.trim_trailing(rest, "\"")
+  defp unquote_shell(text), do: text
+
+  defp truncate_arg(text) do
+    text = String.replace(to_string(text), ~r/\s+/, " ")
+
+    if String.length(text) <= 72 do
+      text
+    else
+      String.slice(text, 0, 72) <> "..."
+    end
+  end
+
+  defp prompt_preview(prompt), do: line_preview(prompt, 2, 220)
+
+  defp outcome_preview(%{result: result}),
+    do: result |> inspect(limit: 12, printable_limit: 900) |> line_preview(8, 260)
+
+  defp outcome_preview(_agent), do: "pending"
+
+  defp line_preview(text, max_lines, max_line_length) do
+    text
+    |> to_string()
+    |> String.split("\n")
+    |> Enum.take(max_lines)
+    |> Enum.map(&truncate_line(&1, max_line_length))
+    |> Enum.join("\n")
+  end
+
+  defp line_count(text), do: text |> to_string() |> String.split("\n") |> length()
+
+  defp hidden_line_count(text, visible) do
+    max(line_count(text) - visible, 0)
+  end
+
+  defp truncate_line(line, max_length) do
+    if String.length(line) <= max_length do
+      line
+    else
+      String.slice(line, 0, max_length) <> "..."
+    end
+  end
+
+  defp total_tokens(%{total_tokens: total}) when is_integer(total), do: total
+  defp total_tokens(%{"total_tokens" => total}) when is_integer(total), do: total
+  defp total_tokens(_usage), do: 0
+
+  defp tool_count(agent) do
+    agent
+    |> Map.get(:activity, [])
+    |> Enum.count(&tool_activity?/1)
+  end
+
+  defp tool_activity?(entry) do
+    kind = Map.get(entry, :kind) || Map.get(entry, "kind")
+    label = activity_label(entry)
+
+    kind == "tool" or
+      String.contains?(String.downcase(label), "command") or
+      String.contains?(String.downcase(label), "tool")
+  end
+
+  defp format_tokens(total) when total >= 1000 do
+    :erlang.float_to_binary(total / 1000, decimals: 1) <> "k tok"
+  end
+
+  defp format_tokens(total), do: "#{total} tok"
+
+  defp blank?(nil), do: true
+  defp blank?(""), do: true
+  defp blank?(_value), do: false
 end

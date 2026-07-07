@@ -2,8 +2,9 @@
 
 Codex Loops is a local, path-first workflow runner for Codex. The Elixir runtime
 executes deterministic `.exs` workflow scripts, records each run in a SQLite
-journal, and exposes `validate`, `test`, `run`, `resume`, `status`, `inspect`,
-and `list` through the `agent-loops` CLI.
+journal, and packages the local Phoenix workflow scheduler/API/UI as the
+`agent_loops` Mix release. The release keeps the compatible `agent-loops` CLI
+wrapper for `validate`, `test`, `run`, `resume`, `status`, `inspect`, and `list`.
 
 ## Quick Start
 
@@ -11,13 +12,19 @@ and `list` through the `agent-loops` CLI.
 make setup
 make test
 make release
+make proof
 ```
 
-The distributable CLI is built at:
+The distributable scheduler release is built at:
 
 ```sh
-_build/prod/rel/agent_loops/bin/agent-loops help
+_build/prod/rel/agent_loops/bin/agent_loops
 ```
+
+`make proof` is the production readiness path: it starts the packaged scheduler
+on an isolated local port and journal, checks health, validates a workflow
+through the API, starts a mock run through the API, reads status/events through
+the API, and fetches the run UI.
 
 ## Workflow Example
 
@@ -56,9 +63,9 @@ agent-loops run .codex/workflows/audit_workflow.exs \
 ```sh
 make setup       # install Hex/Rebar deps, Elixir deps, and Node workspace deps when pnpm exists
 make build       # compile with warnings as errors
-make test        # run the Elixir test suite
-make release     # build the self-contained Mix release
-make proof       # build release and run packaged validate/test/status/inspect
+make test        # run the Elixir scheduler/API/UI test suite
+make release     # build the self-contained scheduler Mix release
+make proof       # build release and prove scheduler API/UI readiness
 make proof-live  # build release and spend one real Codex provider turn
 ```
 
@@ -69,6 +76,10 @@ The repository includes `.tool-versions` for `mise`/`asdf` users.
 Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite` by default.
 Set `CODEX_LOOPS_JOURNAL_PATH=/path/to/runs.sqlite` to isolate a run, test, or
 proof.
+
+For local release proofs, set `CODEX_LOOPS_PROOF_HOST`,
+`CODEX_LOOPS_PROOF_PORT`, or `CODEX_LOOPS_PROOF_JOURNAL_PATH` to override the
+default `127.0.0.1:47125` proof server and temporary journal.
 
 ## Packages
 

@@ -8,7 +8,7 @@ config :codex_loops, Workflow.Journal,
   path:
     Path.join(
       System.tmp_dir!(),
-      "agent_loops_test_#{System.unique_integer([:positive])}.sqlite"
+      "agent_loops_test_#{System.system_time(:nanosecond)}_#{System.unique_integer([:positive])}.sqlite"
     )
 
 config :logger, level: :warning

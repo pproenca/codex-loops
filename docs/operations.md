@@ -6,11 +6,15 @@
 make setup
 make test
 make release
+make proof
 ```
 
 `make setup` installs Hex/Rebar, fetches Elixir dependencies, and installs the
 Node workspace when `pnpm` is available. `.tool-versions` pins the known-good
 local toolchain for `mise`/`asdf`.
+
+`make test` runs the scheduler/API/UI Elixir test suite. `make release` produces
+the distributable local scheduler artifact under `_build/prod/rel/agent_loops/`.
 
 ## Release Proof
 
@@ -18,14 +22,26 @@ local toolchain for `mise`/`asdf`.
 make proof
 ```
 
-This builds the Mix release and runs the packaged `agent-loops` command against
-a temporary workflow and SQLite journal:
+This builds the Mix release and exercises the scheduler readiness path. The
+proof starts the packaged Phoenix scheduler release on `127.0.0.1:47125` by
+default with an isolated SQLite journal, then:
 
 ```sh
-agent-loops validate <script> --json
-agent-loops test <script> --run-id <id> --json
-agent-loops status --run-id <id> --json
-agent-loops inspect --run-id <id> --json
+GET  /api/health
+POST /api/workflows/validate
+POST /api/runs
+GET  /api/runs/<id>
+GET  /api/runs/<id>/events
+GET  /runs/<id>
+```
+
+Override proof binding and journal isolation when needed:
+
+```sh
+CODEX_LOOPS_PROOF_HOST=127.0.0.1 \
+CODEX_LOOPS_PROOF_PORT=47126 \
+CODEX_LOOPS_PROOF_JOURNAL_PATH=/tmp/codex-loops-proof.sqlite \
+make proof
 ```
 
 ## Live Proof

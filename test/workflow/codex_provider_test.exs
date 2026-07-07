@@ -34,6 +34,7 @@ defmodule Workflow.CodexProviderTest do
   text =
     case mode do
       "echo" -> prompt
+      "activity" -> prompt
       "always_invalid" -> JSON.encode!(invalid)
       "retry" ->
         counter = Enum.at(rest, 0)
@@ -48,9 +49,22 @@ defmodule Workflow.CodexProviderTest do
       _ -> %{"input_tokens" => 1, "cached_input_tokens" => 0, "output_tokens" => 1, "reasoning_output_tokens" => 0}
     end
 
+  activity =
+    case mode do
+      "activity" ->
+        [
+          %{"type" => "item.completed", "item" => %{"id" => "r1", "type" => "reasoning", "text" => "Read the failing test"}},
+          %{"type" => "item.completed", "item" => %{"id" => "c1", "type" => "tool_call", "name" => "shell", "input" => %{"cmd" => "mix test test/workflow/codex_provider_test.exs"}}}
+        ]
+
+      _ ->
+        []
+    end
+
   for event <- [
         %{"type" => "thread.started", "thread_id" => "t1"},
-        %{"type" => "turn.started"},
+        %{"type" => "turn.started"}
+      ] ++ activity ++ [
         %{"type" => "item.completed", "item" => %{"id" => "i1", "type" => "agent_message", "text" => text}},
         %{"type" => "turn.completed", "usage" => usage}
       ] do
@@ -180,6 +194,31 @@ defmodule Workflow.CodexProviderTest do
     # event shape identical — only the backend module differs.
     assert types(mock_id) == types(codex_id)
     assert Status.of(mock_id).state == Status.of(codex_id).state
+  end
+
+  test "codex JSONL stream is normalized into concise committed activity", ctx do
+    id = run_id()
+
+    assert {:ok, ^id} = Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "activity"))
+
+    committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
+
+    assert committed.payload.result == "say hello"
+
+    assert committed.payload.activity == [
+             %{
+               kind: "reasoning",
+               label: "Reasoning",
+               summary: "Read the failing test",
+               status: "completed"
+             },
+             %{
+               kind: "tool",
+               label: "shell",
+               summary: "mix test test/workflow/codex_provider_test.exs",
+               status: "completed"
+             }
+           ]
   end
 
   test "a schema-backed turn against the real provider honours fail-closed retry", ctx do

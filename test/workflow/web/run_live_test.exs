@@ -11,7 +11,8 @@ defmodule Workflow.Web.RunLiveTest do
   import Phoenix.LiveViewTest
   import Plug.Conn, only: [put_req_header: 3]
 
-  alias Workflow.{Run, Status, Journal}
+  alias Workflow.{Run, Status, Journal, Event, IdempotencyKey}
+  alias Workflow.Provider.Usage
   alias Workflow.Test.{EchoProvider, GateProvider}
 
   @endpoint Workflow.Web.Endpoint
@@ -24,6 +25,116 @@ defmodule Workflow.Web.RunLiveTest do
       log("starting up")
       agent("say hello")
       return(:ok)
+    end
+  end
+
+  defmodule InspectorWorkflow do
+    use Workflow
+
+    workflow "inspector-demo" do
+      phase("plan")
+      agent("research")
+      phase("build")
+      agent("ship")
+      return(:ok)
+    end
+  end
+
+  defmodule RetryWorkflow do
+    use Workflow
+
+    workflow "retry-demo" do
+      phase("validate")
+
+      agent("classify",
+        schema: %{
+          "type" => "object",
+          "properties" => %{"label" => %{"type" => "string"}},
+          "required" => ["label"]
+        },
+        retries: 1
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule FailureWorkflow do
+    use Workflow
+
+    workflow "failure-demo" do
+      phase("validate")
+
+      agent("classify",
+        schema: %{
+          "type" => "object",
+          "properties" => %{"label" => %{"type" => "string"}},
+          "required" => ["label"]
+        },
+        retries: 0
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule ActivityProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, _key, opts) do
+      if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt})
+
+      activity = [
+        %{
+          kind: "reasoning",
+          label: "Reasoning",
+          summary: "Checked #{prompt}",
+          status: "completed"
+        }
+      ]
+
+      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
+       activity}
+    end
+  end
+
+  defmodule RetryActivityProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, key, opts) do
+      if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt, key.attempt})
+
+      case Keyword.fetch!(opts, :mode) do
+        :retry ->
+          retry_result(key.attempt)
+
+        :fail ->
+          {:ok, %{"bad" => true}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}, []}
+      end
+    end
+
+    defp retry_result(0) do
+      activity = [
+        %{
+          kind: "tool",
+          label: "Validator",
+          summary: "Checked malformed output",
+          status: "rejected"
+        }
+      ]
+
+      {:ok, %{"bad" => true}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
+       activity}
+    end
+
+    defp retry_result(_attempt) do
+      {:ok, %{"label" => "ok"}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}, []}
     end
   end
 
@@ -71,6 +182,10 @@ defmodule Workflow.Web.RunLiveTest do
     conn
     |> put_req_header("content-type", "application/json")
     |> post(path, Jason.encode!(body))
+  end
+
+  defp append_event(run_id, seq, %Event{} = event) do
+    :ok = Journal.append(run_id, seq, %{event | run_id: run_id, seq: seq})
   end
 
   defp wait_for_render(view, text, attempts \\ 50)
@@ -201,6 +316,232 @@ defmodule Workflow.Web.RunLiveTest do
     assert updated =~ "draft"
     assert updated =~ "api-started"
     assert has_element?(view, "[data-testid=agents] h2", "Agents (1)")
+  end
+
+  test "serves the browser LiveView client for inspector controls" do
+    id = run_id()
+
+    assert {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: {EchoProvider, sink: self()})
+
+    html =
+      conn()
+      |> get("/runs/#{id}")
+      |> html_response(200)
+
+    assert html =~ ~s(<meta name="csrf-token")
+    assert html =~ ~s(src="/assets/phoenix/phoenix.js")
+    assert html =~ ~s(src="/assets/phoenix_live_view/phoenix_live_view.js")
+    assert html =~ ~s(new LiveView.LiveSocket("/live", Phoenix.Socket)
+  end
+
+  test "renders a compact phase-focused run inspector with selected agent activity" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(InspectorWorkflow, run_id: id, provider: {ActivityProvider, sink: self()})
+
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+
+    assert has_element?(view, "[data-testid=run-header]", "inspector-demo")
+    assert has_element?(view, "[data-testid=run-header]", "completed")
+    assert has_element?(view, "[data-testid=agent-count]", "2 agents")
+    assert has_element?(view, "[data-testid=event-count]", "6")
+    assert has_element?(view, "[data-testid=usage]", "4")
+
+    assert has_element?(view, "[data-testid=phase-list]", "plan")
+    assert has_element?(view, "[data-testid=phase-list]", "build")
+    assert has_element?(view, "[data-testid=phase-agents]", "research")
+    refute render(view) =~ ~s(data-testid="phase-agent-ship")
+
+    assert has_element?(view, "[data-testid=agent-detail]", "Prompt")
+    assert has_element?(view, "[data-testid=agent-detail]", "research")
+    assert has_element?(view, "[data-testid=agent-detail]", "Activity")
+    assert has_element?(view, "[data-testid=agent-detail]", "Checked research")
+    assert has_element?(view, "[data-testid=agent-detail]", "Outcome")
+    assert has_element?(view, "[data-testid=agent-detail]", ~s("echo" => "research"))
+
+    view
+    |> element("[data-testid=phase-item][phx-value-id=phase-1]", "build")
+    |> render_click()
+
+    assert has_element?(view, "[data-testid=phase-agents]", "ship")
+    refute render(view) =~ ~s(data-testid="phase-agent-research")
+    assert has_element?(view, "[data-testid=agent-detail]", "Checked ship")
+  end
+
+  test "selected agent detail shows rejected retry attempts with reason and activity" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(RetryWorkflow,
+               run_id: id,
+               provider: {RetryActivityProvider, sink: self(), mode: :retry}
+             )
+
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+
+    assert has_element?(view, "[data-testid=agent-detail]", "classify")
+    assert has_element?(view, "[data-testid=agent-detail]", "Rejected attempts")
+    assert has_element?(view, "[data-testid=agent-detail]", "attempt 0")
+    assert has_element?(view, "[data-testid=agent-detail]", "missing_required")
+    assert has_element?(view, "[data-testid=agent-detail]", "Checked malformed output")
+    assert has_element?(view, "[data-testid=agent-detail]", ~s("label" => "ok"))
+  end
+
+  test "failed runs without a committed agent still render rejected attempt and failure info" do
+    id = run_id()
+
+    assert {:error, {:malformed_output, [1], {:missing_required, "label"}}} =
+             Run.run(FailureWorkflow,
+               run_id: id,
+               provider: {RetryActivityProvider, sink: self(), mode: :fail}
+             )
+
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+
+    assert has_element?(view, "[data-testid=run-state]", "failed")
+    assert has_element?(view, "[data-testid=agent-detail]", "Rejected attempts")
+    assert has_element?(view, "[data-testid=agent-detail]", "attempt 0")
+    assert has_element?(view, "[data-testid=agent-detail]", "missing_required")
+    assert has_element?(view, "[data-testid=agent-detail]", "No activity recorded")
+    assert has_element?(view, "[data-testid=failure]", "failed at [1]")
+    assert has_element?(view, "[data-testid=failure]", "missing_required")
+  end
+
+  test "same-address loop agents are selectable by iteration and keep rejections separate" do
+    id = run_id()
+    usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+    node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
+
+    append_event(id, 0, Event.phase_entered(%Workflow.Node.Phase{address: [0], name: "loop"}))
+
+    append_event(
+      id,
+      1,
+      Event.agent_attempt_rejected(
+        node,
+        0,
+        0,
+        %{"bad" => 0},
+        {:missing_required, "label"},
+        usage,
+        [%{kind: "tool", label: "Validator", summary: "first rejection", status: "rejected"}]
+      )
+    )
+
+    append_event(
+      id,
+      2,
+      Event.agent_committed(
+        node,
+        0,
+        %IdempotencyKey{run_id: id, node_path: [1], iteration: 0},
+        %{"label" => "zero"},
+        usage
+      )
+    )
+
+    append_event(
+      id,
+      3,
+      Event.agent_attempt_rejected(
+        node,
+        1,
+        0,
+        %{"bad" => 1},
+        {:missing_required, "label"},
+        usage,
+        [%{kind: "tool", label: "Validator", summary: "second rejection", status: "rejected"}]
+      )
+    )
+
+    append_event(
+      id,
+      4,
+      Event.agent_committed(
+        node,
+        1,
+        %IdempotencyKey{run_id: id, node_path: [1], iteration: 1},
+        %{"label" => "one"},
+        usage
+      )
+    )
+
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+
+    assert has_element?(view, "[data-testid=phase-agent-loop-work-i0]")
+    assert has_element?(view, "[data-testid=phase-agent-loop-work-i1]")
+    assert render(view) =~ ~s(phx-value-id="agent-1-i0")
+    assert render(view) =~ ~s(phx-value-id="agent-1-i1")
+
+    assert has_element?(view, "[data-testid=agent-detail]", ~s("label" => "zero"))
+    assert has_element?(view, "[data-testid=agent-detail]", "first rejection")
+    refute render(view) =~ "second rejection"
+
+    view
+    |> element("[data-testid=phase-agent-loop-work-i1] button")
+    |> render_click()
+
+    assert has_element?(view, "[data-testid=agent-detail]", ~s("label" => "one"))
+    assert has_element?(view, "[data-testid=agent-detail]", "second rejection")
+    refute render(view) =~ "first rejection"
+  end
+
+  test "failed rejected-only loop iteration remains visible while committed iteration is selected" do
+    id = run_id()
+    usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+    node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
+
+    append_event(id, 0, Event.phase_entered(%Workflow.Node.Phase{address: [0], name: "loop"}))
+
+    append_event(
+      id,
+      1,
+      Event.agent_committed(
+        node,
+        0,
+        %IdempotencyKey{run_id: id, node_path: [1], iteration: 0},
+        %{"label" => "zero"},
+        usage
+      )
+    )
+
+    append_event(
+      id,
+      2,
+      Event.agent_attempt_rejected(
+        node,
+        1,
+        0,
+        %{"bad" => 1},
+        {:missing_required, "label"},
+        usage,
+        [
+          %{
+            kind: "tool",
+            label: "Validator",
+            summary: "failed iteration rejection",
+            status: "rejected"
+          }
+        ]
+      )
+    )
+
+    append_event(
+      id,
+      3,
+      Event.agent_failed(node, 1, 1, {:missing_required, "label"})
+    )
+
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+
+    assert has_element?(view, "[data-testid=phase-agent-loop-work-i0]")
+    assert has_element?(view, "[data-testid=agent-detail]", ~s("label" => "zero"))
+    assert has_element?(view, "[data-testid=agent-detail]", "Failed attempts")
+    assert has_element?(view, "[data-testid=agent-detail]", "iteration 1")
+    assert has_element?(view, "[data-testid=agent-detail]", "failed iteration rejection")
+    assert has_element?(view, "[data-testid=agent-detail]", ~s("bad" => 1))
+    assert has_element?(view, "[data-testid=agent-detail]", "missing_required")
   end
 
   test "scheduler API rejects run ids that cannot be opened by the LiveView route" do

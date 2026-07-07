@@ -584,19 +584,30 @@ defmodule Workflow.Run.Writer do
 
   defp commit_attempt(%Agent{schema: nil} = node, run_id, provider, ctx, iteration, attempt) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, result, usage} = call_provider(provider, node.prompt, nil, key)
-    seq = commit(run_id, ctx.seq, Event.agent_committed(node, iteration, key, result, usage))
+    {:ok, result, usage, activity} = call_provider(provider, node.prompt, nil, key)
+
+    seq =
+      commit(
+        run_id,
+        ctx.seq,
+        Event.agent_committed(node, iteration, key, result, usage, activity)
+      )
+
     {:cont, %{ctx | seq: seq, last_result: result}}
   end
 
   defp commit_attempt(%Agent{} = node, run_id, provider, ctx, iteration, attempt) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, output, usage} = call_provider(provider, node.prompt, node.schema, key)
+    {:ok, output, usage, activity} = call_provider(provider, node.prompt, node.schema, key)
 
     case Schema.validate(node.schema, output) do
       {:ok, validated} ->
         seq =
-          commit(run_id, ctx.seq, Event.agent_committed(node, iteration, key, validated, usage))
+          commit(
+            run_id,
+            ctx.seq,
+            Event.agent_committed(node, iteration, key, validated, usage, activity)
+          )
 
         {:cont, %{ctx | seq: seq, last_result: validated}}
 
@@ -605,7 +616,15 @@ defmodule Workflow.Run.Writer do
           commit(
             run_id,
             ctx.seq,
-            Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage)
+            Event.agent_attempt_rejected(
+              node,
+              iteration,
+              attempt,
+              output,
+              reason,
+              usage,
+              activity
+            )
           )
 
         if attempt < node.retries do
@@ -637,21 +656,22 @@ defmodule Workflow.Run.Writer do
 
   defp build_attempt(%Agent{schema: nil} = node, run_id, provider, iteration, attempt, _acc) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, result, usage} = call_provider(provider, node.prompt, nil, key)
-    {:ok, [Event.agent_committed(node, iteration, key, result, usage)], result}
+    {:ok, result, usage, activity} = call_provider(provider, node.prompt, nil, key)
+    {:ok, [Event.agent_committed(node, iteration, key, result, usage, activity)], result}
   end
 
   defp build_attempt(%Agent{} = node, run_id, provider, iteration, attempt, acc) do
     key = key(run_id, node.address, iteration, attempt)
-    {:ok, output, usage} = call_provider(provider, node.prompt, node.schema, key)
+    {:ok, output, usage, activity} = call_provider(provider, node.prompt, node.schema, key)
 
     case Schema.validate(node.schema, output) do
       {:ok, validated} ->
-        committed = Event.agent_committed(node, iteration, key, validated, usage)
+        committed = Event.agent_committed(node, iteration, key, validated, usage, activity)
         {:ok, Enum.reverse([committed | acc]), validated}
 
       {:error, reason} ->
-        rejected = Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage)
+        rejected =
+          Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity)
 
         if attempt < node.retries do
           build_attempt(node, run_id, provider, iteration, attempt + 1, [rejected | acc])
@@ -676,7 +696,12 @@ defmodule Workflow.Run.Writer do
     do: Enum.reduce(events, seq, fn event, seq -> commit(run_id, seq, event) end)
 
   defp call_provider({module, opts}, prompt, schema, key),
-    do: module.run_agent(prompt, schema, key, opts)
+    do: normalize_provider_result(module.run_agent(prompt, schema, key, opts))
+
+  defp normalize_provider_result({:ok, result, usage}), do: {:ok, result, usage, []}
+
+  defp normalize_provider_result({:ok, result, usage, activity}),
+    do: {:ok, result, usage, activity}
 
   defp materialize_agent(%Agent{} = node, run_id) do
     %{node | prompt: materialize_prompt(node, run_id)}

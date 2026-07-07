@@ -58,7 +58,14 @@ defmodule Workflow.Event do
     %__MODULE__{type: :log_emitted, payload: %{address: node.address, message: node.message}}
   end
 
-  def agent_committed(%Workflow.Node.Agent{} = node, iteration, key, result, usage) do
+  def agent_committed(
+        %Workflow.Node.Agent{} = node,
+        iteration,
+        key,
+        result,
+        usage,
+        activity \\ []
+      ) do
     %__MODULE__{
       type: :agent_committed,
       payload: %{
@@ -67,7 +74,8 @@ defmodule Workflow.Event do
         idempotency_key: key,
         prompt: node.prompt,
         result: result,
-        usage: usage
+        usage: usage,
+        activity: activity
       }
     }
   end
@@ -83,7 +91,8 @@ defmodule Workflow.Event do
         attempt,
         output,
         reason,
-        usage
+        usage,
+        activity \\ []
       ) do
     %__MODULE__{
       type: :agent_attempt_rejected,
@@ -94,7 +103,8 @@ defmodule Workflow.Event do
         prompt: node.prompt,
         output: output,
         reason: reason,
-        usage: usage
+        usage: usage,
+        activity: activity
       }
     }
   end

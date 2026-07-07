@@ -1,7 +1,10 @@
 # Codex Loops Plugin
 
-Codex Loops provides one Codex skill for authoring, validating, executing, and
-inspecting local Elixir workflow files through the `agent-loops` CLI.
+Codex Loops provides one Codex skill plus a local Elixir MCP adapter for authoring,
+validating, executing, and inspecting local Elixir workflow files. The MCP
+adapter is the Codex-facing surface: it talks to the scheduler HTTP API and can
+start the packaged scheduler release when no local scheduler is already
+reachable.
 
 ## Install
 
@@ -19,7 +22,32 @@ codex plugin add codex-loops@codex-loops
 
 Start a new Codex thread after installing so the `codex-loops` skill is loaded.
 
-## CLI Surface
+## MCP Surface
+
+The plugin includes a local stdio MCP entrypoint at
+`plugins/codex-loops/mcp/codex-loops-mcp`. It launches the packaged Elixir
+release and runs `Workflow.MCP.Stdio`.
+It exposes:
+
+- `workflow_validate`: validates a workflow through `POST /api/workflows/validate`
+
+Before the tool call, the MCP adapter checks `GET /api/health`. If the scheduler
+is unreachable, it discovers a packaged release from:
+
+1. `CODEX_LOOPS_SCHEDULER_BIN`
+2. `plugins/codex-loops/scheduler/bin/agent_loops`
+3. `_build/prod/rel/agent_loops/bin/agent_loops`
+
+`make release` builds the production Mix release and copies it into
+`plugins/codex-loops/scheduler/` so the plugin package can be copied or
+installed without depending on the source repository's `_build` directory.
+
+When it owns the scheduler lifecycle, it starts the release with
+`CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
+`RELEASE_NODE`, and unique `RELEASE_TMP`. `CODEX_LOOPS_JOURNAL_PATH` is passed
+through when present.
+
+## Legacy CLI Surface
 
 ```bash
 agent-loops validate <script> [--json]
@@ -33,7 +61,9 @@ agent-loops list [--limit <n>] [--json]
 agent-loops help
 ```
 
-`workflow` aliases `run`; `test` is always offline and mock-backed.
+`workflow` aliases `run`; `test` is always offline and mock-backed. This direct
+terminal wrapper remains for compatibility and release proofing while Codex uses
+the MCP adapter as the product control surface.
 
 ## Workflow Scripts
 
@@ -71,10 +101,13 @@ make setup
 make test
 make release
 make proof
+make proof-mcp
 ```
 
 `make proof-live` spends one real Codex provider turn through the packaged
-release.
+release. `make proof-mcp` exercises MCP initialize, tools/list, lifecycle
+startup, and validation from a copied plugin package against its packaged
+scheduler release.
 
 ## License
 

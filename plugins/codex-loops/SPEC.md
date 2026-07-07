@@ -2,13 +2,15 @@
 
 ## Purpose
 
-Provide one Codex skill for authoring, validating, testing, executing, and
-inspecting local Elixir workflow scripts with the `agent-loops` CLI.
+Provide one Codex skill plus a local Elixir MCP adapter for authoring, validating,
+testing, executing, and inspecting local Elixir workflow scripts.
 
 The plugin is deliberately thin. The Elixir runtime owns runner behavior; the
 skill teaches when to use it, how to write compatible `.exs` workflow scripts,
 how to run validation and mock-test gates, and how to relay journal-backed
-lifecycle state.
+lifecycle state. The MCP adapter is the Codex-facing surface: it reaches the
+scheduler only through the published HTTP API and never reads SQLite or calls
+internal scheduler modules directly.
 
 ## Public Surface
 
@@ -16,7 +18,11 @@ Skill:
 
 - `codex-loops`
 
-CLI commands:
+MCP tools:
+
+- `workflow_validate`
+
+Legacy CLI commands:
 
 ```bash
 agent-loops validate <script> [--json]
@@ -32,7 +38,24 @@ agent-loops help
 
 `workflow` aliases `run`. `test` is always mock-backed. `run`, `workflow`, and
 `resume` default to the live `codex` provider unless `--provider mock` is
-supplied.
+supplied. The plugin product surface is MCP; this direct terminal wrapper
+remains only as a compatibility and release-proofing path during the rewrite.
+
+MCP behavior:
+
+- stdio JSON-RPC transport with newline-delimited messages
+- `initialize`, `tools/list`, `tools/call`, and notifications
+- `workflow_validate` input schema requires `script_path`
+- `tools/call` health-checks `GET /api/health` before validation
+- when health fails, the server discovers and starts a packaged scheduler
+  release before retrying validation
+- scheduler success envelopes are returned as MCP `structuredContent`
+- scheduler typed errors remain typed and are returned as MCP `isError: true`
+- scheduler lifecycle failures use MCP-friendly `scheduler_unavailable` or
+  `scheduler_start_failed` envelopes with actionable details
+- `make release` assembles the scheduler release into
+  `plugins/codex-loops/scheduler/` so the MCP adapter can run from a copied
+  plugin package without a sibling source `_build` directory
 
 ## Artifact-Aware Authoring
 
@@ -115,10 +138,13 @@ Development and proof commands:
 make setup
 make test
 make proof
+make proof-mcp
 make proof-live
 ```
 
 `make proof-live` spends one real Codex provider turn through the packaged
+release. `make proof-mcp` copies the plugin package to a temp install location
+and proves MCP lifecycle plus validation against the copied package's scheduler
 release.
 
 ## Safety And Testing

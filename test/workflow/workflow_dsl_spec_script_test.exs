@@ -1,7 +1,9 @@
 defmodule Workflow.WorkflowDslSpecScriptTest do
   use ExUnit.Case, async: true
 
-  alias Workflow.Node.{Agent, FanOut, Parallel, Pipeline}
+  alias Workflow.Node.{Agent, FanOut, Parallel, Pipeline, UntilDry, WhileBudget}
+  alias Workflow.Node.Collect
+  alias Workflow.Predicate.{Compare, Count}
   alias Workflow.Script
   alias Workflow.Tree
 
@@ -20,11 +22,29 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
 
     prompts = tree |> agent_prompts() |> Enum.join("\n---PROMPT---\n")
 
+    refute prompts =~ "/Users/"
     assert prompts =~ ~s|Extract GROUND TRUTH for the "spec-structure" area|
     assert prompts =~ "SURGICAL EDIT — DO NOT REWRITE SPEC.md"
     assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
     assert prompts =~ "Resolve these final cold-read defects with TARGETED edits to §10 only"
-    assert prompts =~ "Finalize the SPEC.md §10 insertion for HUMAN REVIEW — do NOT commit anything"
+
+    assert prompts =~
+             "Finalize the SPEC.md §10 insertion for HUMAN REVIEW — do NOT commit anything"
+  end
+
+  test "convergence loop stops when the panel reaches consensus" do
+    assert {:ok, %Tree{nodes: nodes}} = Script.load_tree(@script_path)
+
+    assert %WhileBudget{
+             until: %Compare{op: :>=, left: %Count{acc: :consensus}, right: 1},
+             max_iterations: 5,
+             body: body
+           } = Enum.find(nodes, &match?(%WhileBudget{}, &1))
+
+    assert Enum.any?(body, &match?(%Collect{into: :consensus}, &1))
+
+    prompts = body |> agent_prompts() |> Enum.join("\n---PROMPT---\n")
+    assert prompts =~ "CONSENSUS GATE"
   end
 
   defp phase_names(nodes) do
@@ -49,6 +69,8 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   end
 
   defp agent_prompts(%FanOut{body: body}), do: agent_prompts(body)
+  defp agent_prompts(%UntilDry{body: body}), do: agent_prompts(body)
+  defp agent_prompts(%WhileBudget{body: body}), do: agent_prompts(body)
   defp agent_prompts(_node), do: []
 
   defp contains_function?(term) when is_function(term), do: true

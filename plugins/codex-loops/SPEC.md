@@ -140,13 +140,16 @@ Expected authoring loop:
    and concrete expected outputs.
 5. Add adversarial verification and a final build or test gate for mutating
    workflows.
-6. Run `validate` and `test`; run live Codex only after approval.
+6. Run `workflow_validate` and a mock `workflow_start`; run live Codex only
+   after approval.
 
 ## Journal And Runtime
 
 Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`, unless
-`CODEX_LOOPS_JOURNAL_PATH` is set. `status`, `inspect`, `list`, and `resume`
-are folds over the journal. Completed nodes replay from the journal on resume.
+`CODEX_LOOPS_JOURNAL_PATH` is set. Scheduler status, inspect, and resume
+projections are folds over the journal. Completed nodes replay from the journal
+on resume. The compatible CLI-only `list` command is also a journal fold, but it
+is not exposed as an MCP product tool.
 
 The live provider shells out to `codex exec --json --skip-git-repo-check`.
 Schema-backed agents pass `--output-schema`; the writer validates outputs and
@@ -158,8 +161,12 @@ The production artifact is a Mix release:
 
 ```bash
 make release
-_build/prod/rel/agent_loops/bin/agent-loops help
+test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
+
+The MCP adapter launches the generated `agent_loops` release script when it
+owns scheduler lifecycle. The compatible `agent-loops` wrapper remains only for
+terminal diagnostics, legacy scripts, and release-wrapper proofing.
 
 Development and proof commands:
 
@@ -188,14 +195,17 @@ packaged-release live proof.
 
 Every executable workflow must pass:
 
-```bash
-agent-loops validate .codex/workflows/<name>.exs --json
-agent-loops test .codex/workflows/<name>.exs --run-id <id> --json
+```text
+workflow_validate script_path=.codex/workflows/<name>.exs
+workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_status   run_id=<id>
+workflow_inspect  run_id=<id>
 ```
 
 Generated workflows that can mutate files should return closed plans or declare
 live write scope, exact file paths, and verification commands before the caller
 authorizes live execution.
 
-When a `--json` invocation fails, parse the last stderr line as the JSON error
-object instead of scraping prose diagnostics.
+When an MCP tool fails, preserve its typed scheduler error envelope. When a
+legacy `--json` terminal invocation fails, parse the last stderr line as the
+JSON error object instead of scraping prose diagnostics.

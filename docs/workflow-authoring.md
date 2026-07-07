@@ -54,18 +54,18 @@ asks for another path.
 
 ## Testing Gate
 
-```sh
-agent-loops validate .codex/workflows/<name>.exs --json
-agent-loops test .codex/workflows/<name>.exs --run-id <id> --json
+```text
+workflow_validate script_path=.codex/workflows/<name>.exs
+workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_status   run_id=<id>
+workflow_inspect  run_id=<id>
 ```
 
 Only run the live provider after validation and mock testing:
 
-```sh
-agent-loops run .codex/workflows/<name>.exs \
-  --run-id <id> \
-  --provider codex \
-  --json
+```text
+workflow_start  script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
+workflow_status run_id=<id-live>
 ```
 
 ## Resume
@@ -73,6 +73,10 @@ agent-loops run .codex/workflows/<name>.exs \
 Resume replays the event log and reuses completed nodes. Failed runs can be
 retried with:
 
-```sh
-agent-loops resume --run-id <id> --provider codex --json
+```text
+workflow_resume run_id=<id> provider=codex
+workflow_status run_id=<id>
 ```
+
+The `agent-loops` command can still perform the same operations from a terminal
+for compatibility and diagnostics, but agents should prefer the MCP tools.

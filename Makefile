@@ -1,4 +1,4 @@
-.PHONY: setup test build release proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: setup test spec-lint build release proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -9,8 +9,11 @@ setup:
 	mix local.rebar --if-missing --force
 	mix deps.get
 
-test:
+test: spec-lint
 	mix test
+
+spec-lint:
+	scripts/check-spec.sh SPEC.md
 
 build:
 	mix compile --warnings-as-errors

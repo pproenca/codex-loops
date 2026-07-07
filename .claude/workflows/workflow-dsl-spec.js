@@ -1,11 +1,11 @@
 export const meta = {
   name: 'workflow-dsl-spec',
-  description: 'Author SPEC.md — the full, implementable specification of the codex-loops workflow DSL — anchored to the real compiler, structured on the language-spec-author 8-part anatomy, hardened by an adversarial panel (spec-completeness + implementation-fidelity + invariants + teachability + structural-lint) that revises until all lenses agree. Carries the Proposed `refine` combinator AND the Proposed Tier-1 dataflow extension (Template/let/injection/emit + Principle 6→6′), each grounded in SPEC-DATAFLOW-PROPOSAL.md and specified as not-yet-implemented until its tracer-bullet slices land in lib/.',
+  description: 'SURGICALLY insert (and harden) a Proposed "§10 — Tier-1 dataflow" section into the EXISTING, already-hardened SPEC.md — never rewriting §1–§9. Maps the current doc, lifts the ADOPT/DEFER/REJECT content faithfully from the adversarially-converged SPEC-DATAFLOW-PROPOSAL.md, renumbers the authoring guide, and adds non-destructive forward-references (Principle 6→6′ etc.). An adversarial panel (completeness + fidelity + invariants + teachability + structural-lint + a non-destructiveness diff-guard against HEAD) revises the DELTA ONLY until unanimous. Leaves the change uncommitted for human review — no auto-commit. As dataflow slices land in lib/, a landed idiom moves from the Proposed §10 into the implemented body.',
   phases: [
-    { title: 'Ground truth', detail: 'extract the real vocabulary/semantics from lib/' },
-    { title: 'Draft', detail: 'assemble the initial SPEC.md from dossier + skills' },
-    { title: 'Converge', detail: 'adversarial panel revises until unanimous' },
-    { title: 'Finalize', detail: 'lint, cold-read, commit' },
+    { title: 'Ground truth', detail: 'map the existing SPEC.md structure + extract the dataflow proposal' },
+    { title: 'Draft', detail: 'SURGICALLY insert §10 dataflow into the existing SPEC.md — never rewrite §1–§9' },
+    { title: 'Converge', detail: 'panel reviews the DELTA (+ a non-destructiveness diff-guard) until unanimous' },
+    { title: 'Finalize', detail: 'lint, diff-guard, cold-read the new §10; report the diff (NO auto-commit)' },
   ],
 }
 
@@ -137,61 +137,61 @@ const REVIEW_SCHEMA = {
 
 // ---- Phase 0: ground truth (parallel read-only readers write dossiers to disk) ----
 phase('Ground truth')
-log('Extracting the real DSL vocabulary + semantics from lib/')
+log('SPEC.md already exists — mapping its structure + extracting the dataflow proposal for a SURGICAL insert (NOT a rewrite)')
 
+// Surgical mode: SPEC.md §1–§9 is ALREADY authored, hardened, and committed. We are ADDING a §10 dataflow section, not
+// re-deriving the language. So the readers only (a) map the existing doc so the insert renumbers/cross-references correctly,
+// and (b) extract the dataflow proposal. The implemented-vocabulary body is taken from the existing SPEC.md verbatim.
 const READERS = [
-  { area: 'vocabulary', files: 'lib/workflow/compiler.ex, lib/workflow.ex', ask: 'the exact closed combinator vocabulary, each combinator\'s accepted argument shapes/options, and the thin-macro->parse/2 split' },
-  { area: 'nodes-tree', files: 'lib/workflow/node.ex, lib/workflow/tree.ex', ask: 'every node struct, its fields, the tree shape, node addressing, and how templates (verify voters / judge scorers / fan_out) are pre-expanded' },
-  { area: 'validation', files: 'lib/workflow/compiler.ex, lib/workflow/compiler/finding.ex, test/workflow/compiler_test.exs', ask: 'every compile-time validation rule the compiler enforces and its located-finding message — with the smallest failing input for each' },
-  { area: 'execution', files: 'lib/workflow/run/writer.ex, lib/workflow/run.ex, lib/workflow/idempotency.ex, lib/workflow/predicate.ex, lib/workflow/ledger.ex', ask: 'the interpreter execution algorithm per node type, the loop/budget/dryness termination semantics, exactly-once keys, resume, and the error model' },
-  { area: 'output', files: 'lib/workflow/journal.ex, lib/workflow/event.ex, lib/workflow/status.ex, lib/workflow/cli.ex', ask: 'the journal event schema/versions, the status fold, the result/output shape, and the exit-code + JSON contract' },
-  { area: 'usage', files: 'lib/workflow/catalog/*.ex, test/workflow/*run*.exs', ask: 'the canonical authored-workflow examples and how each combinator is actually written by an author' },
+  { area: 'spec-structure', files: 'SPEC.md (the EXISTING committed spec at repo root), and ' + `${LSA}/scripts/check-spec.sh`, ask: 'a precise structural map of the CURRENT SPEC.md: the full section/heading outline with line ranges; exactly where §9 (Proposed refine) ends and the next section begins; the current number + title of the authoring-guide section and every internal cross-reference that a new §10 insertion would force to renumber; the Appendix B grammar-summary structure; and the exact shipped clauses a Proposed dataflow section must add non-destructive FORWARD-REFERENCES to (Principle 6, §1.2 General-computation Non-goal, §6.4.1 provider port, §7.2/§7.3 prompt payload, §8 conformance C1/C9, the §2.4 / §10.2 closed-vocabulary list). Quote each anchor line verbatim so the insert can target it exactly. This is a MAP, not a critique — do not propose rewrites.' },
   { area: 'dataflow', files: `${DATAFLOW_PROPOSAL} (read in full), plus grep lib/ for any LANDED dataflow constructs (a %Template{} / Node.Emit struct, a ~P sigil, a \`let\` form, binding_env threading in compiler.ex, a widened RenderText)`, ask: 'the Proposed Tier-1 dataflow extension exactly as SPEC-DATAFLOW-PROPOSAL.md specifies it — the ADOPT idioms (Template layer, let, prompt injection, emit) with their surface grammar / inert node struct / validation rules+counter-examples / execution algorithm / journal shape, the DEFER (gather, map) and REJECT (reduce, select) verdicts, the Principle 6→6′ reconciliation and the EXACT set of amended clauses (§1.2′, C9′, §6.4.1′, §6.4-commit′/§7.2′/§7.3′, closed-vocabulary 13→17) — AND a precise landed-vs-proposal INVENTORY: for each idiom, state whether it is ALREADY implemented in lib/ (cite the module/struct) or still proposal-only. This inventory decides which idioms the draft folds into the implemented body vs keeps in the Proposed section.' },
 ]
 
 const dossiers = (await parallel(READERS.map((r) => () =>
   agent(
-    `Extract GROUND TRUTH from this repository for the "${r.area}" area of the workflow DSL. Read ${r.files} (and grep as needed).
-Report ${r.ask}. Be exhaustive and PRECISE — exact module/function names, arities, option keys, struct fields, event names.
-This becomes the anchor for a formal spec, so every fact must be verifiable in the source; do not infer or embellish.
+    `Extract GROUND TRUTH for the "${r.area}" area, to anchor a SURGICAL insertion of a Proposed §10 dataflow section into the EXISTING SPEC.md.
+Read ${r.files} (and grep as needed). Report ${r.ask}. Be exhaustive and PRECISE — exact headings, line ranges, section numbers, struct fields, event names, and verbatim anchor lines.
 Then WRITE your findings to ${WORKSHOP}/${r.area}.md (create the dir if needed) as clean markdown, and return the structured summary.`,
     { label: `read:${r.area}`, phase: 'Ground truth', model: 'opus', effort: 'high', schema: DOSSIER_SCHEMA }
   )
 ))).filter(Boolean)
 
-// ---- Phase 1: initial draft ----
+// ---- Phase 1: surgical insert (NOT a rewrite) ----
 phase('Draft')
-log(`Ground truth captured for ${dossiers.length} areas; drafting SPEC.md`)
+log(`Structure mapped for ${dossiers.length} areas; SURGICALLY inserting §10 dataflow into the existing SPEC.md`)
 
 await agent(
   `${SPEC_METHOD}${META_RULES}
-Author the INITIAL DRAFT of SPEC.md at the repository root — the full, implementable specification of the codex-loops workflow DSL.
-Ground truth for the IMPLEMENTED language has been written to ${WORKSHOP}/*.md — read ALL of them; every normative statement about the
-implemented vocabulary MUST match that ground truth (and thus the real source). Also model the doc's structure on ${LSA}/assets/templates/spec-template.md
-and keep it lint-clean for ${LSA}/scripts/check-spec.sh (all 8 parts present, RFC 2119 keywords, counter-examples for validation rules).
+SURGICAL EDIT — DO NOT REWRITE SPEC.md. SPEC.md at the repo root is an ALREADY-AUTHORED, adversarially-hardened, committed spec (§1–§9
+plus an authoring guide). Your ONLY job is to ADD a new Proposed "§10 — Tier-1 dataflow extension" and make the minimum non-destructive
+edits that insertion forces. You MUST preserve every existing section BYTE-FOR-BYTE except: (a) the new §10 you insert, (b) the section
+NUMBER of the current authoring-guide section (it shifts from §10 to §11) and any in-doc cross-reference to it, and (c) a small set of
+one-line non-destructive FORWARD-REFERENCE notes into shipped clauses (see below). NOTHING ELSE in §1–§9 or the authoring guide's prose
+may change — do not reword, reorder, "improve", re-derive, or re-lint the existing body. This is an Edit/insert task, never a Write of the whole file.
 
-Cover, as normative-and-verified-against-code: purpose & principles (closed vocabulary, determinism-by-absence, journal-as-truth,
-fail-closed, bounded termination, no value binding, inert tree); lexical notes (it is embedded Elixir — state what that means for tokens/literals);
-the syntactic grammar of the workflow block and EVERY combinator (agent, log, phase, parallel, pipeline, return, collect, while_budget,
-until_dry, verify, judge, synthesize, fan_out + budget_slices) in formal notation; the semantic model (%Tree{}/%Node{} inert shapes + addressing);
-the validation rules WITH counter-examples; the execution algorithms + error model; the journal-event/output/exit-code format; and conformance.
+Read (do NOT skip): the CURRENT SPEC.md in full; the structure map at ${WORKSHOP}/spec-structure.md (it gives you the exact anchor lines
+and the cross-references to renumber); the dataflow dossier at ${WORKSHOP}/dataflow.md; and ${DATAFLOW_PROPOSAL} (the authoritative,
+already-converged source for the §10 content — lift its ADOPT normative content faithfully, re-expressed in THIS SPEC.md's notation/voice).
 
-Then add clearly-delimited "Proposed extensions (not yet implemented)" sections for TWO extensions:
-  (§9) the \`refine\` combinator, using this design verbatim as its basis:
-${REFINE_DESIGN}
-  (§10) the Tier-1 DATAFLOW extension, using this design as its basis and grounding EVERY normative statement in ${DATAFLOW_PROPOSAL}
-        and ${WORKSHOP}/dataflow.md (read both):
+Do exactly this, with targeted edits:
+1. INSERT "## 10. Proposed extensions — Tier-1 dataflow (NOT YET IMPLEMENTED)" immediately AFTER §9 (Proposed refine) and BEFORE the
+   authoring-guide section. Spec the ADOPT idioms (Template layer, \`let\`, prompt injection, \`emit\`, pipeline-with-dataflow) to the full
+   8-part bar, mark the DEFER idioms (\`gather\`, \`map\`) deferred, and record the REJECT idioms (\`reduce\`, \`select\`/\`when\`) with rationale,
+   all grounded in ${DATAFLOW_PROPOSAL}. Use this design as the scaffold:
 ${DATAFLOW_DESIGN}
-Order them §9 refine then §10 dataflow, and renumber the authoring guide accordingly. EXCEPTION per the dataflow dossier's
-landed-vs-proposal inventory: any dataflow idiom the dossier reports as ALREADY implemented in lib/ MUST be folded into the
-implemented normative body (held to code fidelity) and REMOVED from the Proposed §10; if every ADOPT idiom has landed, keep §10
-only for the still-unbuilt DEFER idioms (gather, map) and the REJECT record. Present the Principle 6→6′ and other amendments as
-PROPOSED (forward-references only) for any idiom still in §10, and as implemented normative text for any idiom that has landed.
+2. RENUMBER the existing authoring-guide section from §10 to §11 (and its subsections), and update every internal reference to it. Do not touch its content.
+3. ADD non-destructive one-line forward-reference notes (blockquote or parenthetical, clearly marked "Proposed §10") into these shipped clauses
+   WITHOUT altering their existing normative text: Principle 6 (→ proposed 6′), §1.2 General-computation Non-goal, §6.4.1 provider port,
+   §7.2/§7.3 prompt payload, §8 conformance (C1/C9), and the §2.4 / §10.2-now-§11.2 closed-vocabulary list. Each note POINTS AT §10; it does
+   not restate or rewrite the clause.
+4. LANDED EXCEPTION: if the dataflow dossier reports an ADOPT idiom as ALREADY implemented in lib/, fold THAT idiom into the implemented body
+   as normative (code-verified) text instead of the Proposed §10, and make the corresponding amendment normative rather than a forward-reference.
+   (With nothing landed yet, everything stays Proposed in §10.)
 
-Finally, because this SPEC.md will ALSO teach agents to author workflows, include an "Authoring guide for agents" section: how to write a valid
-workflow, the closed vocabulary at a glance, the top mistakes the compiler rejects (with the fix), and 2-3 worked use-cases end to end.
-Write the file. Return a one-paragraph summary of what you wrote and any part you marked N/A.`,
-  { label: 'draft:spec', phase: 'Draft', model: 'opus', effort: 'high' }
+After editing, run \`git --no-pager diff --stat HEAD -- SPEC.md\` and confirm the change is ADDITIVE (insertions dominate; deletions limited to
+the §10→§11 renumber and the added forward-ref anchor lines). Return: a one-paragraph summary of the inserted §10, the list of clauses you added
+forward-refs to, and the diff --stat line. If you find yourself rewriting more than the four items above, STOP and report why instead.`,
+  { label: 'insert:dataflow-section', phase: 'Draft', model: 'opus', effort: 'high' }
 )
 
 // ---- Phase 2: adversarial convergence until unanimous ----
@@ -202,7 +202,8 @@ const LENSES = [
   { key: 'fidelity', model: 'opus', prompt: `${META_RULES}\nLENS: IMPLEMENTATION FIDELITY. For every normative claim about the IMPLEMENTED vocabulary, verify it against the REAL source (grep lib/workflow/*.ex and ${WORKSHOP}/*.md). A defect is any spec statement the code contradicts, any combinator option/arg shape that is wrong, any node field/event name that doesn't exist. The \`refine\` Proposed section AND any dataflow idiom the dataflow dossier (${WORKSHOP}/dataflow.md) reports as NOT-yet-landed are EXEMPT from "must match code" (design-stage), but must still be internally consistent and FAITHFUL to ${DATAFLOW_PROPOSAL} (a claim that contradicts the proposal is a defect). Any dataflow idiom the dossier reports as ALREADY landed in lib/ is NOT exempt: it must match the real source, and if the draft left it in the Proposed section instead of the implemented body that misplacement is a defect. If code and spec disagree, the CODE is right — the spec is the defect.` },
   { key: 'invariants', model: 'opus', prompt: `${META_RULES}\nLENS: INVARIANTS. A defect is any place the spec states or implies something that violates: inert closure-free tree, determinism-by-absence, journal-as-sole-truth (no process state), exactly-once effects, bounded/terminating loops, validate-in-parse-at-compile-time. Also flag any execution algorithm whose determinism or replay-safety is not actually guaranteed by what the spec says. NOTE the Tier-1 dataflow section DELIBERATELY amends "no value binding" to Principle 6′ (journaled-values-only, deterministic-render-only); do NOT flag that amendment itself as an invariant violation, but DO verify 6′ genuinely preserves the listed invariants — flag any dataflow construct whose closure-freedom, determinism-by-absence, journal-as-sole-truth, exactly-once, or bounded termination is not actually guaranteed by what the spec says (e.g. an unpinned inspect-map render order, a template hole that could admit non-journaled data, a bound value read before its producer commits, an unbounded map).` },
   { key: 'teachability', model: 'opus', prompt: `${SPEC_METHOD}\nLENS: TEACHABILITY. This SPEC.md must let an agent author a NEW correct workflow with no access to the code. TEST IT: from SPEC.md alone, write a fresh workflow that exercises a non-trivial use-case (e.g. a review-gated pipeline, the proposed refine, or a dataflow flow that binds an output with \`let\`, injects it into a downstream agent's \`~P\` prompt, and renders a terminal with \`emit\`). Would it compile under the rules as written? Every ambiguity that forced you to guess, every combinator you couldn't use correctly from the doc, is a defect.` },
-  { key: 'structural', model: 'opus', prompt: `LENS: STRUCTURAL LINT. Run ${LSA}/scripts/check-spec.sh on SPEC.md (bash). Report every FAIL/WARN as a defect (missing section, unresolved TODO/placeholder, missing grammar notation, absent RFC 2119 keywords, missing counter-examples). Also check cross-reference closure: every algorithm/type/term a section uses must be defined somewhere in the doc — a dangling reference is a defect.` },
+  { key: 'structural', model: 'opus', prompt: `LENS: STRUCTURAL LINT. Run ${LSA}/scripts/check-spec.sh on SPEC.md (bash). Report every FAIL/WARN as a defect (missing section, unresolved TODO/placeholder, missing grammar notation, absent RFC 2119 keywords, missing counter-examples). Also check cross-reference closure: every algorithm/type/term the NEW §10 uses must be defined somewhere in the doc — a dangling reference is a defect. Do NOT report pre-existing check-spec.sh findings that also fire on the committed HEAD version (those predate this change); only NEW findings the §10 insertion introduced.` },
+  { key: 'nondestructive', model: 'opus', prompt: `LENS: NON-DESTRUCTIVENESS (the safety guard). Run \`git --no-pager diff HEAD -- SPEC.md\` (bash). This change MUST be ADDITIVE. The ONLY permitted modifications to pre-existing content are: (a) the inserted §10 dataflow section, (b) renumbering the authoring-guide section §10→§11 and updating references to it, and (c) the small set of clearly-marked one-line "Proposed §10" forward-reference notes appended to shipped clauses (Principle 6, §1.2, §6.4.1, §7.2/§7.3, §8, the closed-vocabulary list). ANY OTHER deletion, rewording, reordering, or "improvement" of the existing §1–§9 or authoring-guide prose is a BLOCKING defect — report each such hunk with its diff context and demand it be reverted to the HEAD text. A wholesale rewrite (large deletion counts, the body shrinking) is the top defect this lens exists to catch. Also flag if the diff shows the file was truncated or a section went missing.` },
 ]
 
 const MAX_ROUNDS = 5
@@ -216,7 +217,7 @@ while (round < MAX_ROUNDS) {
 
   const reviews = (await parallel(LENSES.map((l) => () =>
     agent(
-      `${l.prompt}\n\nAdversarially review the CURRENT SPEC.md at the repository root (read it fresh; grep the source and ${WORKSHOP}/ as your lens requires). Assume it is defective until proven otherwise. Return pass=false with concrete, located defects if you find ANY; pass=true only if this lens is fully satisfied.`,
+      `${l.prompt}\n\nSCOPE — this run only ADDED a Proposed §10 dataflow section to an already-hardened SPEC.md. Treat §1–§9 and the authoring guide as FROZEN and authoritative: do NOT propose edits to them, and do NOT re-litigate pre-existing wording. Confine your defects to (i) the NEW §10 content, (ii) the renumbering/forward-reference edits, and (iii) any place the §10 insertion INTRODUCED an inconsistency with the frozen body. (The non-destructiveness lens is the exception — it audits the whole diff.)\n\nAdversarially review the CURRENT SPEC.md at the repository root (read it fresh; read ${WORKSHOP}/ and the committed HEAD version as your lens requires). Assume the delta is defective until proven otherwise. Return pass=false with concrete, located defects if you find ANY in scope; pass=true only if this lens is fully satisfied.`,
       { label: `review:${l.key}#${round}`, phase: 'Converge', model: l.model, effort: 'high', schema: REVIEW_SCHEMA }
     )
   ))).filter(Boolean)
@@ -230,46 +231,59 @@ while (round < MAX_ROUNDS) {
     break
   }
 
-  // Reviser: sequential, edits SPEC.md in place to resolve every defect.
+  // Reviser: SURGICAL — resolves defects in the delta only; §1–§9 and the authoring guide stay frozen.
   await agent(
     `${SPEC_METHOD}${META_RULES}
-The adversarial panel REJECTED the current SPEC.md. Revise the file IN PLACE to resolve EVERY defect below without regressing other parts.
-Preserve the ground truth in ${WORKSHOP}/*.md as authoritative for the implemented vocabulary; keep the \`refine\` section and every NOT-yet-landed dataflow idiom (per ${WORKSHOP}/dataflow.md's landed-vs-proposal inventory) labeled Proposed, while keeping any LANDED dataflow idiom in the implemented body held to code fidelity.
+The adversarial panel found defects in the §10 dataflow insertion. Resolve EVERY defect below with TARGETED edits. This remains a surgical
+change: §1–§9 and the authoring-guide prose are FROZEN — the only content you may edit is the new §10, the §10→§11 renumber, and the marked
+forward-reference notes. If a non-destructiveness defect says an existing hunk was altered, REVERT that hunk to its committed HEAD text
+(\`git --no-pager show HEAD:SPEC.md\` is the source of truth). Keep every NOT-yet-landed dataflow idiom labeled Proposed; keep any LANDED idiom
+(per ${WORKSHOP}/dataflow.md) in the implemented body held to code fidelity.
 Defects (${openDefects.length}):
 ${openDefects.map((d, i) => `${i + 1}. [${d.lens} · ${d.part}] ${d.issue}\n   Fix: ${d.fix}`).join('\n')}
-Edit SPEC.md and return a one-line summary of the revisions.`,
+Edit SPEC.md with targeted edits and return a one-line summary of the revisions.`,
     { label: `revise#${round}`, phase: 'Converge', model: 'opus', effort: 'high' }
   )
 }
 
-// ---- Phase 3: finalize (lint + cold-read + commit) ----
+// ---- Phase 3: finalize (lint + diff-guard + cold-read of §10; NO auto-commit) ----
 phase('Finalize')
 
-// Cold-read: a stranger implementer looks for any question they'd have to ask.
+// Cold-read: a stranger implementer reads ONLY the new §10 for questions they'd have to ask.
 const coldRead = await agent(
-  `${SPEC_METHOD}\nYou are a developer with ZERO prior context, handed SPEC.md to implement the workflow DSL from scratch. Read it end to end.
-List every question you would have to ask the authors to build a conforming implementation — each such question is a defect. If you have none, say so explicitly.
-Return pass=true only if you could implement the whole language (minus the clearly-Proposed refine section) with no further questions.`,
-  { label: 'cold-read', phase: 'Finalize', model: 'opus', effort: 'high', schema: REVIEW_SCHEMA }
+  `${SPEC_METHOD}\nYou are a developer with ZERO prior context, handed the NEW "§10 — Tier-1 dataflow" section of SPEC.md to implement (the rest of the
+spec is already accepted). Read §10 end to end (and the shipped clauses it forward-references). List every question you would have to ask the authors
+to build the ADOPT idioms from §10 alone — each is a defect. Return pass=true only if §10's ADOPT idioms are implementable with no further questions.`,
+  { label: 'cold-read:section-10', phase: 'Finalize', model: 'opus', effort: 'high', schema: REVIEW_SCHEMA }
 )
 
 if (coldRead && !coldRead.pass && (coldRead.defects || []).length) {
-  log(`Cold-read surfaced ${coldRead.defects.length} question(s); final revision`)
+  log(`Cold-read surfaced ${coldRead.defects.length} question(s) on §10; final surgical revision`)
   await agent(
-    `Resolve these final cold-read defects in SPEC.md in place, then confirm:\n${coldRead.defects.map((d, i) => `${i + 1}. [${d.part}] ${d.issue}\n   Fix: ${d.fix}`).join('\n')}`,
+    `Resolve these final cold-read defects with TARGETED edits to §10 only (§1–§9 and the authoring guide stay frozen), then confirm:\n${coldRead.defects.map((d, i) => `${i + 1}. [${d.part}] ${d.issue}\n   Fix: ${d.fix}`).join('\n')}`,
     { label: 'revise:cold-read', phase: 'Finalize', model: 'opus', effort: 'high' }
   )
 }
 
-const commit = await agent(
-  `Finalize SPEC.md for commit on the current branch. Run bash ${LSA}/scripts/check-spec.sh SPEC.md and paste its verdict. Ensure ${WORKSHOP}/ is NOT committed (add it to .gitignore). Then \`git add SPEC.md .gitignore\` and \`git commit\` with first line "spec: SPEC.md — full implementable workflow DSL specification" and a body noting the adversarial-convergence provenance. Confirm with \`git log --oneline -1\` and return that line plus the check-spec.sh verdict.`,
-  { label: 'commit:spec', phase: 'Finalize', model: 'opus', effort: 'low' }
+// Verify + report the diff. DO NOT COMMIT — the diff is left in the working tree for human review.
+const report = await agent(
+  `Finalize the SPEC.md §10 insertion for HUMAN REVIEW — do NOT commit anything. Steps:
+1. Run \`bash ${LSA}/scripts/check-spec.sh SPEC.md\` and capture its verdict.
+2. Run \`git --no-pager diff --stat HEAD -- SPEC.md\` and \`git --no-pager diff HEAD -- SPEC.md | head -c 4000\`.
+3. VERIFY the change is additive+surgical: the pre-existing §1–§9 and authoring-guide text is unchanged except the §10 insertion, the §10→§11
+   renumber, and the marked forward-reference notes. If ANY other pre-existing hunk changed, say so loudly as a REGRESSION.
+4. Ensure ${WORKSHOP}/ is gitignored (append to .gitignore if missing) — do not stage or commit it.
+Return: the check-spec.sh verdict, the diff --stat line, an explicit surgical/additive PASS or REGRESSION verdict, and a one-paragraph description
+of what §10 adds. Leave SPEC.md modified-but-uncommitted.`,
+  { label: 'verify:diff-no-commit', phase: 'Finalize', model: 'opus', effort: 'low' }
 )
 
 return {
+  mode: 'surgical-insert',
+  committed: false,
   converged,
   rounds: round,
   final_open_defects: converged ? [] : openDefects,
   cold_read_clean: !!(coldRead && coldRead.pass),
-  commit: (commit || '').slice(0, 300),
+  finalize_report: (report || '').slice(0, 1200),
 }

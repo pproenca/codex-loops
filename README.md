@@ -78,6 +78,7 @@ make test        # run the Elixir scheduler/API/UI test suite
 make release     # build the self-contained scheduler Mix release
 make proof       # build release and prove scheduler API/UI readiness
 make proof-mcp   # prove copied plugin MCP lifecycle with mock scheduler-owned run
+make dogfood     # prove MCP, reinstall the local plugin, and print the fresh-thread prompt
 make proof-live  # alias for proof-mcp-live; spends one real Codex provider turn through MCP
 ```
 

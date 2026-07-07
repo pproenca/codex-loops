@@ -1,4 +1,4 @@
-.PHONY: setup test build release proof proof-live proof-mcp clean-release
+.PHONY: setup test build release proof proof-live proof-release-live proof-mcp proof-mcp-live clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -28,11 +28,16 @@ release:
 proof: release
 	scripts/proof-release.sh
 
-proof-live: release
+proof-live: proof-mcp-live
+
+proof-release-live: release
 	scripts/proof-release-live.sh
 
 proof-mcp: release
 	MIX_ENV=dev mix run --no-start scripts/proof-mcp-validate.exs
+
+proof-mcp-live: release
+	MIX_ENV=dev mix run --no-start scripts/proof-mcp-live.exs
 
 clean-release:
 	rm -rf _build/prod/rel/$(RELEASE_NAME)

@@ -38,6 +38,50 @@ defmodule Workflow.SchedulerTest do
     """)
   end
 
+  defp codex_stub_source do
+    """
+    #!/bin/sh
+    cat >/dev/null
+    printf '%s\\n' '{"type":"thread.started","thread_id":"scheduler-stub"}'
+    printf '%s\\n' '{"type":"turn.started"}'
+    printf '%s\\n' '{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"LIVE-MCP-PROOF-OK"}}'
+    printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":0,"output_tokens":11,"reasoning_output_tokens":0}}'
+    """
+  end
+
+  defp with_codex_stub(fun) when is_function(fun, 0) do
+    dir =
+      Path.join(System.tmp_dir!(), "scheduler_codex_stub_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(dir)
+
+    stub = Path.join(dir, "codex")
+    File.write!(stub, codex_stub_source())
+    File.chmod!(stub, 0o755)
+
+    previous_path = System.get_env("PATH")
+    System.put_env("PATH", dir <> path_separator() <> (previous_path || ""))
+
+    try do
+      fun.()
+    after
+      if previous_path do
+        System.put_env("PATH", previous_path)
+      else
+        System.delete_env("PATH")
+      end
+
+      File.rm_rf(dir)
+    end
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _name} -> ";"
+      _other -> ":"
+    end
+  end
+
   defp two_agent_workflow do
     write_workflow(~S"""
     workflow "scheduler-two-agents" do
@@ -523,10 +567,11 @@ defmodule Workflow.SchedulerTest do
     assert error.details.reason =~ "unknown combinator `frobnicate`"
 
     assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.resume_run(id, %{"script_path" => path, "provider" => "codex"})
+             Scheduler.resume_run(id, %{"script_path" => path, "provider" => "bogus"})
 
     assert error.status == 400
     assert error.code == "scheduler.run.invalid_provider"
+    assert error.details == %{field: "provider", supported: ["mock", "codex"]}
   end
 
   @tag :capture_log
@@ -604,6 +649,27 @@ defmodule Workflow.SchedulerTest do
     assert projection.workflow_name == "scheduler-demo"
   end
 
+  test "starts a codex-provider run through the scheduler context with a hermetic CLI on PATH" do
+    with_codex_stub(fn ->
+      path = demo_workflow()
+      id = run_id("scheduler_codex")
+
+      assert {:ok, start} =
+               Scheduler.start_run(%{
+                 "script_path" => path,
+                 "run_id" => id,
+                 "provider" => "codex"
+               })
+
+      assert start.run_id == id
+      assert start.state == :accepted
+
+      projection = wait_for_projection(id)
+      assert projection.workflow_name == "scheduler-demo"
+      assert projection.usage.total_tokens == 18
+    end)
+  end
+
   test "start returns a typed error for missing workflow scripts" do
     path =
       Path.join(
@@ -619,15 +685,15 @@ defmodule Workflow.SchedulerTest do
     assert error.details.path == path
   end
 
-  test "start rejects providers other than mock for this API slice" do
+  test "start rejects unsupported providers with supported-provider details" do
     path = demo_workflow()
 
     assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.start_run(%{"script_path" => path, "provider" => "codex"})
+             Scheduler.start_run(%{"script_path" => path, "provider" => "bogus"})
 
     assert error.status == 400
     assert error.code == "scheduler.run.invalid_provider"
-    assert error.details == %{field: "provider", supported: ["mock"]}
+    assert error.details == %{field: "provider", supported: ["mock", "codex"]}
   end
 
   test "start rejects invalid budgets as typed input errors" do

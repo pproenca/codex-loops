@@ -25,13 +25,13 @@ defmodule Workflow.Scheduler.Error do
     }
   end
 
-  @spec invalid_provider() :: t()
-  def invalid_provider do
+  @spec invalid_provider([String.t()]) :: t()
+  def invalid_provider(supported) do
     %__MODULE__{
       status: 400,
       code: "scheduler.run.invalid_provider",
       message: "Unsupported run provider.",
-      details: %{field: "provider", supported: ["mock"]}
+      details: %{field: "provider", supported: supported}
     }
   end
 

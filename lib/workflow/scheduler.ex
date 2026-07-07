@@ -19,6 +19,7 @@ defmodule Workflow.Scheduler do
   }
 
   @app :codex_loops
+  @supported_providers ["mock", "codex"]
 
   @spec health() :: {:ok, Health.t()} | {:error, Error.t()}
   def health do
@@ -208,7 +209,8 @@ defmodule Workflow.Scheduler do
     case fetch_param(params, :provider, "provider") do
       :missing -> {:ok, Provider.select(:mock, [])}
       {:ok, provider} when provider in ["mock", :mock] -> {:ok, Provider.select(:mock, [])}
-      {:ok, _unsupported} -> {:error, Error.invalid_provider()}
+      {:ok, provider} when provider in ["codex", :codex] -> {:ok, Provider.select(:codex, [])}
+      {:ok, _unsupported} -> {:error, Error.invalid_provider(@supported_providers)}
     end
   end
 

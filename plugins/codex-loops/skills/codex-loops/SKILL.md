@@ -142,7 +142,15 @@ For this repo:
 make setup
 make test
 make proof
+make proof-mcp
+make proof-mcp-live
+make proof-live
 ```
 
-`make proof-live` builds the release and spends one real Codex provider turn
-through the packaged `agent-loops` command.
+`make proof-mcp` proves MCP lifecycle handling, validation, mock start, status,
+inspect, resume, scheduler typed errors, and open-ui against a copied plugin
+package. `make proof-mcp-live` validates through MCP, starts or reuses the
+packaged scheduler through MCP lifecycle handling, starts a live
+`provider: "codex"` run through `workflow_start`, polls `workflow_status`, and
+asserts nonzero token usage from the scheduler projection. It spends one real
+Codex provider turn. `make proof-live` aliases `make proof-mcp-live`.

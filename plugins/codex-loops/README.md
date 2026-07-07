@@ -36,6 +36,12 @@ It exposes:
 - `workflow_status`: reads the scheduler projection through
   `GET /api/runs/:id`, preserving run id, state, result, failure, usage, and UI
   link fields.
+- `workflow_inspect`: reads ordered scheduler event projections through
+  `GET /api/runs/:id/events`, preserving the scheduler event sequence, type, and
+  public address fields.
+- `workflow_resume`: resumes an existing scheduler-owned run through
+  `POST /api/runs/:id/resume`. Inputs are `run_id`, optional `script_path` or
+  scheduler-supported `script` alias, and optional `provider` (`mock`).
 - `workflow_open_ui`: reads the run projection and returns `ui_path`, `ui_url`,
   and an absolute `open_url` for the Phoenix LiveView run page.
 
@@ -119,8 +125,9 @@ make proof-mcp
 
 `make proof-live` spends one real Codex provider turn through the packaged
 release. `make proof-mcp` exercises MCP initialize, tools/list, lifecycle
-startup, validation, mock start, status polling, and open-ui response from a
-copied plugin package against its packaged scheduler release.
+startup, validation, mock start, status polling, event inspection, resume,
+typed scheduler errors, and open-ui response from a copied plugin package
+against its packaged scheduler release.
 
 ## License
 

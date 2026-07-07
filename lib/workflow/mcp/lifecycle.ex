@@ -34,17 +34,17 @@ defmodule Workflow.MCP.Lifecycle do
   def stop_owned(%{owned_scheduler: nil} = state), do: state
 
   def stop_owned(%{owned_scheduler: scheduler} = state) do
-    unless port_exited?(scheduler) do
-      {_output, _status} =
-        System.cmd(scheduler.release_bin, ["stop"],
-          cd: scheduler.cwd,
-          env: scheduler.env,
-          stderr_to_stdout: true
-        )
+    {_output, _status} =
+      System.cmd(scheduler.release_bin, ["stop"],
+        cd: scheduler.cwd,
+        env: scheduler.env,
+        stderr_to_stdout: true
+      )
 
-      if Process.alive?(self()) and not port_exited?(scheduler) do
-        Port.close(scheduler.port)
-      end
+    scheduler = wait_for_port_exit(scheduler, 50)
+
+    if Process.alive?(self()) and not port_exited?(scheduler) do
+      Port.close(scheduler.port)
     end
 
     %{state | owned_scheduler: nil}
@@ -240,6 +240,19 @@ defmodule Workflow.MCP.Lifecycle do
         %{scheduler | exit_status: status}
     after
       0 -> scheduler
+    end
+  end
+
+  defp wait_for_port_exit(scheduler, 0), do: collect_scheduler_messages(scheduler)
+
+  defp wait_for_port_exit(scheduler, attempts_left) do
+    scheduler = collect_scheduler_messages(scheduler)
+
+    if port_exited?(scheduler) do
+      scheduler
+    else
+      Process.sleep(100)
+      wait_for_port_exit(scheduler, attempts_left - 1)
     end
   end
 

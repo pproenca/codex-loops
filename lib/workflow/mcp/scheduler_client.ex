@@ -59,6 +59,16 @@ defmodule Workflow.MCP.SchedulerClient do
     scheduler_request(:get, "/api/runs/" <> path_segment(run_id))
   end
 
+  @spec get_run_events(String.t()) :: scheduler_result()
+  def get_run_events(run_id) when is_binary(run_id) do
+    scheduler_request(:get, "/api/runs/" <> path_segment(run_id) <> "/events")
+  end
+
+  @spec resume_run(String.t(), map()) :: scheduler_result()
+  def resume_run(run_id, attrs \\ %{}) when is_binary(run_id) and is_map(attrs) do
+    scheduler_request(:post, "/api/runs/" <> path_segment(run_id) <> "/resume", attrs)
+  end
+
   defp scheduler_request(method, path, body \\ nil) do
     case request(method, path, body) do
       {:ok, status, %{"api_version" => "scheduler.v1", "data" => _data} = payload}

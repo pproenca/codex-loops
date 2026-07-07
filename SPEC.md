@@ -2916,10 +2916,14 @@ carry only the one-line forward-reference notes that point here.
   `EffectivePrompt(node, run_id, lane) :: String.t()` (§10.6) in the `prompt` payload of **every**
   prompt-bearing agent event it writes — **both** `agent_committed.prompt` **and**
   `agent_attempt_rejected.prompt` — in place of `node.prompt` (which holds the inert `%Template{}`
-  struct). `agent_failed` has no `prompt` key and is untouched. `EffectivePrompt` is provably
-  stable across attempts (producers commit before the consumer runs, §10.4 Rule T.5), so a
-  rejected attempt and the eventual commit journal a byte-identical string; the §7.3 `agents`
-  projection therefore always surfaces a rendered `String.t()`, never a struct.
+  struct). `agent_failed` has no `prompt` key and is untouched. `EffectivePrompt` renders from
+  the **same** journaled producer terms on every attempt (producers commit before the consumer
+  runs, §10.4 Rule T.5); for a **binary** binding — or any binding rendered on the same host
+  `inspect/1` — the rejected attempt and the eventual commit therefore journal a byte-identical
+  string, and for a **non-binary** binding under a cross-version resume they are identical only up
+  to the §10.4.5 `inspect/1` host/version caveat (map-key order is not canonical across Elixir
+  versions). Either way the §7.3 `agents` projection surfaces a rendered `String.t()`, never a
+  struct. (Authors needing byte-identity across hosts bind **binary** values, per §10.4.5.)
 - **§8 C9 → C9′.** An implementation MUST require that every value flowed into a prompt or
   terminal result is (a) committed to the journal by a lexically-preceding node and resolved by a
   pure fold, and (b) rendered by the deterministic, closure-free `RenderText`. Interpolation,
@@ -2983,7 +2987,7 @@ CommentTag :: `<%#` TagBody `%>`
 LiteralEscapeTag :: `<%%` TagBody `%>`
 TagBody :: (SourceCharacter but not the sequence `%>`)*
 AssignName :: Letter (Letter | Digit | `_`)*   ; recognizer ~r/\A@([A-Za-z][A-Za-z0-9_]*)\z/
-TemplateWS :: WhiteSpace | LineTerminator       ; §2.1 lexemes — space, tab, line terminators
+TemplateWS :: ' ' | '\t' | '\n' | '\r'          ; space, tab, line terminators (literal characters)
 ```
 
 The sigil **delimiter** (`~P"…"`, `~P"""…"""`, `~P[…]`, `~P/…/`, …) is Elixir's own concern and
@@ -2999,10 +3003,10 @@ closed by `%>` before end-of-template is a compile error (Rule T.6), not a fallb
 
 ```
 %Workflow.Template{
-  segments :: [Segment],   ; ordered; the template lowered to data
+  segments :: [TemplateSegment],   ; ordered; the template lowered to data
   assigns  :: [atom()]     ; ordered set (first-appearance) of distinct assign names referenced
 }
-Segment :: {:text, String.t()} | {:assign, atom()}
+TemplateSegment :: {:text, String.t()} | {:assign, atom()}
 ```
 
 - Every `{:text, …}` is a **binary** (a slice of `raw`), never a charlist, so §10.4.5's render is
@@ -3309,11 +3313,12 @@ against `lane.index` (§10.11). **This is an explicit extension of the §6.4/§6
 trailing `lane` parameter** (its base callers pass `nil`; only the §10.9.2 map lane runner passes
 `%{index: e}`) — without it `EffectivePrompt`/`RenderTemplate` are undefined for a
 `{:element, over}` binding, so a map lane referencing `@element` would have no index to index by.
-The materialized string is journaled verbatim **at commit** (never re-rendered on replay, DF-P3)
-and is byte-identical across a node's attempts (producers commit before the consumer runs, Rule
-T.5), so a rejected attempt and the eventual commit journal the same prompt string. This is
-admitted by the amended provider port §6.4.1′ (§10.3): `CallProvider` still receives only
-`(prompt, schema, key, opts)`.
+The materialized string is journaled verbatim **at commit** (never re-rendered on replay, DF-P3).
+Because producers commit before the consumer runs (Rule T.5), every attempt renders from the same
+journaled terms, so a rejected attempt and the eventual commit journal a byte-identical prompt for
+**binary** bindings (and for **non-binary** bindings only up to the §10.4.5 `inspect/1`
+host/version caveat under a cross-version resume). This is admitted by the amended provider port
+§6.4.1′ (§10.3): `CallProvider` still receives only `(prompt, schema, key, opts)`.
 
 **10.6.5 Journal events. None new** — the rendered prompt rides the existing
 `agent_committed.prompt` (and `agent_attempt_rejected.prompt`), per §6.4-commit′ / §7.2′ / §7.3′.
@@ -3460,7 +3465,16 @@ generalized from **literal** to **journaled** inputs.
   `RunAgent`. By the same choice `gather` needs no schema/retries and reduces to one schemaless agent
   turn at runtime; an implementation MAY carry a thin distinct `%Gather{}` producer struct through
   compilation (as `synthesize` carries `%Node.Synthesize{}`), which is why §10.5.2 lists `%Gather{}`
-  among the producer structs. Addressing and idempotency are an ordinary agent's.
+  among the producer structs. When carried, its fields mirror `%Emit{}` (§10.7.2) — a rendered
+  template over bound values:
+
+```
+%Workflow.Node.Gather{ address :: address(), template :: %Template{}, bindings :: %{atom() => BindingRef} }
+```
+
+  It is escapable (addresses + inert `%Template{}` only, zero closures); `bindings` is materialized
+  from `template.assigns` against `binding_env` exactly as `%Agent{}`/`%Emit{}` (§10.6.2/§10.7.2).
+  Addressing and idempotency are an ordinary agent's.
 - **Validation.** Assigns resolve (Rules T.4/T.5); no schema/retries options in Tier 1;
   top-level-only (mirroring `let` Rule L.4). `gather(~P"Summarize <%= @missing %>")` with no
   binding is rejected.
@@ -3480,11 +3494,11 @@ and the **only** two new journal events in the whole extension. Single-agent lan
 - **Grammar.**
 
 ```
-MapStmt : `map` ElementName `,` MapOpts `do` AgentLane `end`
+MapStmt : `map` ElementName `,` MapOpts `do` MapLane `end`
 ElementName : BindingRefAtom
 MapOpts : MapOpt (`,` MapOpt)*     ; unordered keyword list
 MapOpt : `over:` BindingRefAtom (REQUIRED) | `max:` IntegerLiteral (REQUIRED) | `max_concurrency:` IntegerLiteral (OPTIONAL)
-AgentLane : AgentStmt              ; EXACTLY ONE agent per lane (Tier-1)
+MapLane : AgentStmt                ; EXACTLY ONE agent per map lane (Tier-1); distinct from §3.9's `AgentLane : AgentStmt+`
 ```
 
 - **Struct.**
@@ -3510,7 +3524,7 @@ AgentLane : AgentStmt              ; EXACTLY ONE agent per lane (Tier-1)
     unexpressible; `max:` is a structural termination cap resolved at compile time, never a binding
     or a computed expression. Counter-example: `map :x, over: :xs, max: budget do agent(~P"<%= @x %>") end`
     — non-literal `max:` — REJECTED.
-  - **Rule M.3 — the lane body is exactly one agent** (`AgentLane`, Tier-1; multi-stage lanes are
+  - **Rule M.3 — the lane body is exactly one agent** (`MapLane`, Tier-1; multi-stage lanes are
     Tier-2). Counter-example: `map :x, over: :xs, max: 3 do agent(~P"a <%= @x %>"); agent(~P"b <%= @x %>") end`
     — two lane stages — REJECTED.
   - **Rule M.4 — `map` is top-level-only** (mirroring `let` Rule L.4; bindings resolve at
@@ -3540,10 +3554,8 @@ AgentLane : AgentStmt              ; EXACTLY ONE agent per lane (Tier-1)
 
 ```
 RunMap(node, run_id, provider, prior, ctx):
-  - Let {list} be ResolveRef(node.over, run_id, nil).      ; {:node} list-valued OR {:map} ordered list — DF-M5
-  - Let {width} be min(length(list), node.max).
+  - Let {width, seq} be DecideMapWidth(node, run_id, prior, ctx.seq).   ; replay-verbatim on resume; resolves+journals `over` only on the fresh path
   - Let {cap} be node.max_concurrency or max(width, 1).    ; OPTIONAL max_concurrency (Rule M.7); nil ⇒ all lanes at once, mirroring §6.9 RunParallel
-  - Let {seq} be CommitMarker(map_started, node, prior, ctx.seq).   ; payload %{address, over, observed_length: length(list), width, max: node.max}; keyed (type, address), idempotent on resume (§6.3)
   - Let {lanes} be the List [ {the lane agent re-addressed node.address ++ [e, 0], %{index: e}} for e in 0..(width - 1) ].
   - Let {results} be RunConcurrently(lanes, cap, fn {lane_agent, lane} ->
       BuildAgent(lane_agent, run_id, provider, prior, lane) end).   ; lane threaded into §10.6.4 EffectivePrompt
@@ -3551,6 +3563,15 @@ RunMap(node, run_id, provider, prior, ctx):
   - If {r} is {:ok, seq'}:
     - Return {:cont, ctx with seq = CommitMarker(map_completed, node, prior, seq')}.   ; payload %{address}, idempotent on resume (§6.3)
   - If {r} is {:halt, seq', reason}: Return {:halt, ctx with seq = seq', reason}.       ; a failed lane aborts the run — its consumer never runs (§6.1, §10.11)
+
+DecideMapWidth(node, run_id, prior, seq):
+  - If a map_started for node.address is in {prior}:            ; RESUME — replay the journaled decision verbatim
+    - Return {that event's payload.width, seq}.                ; width AND observed_length are read from the journal, never re-derived from `over` (DF-M2)
+  - Let {list} be ResolveRef(node.over, run_id, nil).          ; FRESH path only — {:node} list-valued OR {:map} ordered list — DF-M5
+  - If list is not a list: Raise MapOverNotAList (§10.11) — abort the run (exit 1), never coerce.
+  - Let {width} be min(length(list), node.max).
+  - Let {seq'} be CommitMarker(map_started, node, prior, seq).  ; payload %{address, over, observed_length: length(list), width, max: node.max}; keyed (type, address), idempotent on resume (§6.3)
+  - Return {width, seq'}.
 ```
 
   So `RunConcurrently` itself is unchanged (its `fun` closes over the per-lane `%{index: e}`), but
@@ -3654,11 +3675,11 @@ BoundList(run_id, address):                    ; a map's ordered lane-result lis
 `BoundValue` and `BoundList` are pure folds over already-committed events; `{:element, over}` never
 folds directly but indexes the resolved list zero-based, so a `map`-lane agent template resolving
 `@element_name` (env `{:element, over}`, §10.9.2; `lane = %{index: e}`, §10.6.4) yields the `e`-th
-element of `over`'s resolved collection. Top-level bindings resolve at `iteration = 0`. The per-form
-compiler entry is widened uniformly to `node(form, address, env, binding_env)` (a trailing-argument
-arity change, not an overload); `build/5` passes the in-scope env at top level and the empty env
-`%{}` at the four nested positions (where templates are actively rejected), and the `map` lane
-passes the element-extended env.
+element of `over`'s resolved collection. Top-level bindings resolve at `iteration = 0`. Every
+per-form compile step (the recursive compile entry `parse/2` delegates to per form, §5) threads an
+additional in-scope `binding_env` — a trailing-argument extension, not an overload: the in-scope
+`binding_env` at top level, the **empty** env `%{}` at the four nested positions (where templates
+are actively rejected), and the element-extended env at the `map` lane.
 
 **Journal events.** The dataflow **core** (Template + `let` + injection + `emit`) adds **zero** new
 event types: `let` and `gather` ride `agent_committed`; injection rides `agent_committed.prompt` /

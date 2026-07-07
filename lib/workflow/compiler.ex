@@ -231,6 +231,25 @@ defmodule Workflow.Compiler do
     end
   end
 
+  defp node(
+         {:agent, _meta, [{:sigil_P, _template_meta, _template_args} = template_ast]} = form,
+         address,
+         env,
+         binding_env
+       ) do
+    with {:ok, template} <- prompt_template(template_ast, env),
+         {:ok, bindings} <- emit_bindings(template, binding_env, form, env) do
+      {:ok,
+       %Agent{
+         address: address,
+         prompt: template,
+         bindings: bindings,
+         schema: nil,
+         retries: @default_retries
+       }}
+    end
+  end
+
   defp node({:agent, _meta, [{:<<>>, _, _parts}]} = form, _address, env, _binding_env),
     do: {:error, interpolation_finding(form, env, "agent prompt")}
 
@@ -244,6 +263,28 @@ defmodule Workflow.Compiler do
          {:ok, schema} <- agent_schema(kw, form, env),
          {:ok, retries} <- agent_retries(kw, form, env) do
       {:ok, %Agent{address: address, prompt: prompt, schema: schema, retries: retries}}
+    end
+  end
+
+  defp node(
+         {:agent, _meta, [{:sigil_P, _template_meta, _template_args} = template_ast, opts]} = form,
+         address,
+         env,
+         binding_env
+       ) do
+    with {:ok, template} <- prompt_template(template_ast, env),
+         {:ok, bindings} <- emit_bindings(template, binding_env, form, env),
+         {:ok, kw} <- agent_options(opts, form, env),
+         {:ok, schema} <- agent_schema(kw, form, env),
+         {:ok, retries} <- agent_retries(kw, form, env) do
+      {:ok,
+       %Agent{
+         address: address,
+         prompt: template,
+         bindings: bindings,
+         schema: schema,
+         retries: retries
+       }}
     end
   end
 
@@ -586,6 +627,9 @@ defmodule Workflow.Compiler do
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {branch, i}, {:ok, acc} ->
       case node(branch, address ++ [i], env, binding_env) do
+        {:ok, %Agent{prompt: %Template{}}} ->
+          {:halt, {:error, nested_template_prompt_finding(env, branch, "parallel branches")}}
+
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
 
@@ -653,6 +697,9 @@ defmodule Workflow.Compiler do
     stages
     |> Enum.reduce_while({:ok, []}, fn stage, {:ok, acc} ->
       case node(stage, address, env, binding_env) do
+        {:ok, %Agent{prompt: %Template{}}} ->
+          {:halt, {:error, nested_template_prompt_finding(env, stage, "pipeline stages")}}
+
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
 
@@ -790,7 +837,15 @@ defmodule Workflow.Compiler do
      )}
   end
 
-  defp body_node(stmt, address, env, binding_env), do: node(stmt, address, env, binding_env)
+  defp body_node(stmt, address, env, binding_env) do
+    case node(stmt, address, env, binding_env) do
+      {:ok, %Agent{prompt: %Template{}}} ->
+        {:error, nested_template_prompt_finding(env, stmt, "loop body")}
+
+      other ->
+        other
+    end
+  end
 
   defp collect(opts, form, address, env) do
     cond do
@@ -1119,6 +1174,9 @@ defmodule Workflow.Compiler do
     stmts
     |> Enum.reduce_while({:ok, []}, fn stmt, {:ok, acc} ->
       case node(stmt, address, env, binding_env) do
+        {:ok, %Agent{prompt: %Template{}}} ->
+          {:halt, {:error, nested_template_prompt_finding(env, stmt, "fan_out body")}}
+
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
 
@@ -1183,6 +1241,18 @@ defmodule Workflow.Compiler do
      )}
   end
 
+  defp prompt_template({:sigil_P, meta, [{:<<>>, _content_meta, [source]}, _mods]}, env)
+       when is_binary(source) do
+    Template.parse(source, %{env | line: Keyword.get(meta, :line, env.line)})
+  end
+
+  defp prompt_template(_other, env) do
+    {:error,
+     Finding.at(env, nil, "`agent` template prompts must use `~P`",
+       hint: ~s|agent(~P"Improve this draft: <%= @draft %>")|
+     )}
+  end
+
   defp emit_bindings(%Template{assigns: assigns}, binding_env, form, env) do
     assigns
     |> Enum.uniq()
@@ -1206,6 +1276,15 @@ defmodule Workflow.Compiler do
       {name, ref} -> {:ok, name, ref}
       nil -> :error
     end
+  end
+
+  defp nested_template_prompt_finding(env, form, context) do
+    Finding.at(
+      env,
+      form,
+      "template prompts are only allowed on top-level agents, not in #{context}",
+      hint: "move this `~P` prompt out of #{context} and bind its inputs with `let` first"
+    )
   end
 
   # --- Suggestions from the closed vocabulary ---

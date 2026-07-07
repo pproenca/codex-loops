@@ -44,6 +44,16 @@ defmodule Workflow.ResumeTest do
     end
   end
 
+  defmodule InjectedThenGate do
+    use Workflow
+
+    workflow "injected-then-gate" do
+      let(:draft = agent("draft"))
+      agent(~P"improve: <%= @draft %>")
+      return(:ok)
+    end
+  end
+
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
 
   defp await_lease_released(run_id, tries \\ 200) do
@@ -209,5 +219,40 @@ defmodule Workflow.ResumeTest do
     assert status.state == :completed
     assert status.result == :ok
     assert Ledger.of(id).spent == 2
+  end
+
+  @tag :capture_log
+  test "resume re-renders a top-level injected prompt from journaled bindings without re-running the producer" do
+    id = run_id()
+
+    {:ok, ^id, pid} =
+      Run.start(InjectedThenGate,
+        run_id: id,
+        provider: {GateProvider, sink: self(), gate_on: "improve: %{}"}
+      )
+
+    assert_receive {:agent_called, "draft"}
+    assert_receive {:agent_called, "improve: %{}"}
+    assert_receive {:at_agent, ^pid}
+
+    assert [%{payload: %{address: [0], result: %{}}}] =
+             Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
+
+    kill_and_await(id, pid)
+
+    assert {:ok, ^id} =
+             Run.run(InjectedThenGate, run_id: id, provider: {EchoProvider, sink: self()})
+
+    refute_received {:agent_called, "draft"}
+    assert_received {:agent_called, "improve: %{}"}
+    refute_received {:agent_called, _}
+
+    committed =
+      Enum.find(
+        Journal.fold(id),
+        &(&1.type == :agent_committed and &1.payload.address == [1])
+      )
+
+    assert committed.payload.prompt == "improve: %{}"
   end
 end

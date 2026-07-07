@@ -31,7 +31,7 @@ defmodule Workflow.Compiler do
   failure.
   """
 
-  alias Workflow.{Tree, Predicate}
+  alias Workflow.{Tree, Predicate, RenderText}
 
   alias Workflow.Node.{
     Phase,
@@ -103,7 +103,7 @@ defmodule Workflow.Compiler do
 
   @spec parse(Macro.t(), Macro.Env.t()) :: {:ok, Tree.t()} | {:error, Finding.t()}
   def parse(block, env) do
-    with {:ok, nodes} <- build(statements(block), 0, [], MapSet.new(), env),
+    with {:ok, nodes} <- build(statements(block), 0, [], MapSet.new(), env, %{}),
          :ok <- validate_tree(nodes, env) do
       {:ok, %Tree{nodes: nodes}}
     end
@@ -116,10 +116,10 @@ defmodule Workflow.Compiler do
 
   # --- Per-statement build (per-node option errors located at the call site) ---
 
-  defp build([], _index, acc, _seen, _env), do: {:ok, Enum.reverse(acc)}
+  defp build([], _index, acc, _seen, _env, _binding_env), do: {:ok, Enum.reverse(acc)}
 
-  defp build([stmt | rest], index, acc, seen, env) do
-    case node(stmt, [index], env) do
+  defp build([stmt | rest], index, acc, seen, env, binding_env) do
+    case node(stmt, [index], env, binding_env) do
       {:ok, %Phase{name: name} = phase} ->
         if MapSet.member?(seen, name) do
           {:error,
@@ -127,11 +127,11 @@ defmodule Workflow.Compiler do
              hint: "phase names must be unique within a workflow"
            )}
         else
-          build(rest, index + 1, [phase | acc], MapSet.put(seen, name), env)
+          build(rest, index + 1, [phase | acc], MapSet.put(seen, name), env, binding_env)
         end
 
       {:ok, node} ->
-        build(rest, index + 1, [node | acc], seen, env)
+        build(rest, index + 1, [node | acc], seen, env, binding_env)
 
       {:error, finding} ->
         {:error, finding}
@@ -140,19 +140,20 @@ defmodule Workflow.Compiler do
 
   # --- The closed combinator vocabulary ---
 
-  defp node({:phase, _meta, [name]}, address, _env) when is_binary(name),
+  defp node({:phase, _meta, [name]}, address, _env, _binding_env) when is_binary(name),
     do: {:ok, %Phase{address: address, name: name}}
 
-  defp node({:log, _meta, [message]}, address, _env) when is_binary(message),
+  defp node({:log, _meta, [message]}, address, _env, _binding_env) when is_binary(message),
     do: {:ok, %Log{address: address, message: message}}
 
-  defp node({:agent, _meta, [prompt]}, address, _env) when is_binary(prompt),
+  defp node({:agent, _meta, [prompt]}, address, _env, _binding_env) when is_binary(prompt),
     do: {:ok, %Agent{address: address, prompt: prompt, schema: nil, retries: @default_retries}}
 
   # A schema-backed agent: `agent "…", schema: %{…}, retries: n`. The options must
   # be a literal keyword list drawn from @agent_option_keys; the schema must be a
   # literal map (materialized to its runtime value so the node stays inert data).
-  defp node({:agent, _meta, [prompt, opts]} = form, address, env) when is_binary(prompt) do
+  defp node({:agent, _meta, [prompt, opts]} = form, address, env, _binding_env)
+       when is_binary(prompt) do
     with {:ok, kw} <- agent_options(opts, form, env),
          {:ok, schema} <- agent_schema(kw, form, env),
          {:ok, retries} <- agent_retries(kw, form, env) do
@@ -160,7 +161,7 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp node({:return, _meta, [value]} = form, address, env) do
+  defp node({:return, _meta, [value]} = form, address, env, _binding_env) do
     if Macro.quoted_literal?(value) do
       {:ok, %Return{address: address, value: value}}
     else
@@ -174,30 +175,32 @@ defmodule Workflow.Compiler do
   # `parallel [agent(...), ...]` — a barrier fan-out over a literal list of agent
   # branches, optionally capped by `max_concurrency:`. Each branch is addressed
   # `address ++ [branch_index]`, so branches journal and key independently.
-  defp node({:parallel, _meta, [branches]} = form, address, env) when is_list(branches),
-    do: parallel(branches, [], address, form, env)
+  defp node({:parallel, _meta, [branches]} = form, address, env, binding_env)
+       when is_list(branches),
+       do: parallel(branches, [], address, form, env, binding_env)
 
-  defp node({:parallel, _meta, [branches, opts]} = form, address, env) when is_list(branches),
-    do: parallel(branches, opts, address, form, env)
+  defp node({:parallel, _meta, [branches, opts]} = form, address, env, binding_env)
+       when is_list(branches),
+       do: parallel(branches, opts, address, form, env, binding_env)
 
   # `pipeline items, [agent(...), ...]` — per-item lanes through ordered stages,
   # optionally capped by `max_concurrency:`. `items` is a literal list; the lanes
   # are expanded here into pre-addressed inert agents.
-  defp node({:pipeline, _meta, [items, stages]} = form, address, env),
-    do: pipeline(items, stages, [], address, form, env)
+  defp node({:pipeline, _meta, [items, stages]} = form, address, env, binding_env),
+    do: pipeline(items, stages, [], address, form, env, binding_env)
 
-  defp node({:pipeline, _meta, [items, stages, opts]} = form, address, env),
-    do: pipeline(items, stages, opts, address, form, env)
+  defp node({:pipeline, _meta, [items, stages, opts]} = form, address, env, binding_env),
+    do: pipeline(items, stages, opts, address, form, env, binding_env)
 
   # `while_budget reserve: N[, until: <predicate>][, max_iterations: N] do <body> end`
   # — a dynamic loop whose body runs while the ledger's `remaining` exceeds `reserve`.
-  defp node({:while_budget, _meta, args} = form, address, env) do
+  defp node({:while_budget, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:reserve, :until, :max_iterations], form, env),
          {:ok, reserve} <- required_integer(opts, :reserve, 0, form, env),
          {:ok, until_pred} <- optional_predicate(opts, env),
          {:ok, cap} <- max_iterations(opts, form, env),
-         {:ok, body} <- parse_body(block, address, form, env) do
+         {:ok, body} <- parse_body(block, address, form, env, binding_env) do
       {:ok,
        %WhileBudget{
          address: address,
@@ -211,13 +214,13 @@ defmodule Workflow.Compiler do
 
   # `until_dry rounds: K, seen_by: [:field, ...][, max_iterations: N] do <body> end`
   # — loops until K consecutive iterations add nothing new (deduped by `seen_by`).
-  defp node({:until_dry, _meta, args} = form, address, env) do
+  defp node({:until_dry, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:rounds, :seen_by, :max_iterations], form, env),
          {:ok, rounds} <- required_integer(opts, :rounds, 1, form, env),
          {:ok, seen_by} <- seen_by_opt(opts, form, env),
          {:ok, cap} <- max_iterations(opts, form, env),
-         {:ok, body} <- parse_body(block, address, form, env),
+         {:ok, body} <- parse_body(block, address, form, env, binding_env),
          :ok <- require_collect(body, form, env) do
       {:ok,
        %UntilDry{
@@ -235,7 +238,7 @@ defmodule Workflow.Compiler do
   # finding to a bounded panel of votes and survive only when `threshold` confirm.
   # The panel is fixed at author time (a compile-time constant width), so the voters
   # are pre-expanded into inert, pre-addressed, schema-bound agents.
-  defp node({:verify, _meta, [subject, opts]} = form, address, env) do
+  defp node({:verify, _meta, [subject, opts]} = form, address, env, _binding_env) do
     with {:ok, lit} <- verify_subject(subject, form, env),
          :ok <- only_keys(opts, [:voters, :lenses, :threshold], form, env),
          {:ok, mode} <- verify_mode(opts, form, env),
@@ -255,7 +258,7 @@ defmodule Workflow.Compiler do
   # candidate along each criterion and pick a winner. The scoring grid (candidates ×
   # criteria, both compile-time constants) is pre-expanded into inert, pre-addressed,
   # schema-bound scorer agents.
-  defp node({:judge, _meta, [candidates, opts]} = form, address, env) do
+  defp node({:judge, _meta, [candidates, opts]} = form, address, env, _binding_env) do
     with {:ok, list} <- judge_candidates(candidates, form, env),
          :ok <- only_keys(opts, [:by, :pick], form, env),
          {:ok, by} <- judge_by(opts, form, env),
@@ -273,7 +276,7 @@ defmodule Workflow.Compiler do
 
   # `synthesize inputs, "prompt"` — fold literal inputs into one result under a
   # static prompt. Both are compile-time literals, so the node stays inert.
-  defp node({:synthesize, _meta, [inputs, prompt]} = form, address, env)
+  defp node({:synthesize, _meta, [inputs, prompt]} = form, address, env, _binding_env)
        when is_binary(prompt) do
     if Macro.quoted_literal?(inputs) do
       {:ok, %Synthesize{address: address, inputs: materialize(inputs), prompt: prompt}}
@@ -285,7 +288,7 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp node({:synthesize, _meta, [_inputs, _prompt]} = form, _address, env) do
+  defp node({:synthesize, _meta, [_inputs, _prompt]} = form, _address, env, _binding_env) do
     {:error,
      Finding.at(env, form, "`synthesize` prompt must be a literal string",
        hint: ~s|synthesize inputs, "a static instruction"|
@@ -296,19 +299,19 @@ defmodule Workflow.Compiler do
   # run the body across `floor(remaining / N)` concurrent branches. The width is a
   # runtime-owned budget decision, never author arithmetic, so `width:` accepts only
   # a `budget_slices(per:)` form.
-  defp node({:fan_out, _meta, args} = form, address, env) do
+  defp node({:fan_out, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:width, :max_concurrency], form, env),
          {:ok, width} <- fan_out_width(opts, form, env),
          {:ok, cap} <- fan_out_concurrency(opts, form, env),
-         {:ok, body} <- fan_out_body(block, address, form, env) do
+         {:ok, body} <- fan_out_body(block, address, form, env, binding_env) do
       {:ok, %FanOut{address: address, width: width, body: body, max_concurrency: cap}}
     end
   end
 
   # `collect` is only meaningful inside a loop body; at top level it is rejected. The
   # body parser handles the in-loop form before delegating here.
-  defp node({:collect, _meta, _args} = form, _address, env) do
+  defp node({:collect, _meta, _args} = form, _address, env, _binding_env) do
     {:error,
      Finding.at(env, form, "`collect` must appear inside a loop body",
        hint: "collect reduces a loop iteration's agent output into a declared accumulator"
@@ -317,7 +320,7 @@ defmodule Workflow.Compiler do
 
   # A known combinator invoked with the wrong argument shape: recoverable finding,
   # located at the declaration site.
-  defp node({combinator, _meta, _args} = form, _address, env)
+  defp node({combinator, _meta, _args} = form, _address, env, _binding_env)
        when combinator in @combinators,
        do: {:error, Finding.at(env, form, "`#{combinator}` was called with invalid arguments")}
 
@@ -325,7 +328,7 @@ defmodule Workflow.Compiler do
   # escape hatches are unrepresentable in a compiled tree. ---
 
   # Anonymous functions destroy total-validation, serialization, and resume.
-  defp node({:fn, _meta, _clauses} = form, _address, env) do
+  defp node({:fn, _meta, _clauses} = form, _address, env, _binding_env) do
     raise_finding(
       Finding.at(env, form, "anonymous functions are not part of the workflow vocabulary",
         hint: "a workflow is inert, serializable data — it cannot capture a closure"
@@ -334,7 +337,7 @@ defmodule Workflow.Compiler do
   end
 
   # Any call into an external module — `:rand.*`, `System.*`, `Enum.*`, ... .
-  defp node({{:., _, [_module, _fun]}, _meta, _args} = form, _address, env) do
+  defp node({{:., _, [_module, _fun]}, _meta, _args} = form, _address, env, _binding_env) do
     raise_finding(
       Finding.at(env, form, "calls to external modules are not part of the workflow vocabulary",
         hint: "a workflow must be deterministic and self-contained (no #{callee(form)})"
@@ -343,13 +346,13 @@ defmodule Workflow.Compiler do
   end
 
   # An unknown bare call: reject with a closed-vocabulary suggestion.
-  defp node({name, _meta, args} = form, _address, env)
+  defp node({name, _meta, args} = form, _address, env, _binding_env)
        when is_atom(name) and is_list(args) do
     raise_finding(Finding.at(env, form, "unknown combinator `#{name}`", hint: suggest(name)))
   end
 
   # Anything else — a stray literal, a variable, an operator: outside the vocabulary.
-  defp node(form, _address, env) do
+  defp node(form, _address, env, _binding_env) do
     raise_finding(
       Finding.at(env, form, "unknown workflow form outside the combinator vocabulary",
         hint: "expected one of: #{vocabulary()}"
@@ -447,16 +450,16 @@ defmodule Workflow.Compiler do
 
   # --- Static fan-out combinators (parallel / pipeline) ---
 
-  defp parallel([], _opts, _address, form, env) do
+  defp parallel([], _opts, _address, form, env, _binding_env) do
     {:error,
      Finding.at(env, form, "`parallel` requires at least one branch",
        hint: "parallel [agent(\"...\"), agent(\"...\")]"
      )}
   end
 
-  defp parallel(branches, opts, address, form, env) do
+  defp parallel(branches, opts, address, form, env, binding_env) do
     with {:ok, cap} <- concurrency_opt(opts, form, env),
-         {:ok, nodes} <- agent_branches(branches, address, env) do
+         {:ok, nodes} <- agent_branches(branches, address, env, binding_env) do
       {:ok, %Parallel{address: address, branches: nodes, max_concurrency: cap}}
     end
   end
@@ -464,11 +467,11 @@ defmodule Workflow.Compiler do
   # Each branch must be a single `agent` turn (the concurrency shape fans out agent
   # turns). Reuse `node/3` so a malformed branch raises the same located diagnostic
   # it would at top level; then require the result be an %Agent{}.
-  defp agent_branches(branches, address, env) do
+  defp agent_branches(branches, address, env, binding_env) do
     branches
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {branch, i}, {:ok, acc} ->
-      case node(branch, address ++ [i], env) do
+      case node(branch, address ++ [i], env, binding_env) do
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
 
@@ -489,10 +492,10 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp pipeline(items_ast, stages_ast, opts, address, form, env) do
+  defp pipeline(items_ast, stages_ast, opts, address, form, env, binding_env) do
     with {:ok, items} <- pipeline_items(items_ast, form, env),
          {:ok, cap} <- concurrency_opt(opts, form, env),
-         {:ok, stages} <- pipeline_stages(stages_ast, address, form, env) do
+         {:ok, stages} <- pipeline_stages(stages_ast, address, form, env, binding_env) do
       # Expand each item into its own lane of pre-addressed agents:
       # lane `i`, stage `s` lives at `address ++ [i, s]`.
       lanes =
@@ -529,13 +532,13 @@ defmodule Workflow.Compiler do
 
   # Stage templates are agent turns; their address is overwritten per lane, so parse
   # them at a placeholder address and keep only prompt/schema/retries.
-  defp pipeline_stages([], _address, form, env),
+  defp pipeline_stages([], _address, form, env, _binding_env),
     do: {:error, Finding.at(env, form, "`pipeline` requires at least one stage")}
 
-  defp pipeline_stages(stages, address, _form, env) when is_list(stages) do
+  defp pipeline_stages(stages, address, _form, env, binding_env) when is_list(stages) do
     stages
     |> Enum.reduce_while({:ok, []}, fn stage, {:ok, acc} ->
-      case node(stage, address, env) do
+      case node(stage, address, env, binding_env) do
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
 
@@ -556,7 +559,7 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp pipeline_stages(_stages, _address, form, env),
+  defp pipeline_stages(_stages, _address, form, env, _binding_env),
     do: {:error, Finding.at(env, form, "`pipeline` stages must be a literal list of agents")}
 
   # The only fan-out option, shared by both combinators.
@@ -605,26 +608,35 @@ defmodule Workflow.Compiler do
   # The loop body is a fresh sub-tree; its nodes are addressed `parent ++ [i]` so
   # they journal and key independently while every iteration re-runs the same
   # addresses under a distinct `iteration`.
-  defp parse_body(block, loop_address, form, env) do
-    case build_body(statements(block), loop_address, 0, [], MapSet.new(), env) do
+  defp parse_body(block, loop_address, form, env, binding_env) do
+    case build_body(statements(block), loop_address, 0, [], MapSet.new(), env, binding_env) do
       {:ok, []} -> {:error, Finding.at(env, form, "a loop body must contain at least one node")}
       other -> other
     end
   end
 
-  defp build_body([], _loop_address, _index, acc, _seen, _env), do: {:ok, Enum.reverse(acc)}
+  defp build_body([], _loop_address, _index, acc, _seen, _env, _binding_env),
+    do: {:ok, Enum.reverse(acc)}
 
-  defp build_body([stmt | rest], loop_address, index, acc, seen, env) do
-    case body_node(stmt, loop_address ++ [index], env) do
+  defp build_body([stmt | rest], loop_address, index, acc, seen, env, binding_env) do
+    case body_node(stmt, loop_address ++ [index], env, binding_env) do
       {:ok, %Phase{name: name} = phase} ->
         if MapSet.member?(seen, name) do
           {:error, Finding.at(env, stmt, "duplicate phase name #{inspect(name)}")}
         else
-          build_body(rest, loop_address, index + 1, [phase | acc], MapSet.put(seen, name), env)
+          build_body(
+            rest,
+            loop_address,
+            index + 1,
+            [phase | acc],
+            MapSet.put(seen, name),
+            env,
+            binding_env
+          )
         end
 
       {:ok, node} ->
-        build_body(rest, loop_address, index + 1, [node | acc], seen, env)
+        build_body(rest, loop_address, index + 1, [node | acc], seen, env, binding_env)
 
       {:error, _} = err ->
         err
@@ -634,13 +646,13 @@ defmodule Workflow.Compiler do
   # A loop body permits the body vocabulary plus `collect`; loops, fan-out, and
   # `return` are rejected here (keeping the iteration key a single integer), while
   # closures/external calls still raise via the shared forbidden-form catalog.
-  defp body_node({:collect, _meta, [opts]} = form, address, env),
+  defp body_node({:collect, _meta, [opts]} = form, address, env, _binding_env),
     do: collect(opts, form, address, env)
 
-  defp body_node({:collect, _meta, _args} = form, _address, env),
+  defp body_node({:collect, _meta, _args} = form, _address, env, _binding_env),
     do: {:error, Finding.at(env, form, "`collect` requires `into: :name`")}
 
-  defp body_node({combinator, _meta, _args} = form, _address, env)
+  defp body_node({combinator, _meta, _args} = form, _address, env, _binding_env)
        when combinator in [
               :while_budget,
               :until_dry,
@@ -658,7 +670,7 @@ defmodule Workflow.Compiler do
      )}
   end
 
-  defp body_node(stmt, address, env), do: node(stmt, address, env)
+  defp body_node(stmt, address, env, binding_env), do: node(stmt, address, env, binding_env)
 
   defp collect(opts, form, address, env) do
     cond do
@@ -843,12 +855,19 @@ defmodule Workflow.Compiler do
   end
 
   defp verify_prompt(subject, nil),
-    do: "Confirm or refute this finding, answering with a boolean verdict: #{to_text(subject)}"
+    do:
+      RenderText.render!([], [
+        {:text, "Confirm or refute this finding, answering with a boolean verdict: "},
+        {:literal, subject}
+      ])
 
   defp verify_prompt(subject, lens),
     do:
-      "From the #{lens} perspective, confirm or refute this finding, " <>
-        "answering with a boolean verdict: #{to_text(subject)}"
+      RenderText.render!([], [
+        {:text, "From the #{lens} perspective, confirm or refute this finding, "},
+        {:text, "answering with a boolean verdict: "},
+        {:literal, subject}
+      ])
 
   defp judge_candidates(candidates, form, env) do
     if is_list(candidates) and Macro.quoted_literal?(candidates) do
@@ -920,7 +939,10 @@ defmodule Workflow.Compiler do
 
   defp score_prompt(candidate, criterion),
     do:
-      "Score this candidate on #{criterion}, answering with a numeric score: #{to_text(candidate)}"
+      RenderText.render!([], [
+        {:text, "Score this candidate on #{criterion}, answering with a numeric score: "},
+        {:literal, candidate}
+      ])
 
   # `width:` accepts only `budget_slices(per: N)` — the runtime-owned width helper —
   # so authors cannot smuggle in arbitrary arithmetic.
@@ -953,8 +975,8 @@ defmodule Workflow.Compiler do
 
   # The fan_out body is a lane of agent turns (like a pipeline stage list), parsed at
   # a placeholder address and re-addressed per branch at runtime.
-  defp fan_out_body(block, address, form, env) do
-    case agent_lane(statements(block), address, env) do
+  defp fan_out_body(block, address, form, env, binding_env) do
+    case agent_lane(statements(block), address, env, binding_env) do
       {:ok, []} ->
         {:error,
          Finding.at(env, form, "`fan_out` requires at least one body step",
@@ -973,10 +995,10 @@ defmodule Workflow.Compiler do
   # Parse a list of statements that must each be an `agent` turn (shared by fan_out).
   # Reuses `node/3`, so a closure/external call still raises via the forbidden-form
   # catalog and any malformed agent surfaces its own located finding.
-  defp agent_lane(stmts, address, env) do
+  defp agent_lane(stmts, address, env, binding_env) do
     stmts
     |> Enum.reduce_while({:ok, []}, fn stmt, {:ok, acc} ->
-      case node(stmt, address, env) do
+      case node(stmt, address, env, binding_env) do
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
 
@@ -996,10 +1018,6 @@ defmodule Workflow.Compiler do
       err -> err
     end
   end
-
-  # Deterministic stringification of a literal subject/candidate for an inert prompt.
-  defp to_text(text) when is_binary(text), do: text
-  defp to_text(other), do: inspect(other)
 
   # --- Whole-DSL invariants ---
 

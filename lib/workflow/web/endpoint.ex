@@ -1,9 +1,10 @@
 defmodule Workflow.Web.Endpoint do
   @moduledoc """
   The HTTP/WebSocket endpoint for the live read surface. It exists only to serve the
-  journal-projecting `Workflow.Web.RunLive`; it owns no run state. Its `pubsub_server`
+  scheduler-snapshot `Workflow.Web.RunLive`; it owns no run state. Its `pubsub_server`
   is `Workflow.PubSub` — the same post-commit bus the run writer broadcasts on — so a
-  connected LiveView is driven by committed events, never by writer process state.
+  connected LiveView refreshes from committed events plus scheduler-owned lifecycle
+  lease facts.
   """
   use Phoenix.Endpoint, otp_app: :codex_loops
 

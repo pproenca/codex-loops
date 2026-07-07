@@ -529,6 +529,112 @@ defmodule Workflow.Web.SchedulerAPITest do
            } = wait_for_api_projection(id)
   end
 
+  @tag :capture_log
+  test "GET /api/runs/:id serializes scheduler-derived lifecycle action semantics" do
+    path = demo_workflow()
+    completed_id = run_id("scheduler_api_lifecycle_completed")
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs", %{script_path: path, run_id: completed_id, provider: "mock"})
+
+    assert %{"data" => %{"run_id" => ^completed_id}} = json_response(conn, 200)
+
+    assert %{
+             "state" => "completed",
+             "lifecycle_action" => %{
+               "action" => "none",
+               "label" => "No lifecycle action",
+               "enabled" => false,
+               "reason" => "Run is completed.",
+               "method" => nil,
+               "href" => nil
+             }
+           } = wait_for_api_projection(completed_id)
+
+    running_id = run_id("scheduler_api_lifecycle_running")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^running_id, writer} =
+             Run.start(tree,
+               run_id: running_id,
+               provider: {GateProvider, sink: self()},
+               script_path: Path.expand(path)
+             )
+
+    assert_receive {:agent_called, "ship it"}
+    assert_receive {:at_agent, ^writer}
+
+    conn = get(json_conn(), "/api/runs/#{running_id}")
+
+    assert %{
+             "data" => %{
+               "state" => "running",
+               "lifecycle_action" => %{
+                 "action" => "pause_unavailable",
+                 "label" => "Pause unavailable",
+                 "enabled" => false,
+                 "method" => nil,
+                 "href" => nil
+               }
+             }
+           } = json_response(conn, 200)
+
+    kill_and_await(running_id, writer)
+
+    conn = get(json_conn(), "/api/runs/#{running_id}")
+
+    assert %{
+             "data" => %{
+               "state" => "running",
+               "lifecycle_action" => resume_action
+             }
+           } = json_response(conn, 200)
+
+    assert resume_action == %{
+             "action" => "resume",
+             "label" => "Resume",
+             "enabled" => true,
+             "reason" => "The writer is stopped before a terminal event.",
+             "method" => "post",
+             "href" => "/api/runs/#{running_id}/resume"
+           }
+  end
+
+  @tag :capture_log
+  test "GET /api/runs/:id serializes resume unavailable for incomplete runs without a script path" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_lifecycle_missing_script")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id, writer} =
+             Run.start(tree,
+               run_id: id,
+               provider: {GateProvider, sink: self()}
+             )
+
+    assert_receive {:agent_called, "ship it"}
+    assert_receive {:at_agent, ^writer}
+
+    kill_and_await(id, writer)
+
+    conn = get(json_conn(), "/api/runs/#{id}")
+
+    assert %{
+             "data" => %{
+               "state" => "running",
+               "lifecycle_action" => %{
+                 "action" => "resume_unavailable",
+                 "label" => "Resume unavailable",
+                 "enabled" => false,
+                 "reason" => "No journaled script path is available.",
+                 "method" => nil,
+                 "href" => nil
+               }
+             }
+           } = json_response(conn, 200)
+  end
+
   test "GET /api/runs/:id/events returns ordered event projections for a known run" do
     path = demo_workflow()
     id = run_id("scheduler_api_events")

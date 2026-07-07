@@ -9,7 +9,7 @@ defmodule Workflow.Application do
     * `Workflow.PubSub` — post-commit broadcast bus for live read surfaces.
     * `Workflow.Journal` — owner of the append-only event-log ETS table.
     * `Workflow.Run.Supervisor` — dynamic supervisor for per-run writer processes.
-    * `Workflow.Web.Endpoint` — the Phoenix endpoint serving the journal-projecting
+    * `Workflow.Web.Endpoint` — the Phoenix endpoint serving the scheduler-snapshot
       LiveView. Started after `Workflow.PubSub` (its `pubsub_server`), and holding no
       run state of its own.
   """

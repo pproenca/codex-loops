@@ -8,7 +8,15 @@ defmodule Workflow.Scheduler do
   """
 
   alias Workflow.{Journal, Provider, Run, Script, Status}
-  alias Workflow.Scheduler.{Error, Health, RunProjection, RunStart, Validation}
+
+  alias Workflow.Scheduler.{
+    Error,
+    Health,
+    RunEventsProjection,
+    RunProjection,
+    RunStart,
+    Validation
+  }
 
   @app :codex_loops
 
@@ -67,6 +75,17 @@ defmodule Workflow.Scheduler do
   end
 
   def get_run(_run_id), do: {:error, Error.invalid_run_id()}
+
+  @spec get_run_events(String.t()) :: {:ok, RunEventsProjection.t()} | {:error, Error.t()}
+  def get_run_events(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
+    if run_id in Journal.run_ids() do
+      {:ok, RunEventsProjection.from_events(run_id, Journal.fold(run_id))}
+    else
+      {:error, Error.run_not_found(run_id)}
+    end
+  end
+
+  def get_run_events(_run_id), do: {:error, Error.invalid_run_id()}
 
   @spec validate_workflow(map()) :: {:ok, Validation.t()} | {:error, Error.t()}
   def validate_workflow(%{"script_path" => path}) when is_binary(path),

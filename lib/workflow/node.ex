@@ -10,6 +10,7 @@ defmodule Workflow.Node do
   """
 
   @type address :: [non_neg_integer()]
+  @type binding_ref :: {:node, address()} | {:map, address()}
 end
 
 defmodule Workflow.Node.Phase do

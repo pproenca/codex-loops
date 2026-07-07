@@ -64,6 +64,17 @@ defmodule Workflow.QualityRunTest do
                :run_completed
              ]
 
+    vote_prompts =
+      Journal.fold(id)
+      |> Enum.filter(&(&1.type == :agent_committed))
+      |> Enum.map(& &1.payload.prompt)
+
+    assert vote_prompts == [
+             "Confirm or refute this finding, answering with a boolean verdict: the finding",
+             "Confirm or refute this finding, answering with a boolean verdict: the finding",
+             "Confirm or refute this finding, answering with a boolean verdict: the finding"
+           ]
+
     settled = event(id, :verify_settled).payload
 
     assert settled == %{
@@ -195,6 +206,20 @@ defmodule Workflow.QualityRunTest do
     assert :judge_started in types(id)
     assert :judge_settled in types(id)
 
+    scorer_prompts =
+      Journal.fold(id)
+      |> Enum.filter(&(&1.type == :agent_committed and &1.payload.address != [1]))
+      |> Enum.map(& &1.payload.prompt)
+
+    assert scorer_prompts == [
+             "Score this candidate on feasibility, answering with a numeric score: plan A",
+             "Score this candidate on impact, answering with a numeric score: plan A",
+             "Score this candidate on feasibility, answering with a numeric score: plan B",
+             "Score this candidate on impact, answering with a numeric score: plan B",
+             "Score this candidate on feasibility, answering with a numeric score: plan C",
+             "Score this candidate on impact, answering with a numeric score: plan C"
+           ]
+
     settled = event(id, :judge_settled).payload
     assert settled.pick == :max_score
     assert settled.winner == "plan B"
@@ -203,6 +228,13 @@ defmodule Workflow.QualityRunTest do
     status = Status.of(id)
     assert status.state == :completed
     assert status.result == :done
+
+    synthesis =
+      Journal.fold(id)
+      |> Enum.find(&(&1.type == :agent_committed and &1.payload.address == [1]))
+
+    assert synthesis.payload.prompt ==
+             "Write up the winning plan.\n\nInputs: [\"plan A\", \"plan B\", \"plan C\"]"
 
     assert status.judgments == [
              %{

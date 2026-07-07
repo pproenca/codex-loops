@@ -38,7 +38,8 @@ defmodule Workflow.Run.Writer do
     Ledger,
     Accumulator,
     Predicate,
-    PubSub
+    PubSub,
+    RenderText
   }
 
   alias Workflow.Node.{
@@ -94,7 +95,14 @@ defmodule Workflow.Run.Writer do
         {:error, {:malformed_output, failure.address, failure.reason}}
 
       %Status{} ->
-        run_tree(run_id, tree, provider, prior, Map.get(state, :budget), Map.get(state, :script_path))
+        run_tree(
+          run_id,
+          tree,
+          provider,
+          prior,
+          Map.get(state, :budget),
+          Map.get(state, :script_path)
+        )
     end
   end
 
@@ -375,7 +383,12 @@ defmodule Workflow.Run.Writer do
   end
 
   defp synthesis_prompt(%Synthesize{inputs: inputs, prompt: prompt}),
-    do: "#{prompt}\n\nInputs: #{inspect(inputs)}"
+    do:
+      RenderText.render!([], [
+        {:text, prompt},
+        {:text, "\n\nInputs: "},
+        {:literal, inputs}
+      ])
 
   # --- Budget-scaled fan-out width (a journaled runtime decision) ---
 

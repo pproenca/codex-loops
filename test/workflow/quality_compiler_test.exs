@@ -28,6 +28,8 @@ defmodule Workflow.QualityCompilerTest do
                  voters: [
                    %Agent{
                      address: [0, 0],
+                     prompt:
+                       "Confirm or refute this finding, answering with a boolean verdict: finding",
                      schema: %{"required" => ["verdict"]} = schema,
                      retries: 0
                    },
@@ -57,8 +59,19 @@ defmodule Workflow.QualityCompilerTest do
              ] = voters
 
       # Each vote is framed by its lens perspective; the count is fixed at author time.
+      assert p0 ==
+               "From the correctness perspective, confirm or refute this finding, answering with a boolean verdict: bug"
+
       assert p0 =~ "correctness"
+
+      assert p1 ==
+               "From the security perspective, confirm or refute this finding, answering with a boolean verdict: bug"
+
       assert p1 =~ "security"
+
+      assert p2 ==
+               "From the repro perspective, confirm or refute this finding, answering with a boolean verdict: bug"
+
       assert p2 =~ "repro"
       refute contains_function?(tree)
     end
@@ -110,7 +123,18 @@ defmodule Workflow.QualityCompilerTest do
                  by: [:quality, :risk],
                  pick: :max_score,
                  scorers: [
-                   [%Agent{address: [0, 0, 0], schema: sc}, %Agent{address: [0, 0, 1]}],
+                   [
+                     %Agent{
+                       address: [0, 0, 0],
+                       prompt:
+                         "Score this candidate on quality, answering with a numeric score: a",
+                       schema: sc
+                     },
+                     %Agent{
+                       address: [0, 0, 1],
+                       prompt: "Score this candidate on risk, answering with a numeric score: a"
+                     }
+                   ],
                    [%Agent{address: [0, 1, 0]}, %Agent{address: [0, 1, 1]}]
                  ]
                },

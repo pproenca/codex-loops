@@ -284,6 +284,31 @@ defmodule Workflow.Web.SchedulerAPITest do
     |> post(path, Jason.encode!(body))
   end
 
+  defp run_id(prefix),
+    do: "#{prefix}_#{System.unique_integer([:positive])}"
+
+  defp wait_for_api_projection(id, attempts \\ 50)
+
+  defp wait_for_api_projection(id, 0),
+    do: flunk("expected GET /api/runs/#{id} to return a completed projection")
+
+  defp wait_for_api_projection(id, attempts) do
+    conn = get(json_conn(), "/api/runs/#{id}")
+
+    case json_response(conn, 200) do
+      %{"data" => %{"state" => "completed"} = data} ->
+        data
+
+      _other ->
+        Process.sleep(10)
+        wait_for_api_projection(id, attempts - 1)
+    end
+  rescue
+    ExUnit.AssertionError ->
+      Process.sleep(10)
+      wait_for_api_projection(id, attempts - 1)
+  end
+
   test "GET /api/health returns a versioned ready response" do
     conn = get(json_conn(), "/api/health")
 
@@ -301,19 +326,80 @@ defmodule Workflow.Web.SchedulerAPITest do
            } = json_response(conn, 200)
   end
 
-  test "POST /api/runs returns a typed error envelope until run start ships" do
+  test "POST /api/runs starts a mock-provider run and returns an accepted response" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_explicit")
+
     conn =
       json_conn()
-      |> post_json("/api/runs", %{})
+      |> post_json("/api/runs", %{
+        script_path: path,
+        run_id: id,
+        provider: "mock",
+        budget: 0
+      })
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "data" => %{
+               "run_id" => ^id,
+               "state" => "accepted",
+               "ui_path" => "/runs/" <> ^id,
+               "ui_url" => "/runs/" <> ^id
+             }
+           } = json_response(conn, 200)
+  end
+
+  test "GET /api/runs/:id returns a journal-backed run projection" do
+    path = demo_workflow()
+    id = run_id("scheduler_api_projection")
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+
+    assert %{"data" => %{"run_id" => ^id}} = json_response(conn, 200)
+
+    assert %{
+             "run_id" => ^id,
+             "state" => "completed",
+             "workflow_name" => "scheduler-api-demo",
+             "phase" => "draft",
+             "logs" => ["ready"],
+             "agent_count" => 1,
+             "event_count" => 5,
+             "usage" => %{
+               "input_tokens" => 0,
+               "output_tokens" => 0,
+               "total_tokens" => 0
+             },
+             "result" => "ok",
+             "failure" => nil,
+             "ui_path" => "/runs/" <> ^id,
+             "ui_url" => "/runs/" <> ^id
+           } = wait_for_api_projection(id)
+  end
+
+  test "POST /api/runs rejects run ids that would break returned UI/API links" do
+    path = demo_workflow()
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs", %{script_path: path, run_id: "foo/bar", provider: "mock"})
 
     assert %{
              "api_version" => "scheduler.v1",
              "error" => %{
-               "code" => "scheduler.run_start_not_available",
-               "message" => "Workflow run start is not available in this scheduler API slice.",
-               "details" => %{}
+               "code" => "scheduler.run.invalid_run_id",
+               "message" => "Run id must be a non-empty string.",
+               "details" => %{
+                 "field" => "run_id",
+                 "expected" => "route_safe_non_empty_string"
+               }
              }
-           } = json_response(conn, 501)
+           } = json_response(conn, 400)
+
+    refute "foo/bar" in Workflow.Journal.run_ids()
   end
 
   test "POST /api/workflows/validate validates a workflow script" do

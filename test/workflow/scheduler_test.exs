@@ -3,7 +3,8 @@ defmodule Workflow.SchedulerTest do
 
   import ExUnit.CaptureIO
 
-  alias Workflow.Scheduler
+  alias Workflow.{Run, Scheduler, Script}
+  alias Workflow.Test.GateProvider
 
   defp write_script(source, prefix \\ "wf") do
     dir = Path.join(System.tmp_dir!(), "agent_loops_scheduler_test")
@@ -35,6 +36,26 @@ defmodule Workflow.SchedulerTest do
       return :ok
     end
     """)
+  end
+
+  defp run_id(prefix),
+    do: "#{prefix}_#{System.unique_integer([:positive])}"
+
+  defp wait_for_projection(id, state \\ :completed, attempts \\ 50)
+
+  defp wait_for_projection(id, state, 0) do
+    flunk("expected run #{id} to reach #{inspect(state)}, got #{inspect(Scheduler.get_run(id))}")
+  end
+
+  defp wait_for_projection(id, state, attempts) do
+    case Scheduler.get_run(id) do
+      {:ok, projection} when projection.state == state ->
+        projection
+
+      _other ->
+        Process.sleep(10)
+        wait_for_projection(id, state, attempts - 1)
+    end
   end
 
   defp bad_workflow do
@@ -312,13 +333,144 @@ defmodule Workflow.SchedulerTest do
            }
   end
 
-  test "run start is an expected scheduler API error until lifecycle support ships" do
-    assert {:error, %Scheduler.Error{} = error} = Scheduler.start_run(%{})
+  test "starts a mock-provider run with an explicit run id through the scheduler context" do
+    path = demo_workflow()
+    id = run_id("scheduler_explicit")
 
-    assert error.status == 501
-    assert error.code == "scheduler.run_start_not_available"
-    assert error.message == "Workflow run start is not available in this scheduler API slice."
-    assert error.details == %{}
+    assert {:ok, start} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock",
+               "budget" => 0
+             })
+
+    assert start.run_id == id
+    assert start.state == :accepted
+    assert start.ui_path == "/runs/#{id}"
+    assert start.ui_url == "/runs/#{id}"
+
+    projection = wait_for_projection(id)
+
+    assert projection.run_id == id
+    assert projection.state == :completed
+    assert projection.workflow_name == "scheduler-demo"
+    assert projection.phase == "draft"
+    assert projection.logs == ["ready"]
+    assert projection.agent_count == 1
+    assert projection.event_count == 5
+    assert projection.usage.total_tokens == 0
+    assert projection.result == :ok
+    assert projection.failure == nil
+    assert projection.ui_path == "/runs/#{id}"
+    assert projection.ui_url == "/runs/#{id}"
+  end
+
+  test "starts a mock-provider run with a generated run id" do
+    path = demo_workflow()
+
+    assert {:ok, start} =
+             Scheduler.start_run(%{
+               script_path: path,
+               provider: :mock
+             })
+
+    assert start.run_id =~ ~r/^run_[0-9a-f]+$/
+    assert start.state == :accepted
+    assert start.ui_path == "/runs/#{start.run_id}"
+
+    projection = wait_for_projection(start.run_id)
+    assert projection.workflow_name == "scheduler-demo"
+  end
+
+  test "start returns a typed error for missing workflow scripts" do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "agent_loops_missing_start_#{System.unique_integer([:positive])}.exs"
+      )
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.start_run(%{"script_path" => path, "provider" => "mock"})
+
+    assert error.status == 404
+    assert error.code == "scheduler.validation.script_not_found"
+    assert error.details.path == path
+  end
+
+  test "start rejects providers other than mock for this API slice" do
+    path = demo_workflow()
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.start_run(%{"script_path" => path, "provider" => "codex"})
+
+    assert error.status == 400
+    assert error.code == "scheduler.run.invalid_provider"
+    assert error.details == %{field: "provider", supported: ["mock"]}
+  end
+
+  test "start rejects invalid budgets as typed input errors" do
+    path = demo_workflow()
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.start_run(%{"script_path" => path, "provider" => "mock", "budget" => -1})
+
+    assert error.status == 400
+    assert error.code == "scheduler.run.invalid_budget"
+    assert error.details == %{field: "budget", expected: "non_negative_integer"}
+  end
+
+  test "start rejects run ids that cannot round-trip through run routes" do
+    path = demo_workflow()
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "provider" => "mock",
+               "run_id" => "foo/bar"
+             })
+
+    assert error.status == 400
+    assert error.code == "scheduler.run.invalid_run_id"
+    assert error.details == %{field: "run_id", expected: "route_safe_non_empty_string"}
+    refute "foo/bar" in Workflow.Journal.run_ids()
+  end
+
+  test "get_run returns a typed error for unknown run ids" do
+    id = run_id("scheduler_unknown")
+
+    assert {:error, %Scheduler.Error{} = error} = Scheduler.get_run(id)
+
+    assert error.status == 404
+    assert error.code == "scheduler.run.not_found"
+    assert error.details == %{run_id: id}
+  end
+
+  test "already-running run ids map to a typed 409 scheduler error" do
+    path = demo_workflow()
+    id = run_id("scheduler_running")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id, writer} =
+             Run.start(tree,
+               run_id: id,
+               provider: {GateProvider, sink: self()},
+               script_path: Path.expand(path)
+             )
+
+    assert_receive {:agent_called, "ship it"}
+    assert_receive {:at_agent, turn}
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.start_run(%{"script_path" => path, "run_id" => id, "provider" => "mock"})
+
+    assert error.status == 409
+    assert error.code == "scheduler.run.already_running"
+    assert error.details == %{run_id: id}
+
+    ref = Process.monitor(writer)
+    send(turn, :proceed)
+    assert_receive {:DOWN, ^ref, :process, ^writer, :normal}
   end
 
   test "validates an existing workflow script through the scheduler context" do

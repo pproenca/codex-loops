@@ -25,6 +25,66 @@ defmodule Workflow.Scheduler.Error do
     }
   end
 
+  @spec invalid_provider() :: t()
+  def invalid_provider do
+    %__MODULE__{
+      status: 400,
+      code: "scheduler.run.invalid_provider",
+      message: "Unsupported run provider.",
+      details: %{field: "provider", supported: ["mock"]}
+    }
+  end
+
+  @spec invalid_budget() :: t()
+  def invalid_budget do
+    %__MODULE__{
+      status: 400,
+      code: "scheduler.run.invalid_budget",
+      message: "Run budget must be a non-negative integer.",
+      details: %{field: "budget", expected: "non_negative_integer"}
+    }
+  end
+
+  @spec invalid_run_id() :: t()
+  def invalid_run_id do
+    %__MODULE__{
+      status: 400,
+      code: "scheduler.run.invalid_run_id",
+      message: "Run id must be a non-empty string.",
+      details: %{field: "run_id", expected: "route_safe_non_empty_string"}
+    }
+  end
+
+  @spec run_already_running(String.t() | nil) :: t()
+  def run_already_running(run_id) do
+    %__MODULE__{
+      status: 409,
+      code: "scheduler.run.already_running",
+      message: "A workflow run with this id is already running.",
+      details: %{run_id: run_id}
+    }
+  end
+
+  @spec run_not_found(String.t()) :: t()
+  def run_not_found(run_id) do
+    %__MODULE__{
+      status: 404,
+      code: "scheduler.run.not_found",
+      message: "Workflow run not found.",
+      details: %{run_id: run_id}
+    }
+  end
+
+  @spec run_start_failed(term()) :: t()
+  def run_start_failed(reason) do
+    %__MODULE__{
+      status: 503,
+      code: "scheduler.run.start_failed",
+      message: "Workflow run could not be started.",
+      details: %{reason: inspect(reason)}
+    }
+  end
+
   @spec missing_script_path() :: t()
   def missing_script_path do
     %__MODULE__{

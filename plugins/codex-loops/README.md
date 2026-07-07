@@ -32,7 +32,9 @@ It exposes:
 - `workflow_validate`: validates a workflow through `POST /api/workflows/validate`
 - `workflow_start`: starts a run through `POST /api/runs` for an existing
   workflow script. Inputs are `script_path`, optional `run_id`, optional
-  `provider` (`mock`), and optional non-negative integer `budget`.
+  `provider` (`mock` or `codex`), and optional non-negative integer `budget`.
+  The scheduler API defaults to `mock`; selecting `codex` spends a real Codex
+  provider turn.
 - `workflow_status`: reads the scheduler projection through
   `GET /api/runs/:id`, preserving run id, state, result, failure, usage, and UI
   link fields.
@@ -41,7 +43,8 @@ It exposes:
   public address fields.
 - `workflow_resume`: resumes an existing scheduler-owned run through
   `POST /api/runs/:id/resume`. Inputs are `run_id`, optional `script_path` or
-  scheduler-supported `script` alias, and optional `provider` (`mock`).
+  scheduler-supported `script` alias, and optional `provider` (`mock` or
+  `codex`).
 - `workflow_open_ui`: reads the run projection and returns `ui_path`, `ui_url`,
   and an absolute `open_url` for the Phoenix LiveView run page.
 
@@ -121,13 +124,19 @@ make test
 make release
 make proof
 make proof-mcp
+make proof-mcp-live
+make proof-live
 ```
 
-`make proof-live` spends one real Codex provider turn through the packaged
-release. `make proof-mcp` exercises MCP initialize, tools/list, lifecycle
-startup, validation, mock start, status polling, event inspection, resume,
-typed scheduler errors, and open-ui response from a copied plugin package
-against its packaged scheduler release.
+`make proof-mcp` exercises MCP initialize, tools/list, lifecycle startup,
+validation, mock start, status polling, event inspection, resume, typed
+scheduler errors, and open-ui response from a copied plugin package against its
+packaged scheduler release. `make proof-mcp-live` validates through MCP, starts
+or reuses the packaged scheduler through MCP lifecycle handling, starts a live
+`provider: "codex"` run through `workflow_start`, polls `workflow_status`, and
+asserts nonzero token usage in the scheduler projection. It spends one real
+Codex provider turn. `make proof-live` is an alias for `make proof-mcp-live`;
+`make proof-release-live` keeps the legacy direct packaged-release live proof.
 
 ## License
 

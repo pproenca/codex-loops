@@ -42,6 +42,53 @@ defmodule Workflow.Web.SchedulerAPITest do
     """)
   end
 
+  defp codex_stub_source do
+    """
+    #!/bin/sh
+    cat >/dev/null
+    printf '%s\\n' '{"type":"thread.started","thread_id":"scheduler-api-stub"}'
+    printf '%s\\n' '{"type":"turn.started"}'
+    printf '%s\\n' '{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"LIVE-MCP-PROOF-OK"}}'
+    printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":0,"output_tokens":11,"reasoning_output_tokens":0}}'
+    """
+  end
+
+  defp with_codex_stub(fun) when is_function(fun, 0) do
+    dir =
+      Path.join(
+        System.tmp_dir!(),
+        "scheduler_api_codex_stub_#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(dir)
+
+    stub = Path.join(dir, "codex")
+    File.write!(stub, codex_stub_source())
+    File.chmod!(stub, 0o755)
+
+    previous_path = System.get_env("PATH")
+    System.put_env("PATH", dir <> path_separator() <> (previous_path || ""))
+
+    try do
+      fun.()
+    after
+      if previous_path do
+        System.put_env("PATH", previous_path)
+      else
+        System.delete_env("PATH")
+      end
+
+      File.rm_rf(dir)
+    end
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _name} -> ";"
+      _other -> ":"
+    end
+  end
+
   defp two_agent_workflow do
     write_workflow(~S"""
     workflow "scheduler-api-two-agents" do
@@ -417,6 +464,41 @@ defmodule Workflow.Web.SchedulerAPITest do
            } = json_response(conn, 200)
   end
 
+  test "POST /api/runs can start a codex-provider run with a hermetic CLI on PATH" do
+    with_codex_stub(fn ->
+      path = demo_workflow()
+      id = run_id("scheduler_api_codex")
+
+      conn =
+        json_conn()
+        |> post_json("/api/runs", %{
+          script_path: path,
+          run_id: id,
+          provider: "codex"
+        })
+
+      assert %{
+               "api_version" => "scheduler.v1",
+               "data" => %{
+                 "run_id" => ^id,
+                 "state" => "accepted",
+                 "ui_path" => "/runs/" <> ^id,
+                 "ui_url" => "/runs/" <> ^id
+               }
+             } = json_response(conn, 200)
+
+      assert %{
+               "state" => "completed",
+               "usage" => %{
+                 "input_tokens" => 7,
+                 "output_tokens" => 11,
+                 "total_tokens" => 18
+               },
+               "result" => "ok"
+             } = wait_for_api_projection(id)
+    end)
+  end
+
   test "GET /api/runs/:id returns a journal-backed run projection" do
     path = demo_workflow()
     id = run_id("scheduler_api_projection")
@@ -673,14 +755,14 @@ defmodule Workflow.Web.SchedulerAPITest do
 
     conn =
       json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{script_path: path, provider: "codex"})
+      |> post_json("/api/runs/#{id}/resume", %{script_path: path, provider: "bogus"})
 
     assert %{
              "api_version" => "scheduler.v1",
              "error" => %{
                "code" => "scheduler.run.invalid_provider",
                "message" => "Unsupported run provider.",
-               "details" => %{"field" => "provider", "supported" => ["mock"]}
+               "details" => %{"field" => "provider", "supported" => ["mock", "codex"]}
              }
            } = json_response(conn, 400)
   end

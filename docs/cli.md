@@ -47,11 +47,17 @@ line is a single JSON error object:
 
 ```sh
 make proof
+make proof-mcp
+make proof-mcp-live
 make proof-live
+make proof-release-live
 ```
 
 `make proof` builds the release, starts the packaged Phoenix scheduler, and
 proves the API/UI path against an isolated temporary workflow and SQLite journal:
 health, validate, start mock run, read status/events, and fetch the run UI.
-`make proof-live` keeps the compatible CLI wrapper path covered by running one
-live Codex-backed turn and asserting nonzero usage.
+`make proof-mcp` proves the copied plugin MCP package path with mock runs.
+`make proof-mcp-live` spends one real Codex turn through MCP and asserts
+nonzero usage from scheduler status. `make proof-live` aliases
+`make proof-mcp-live`; `make proof-release-live` keeps the compatible direct
+release wrapper path covered.

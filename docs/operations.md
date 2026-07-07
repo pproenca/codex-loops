@@ -48,10 +48,15 @@ make proof
 
 ```sh
 make proof-live
+make proof-release-live
 ```
 
-This spends one live Codex provider turn through the packaged release command,
-then asserts the run completed and recorded nonzero token usage.
+`make proof-live` aliases the MCP live proof. It spends one live Codex provider
+turn through the packaged scheduler plus MCP lifecycle path, then asserts the
+run completed and recorded nonzero token usage in the scheduler projection.
+
+`make proof-release-live` keeps the legacy direct packaged-release command path
+covered for compatibility.
 
 ## Normal Workflow Run
 

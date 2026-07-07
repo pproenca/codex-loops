@@ -400,9 +400,9 @@ defmodule Workflow.MCP.Stdio do
           },
           "provider" => %{
             "type" => "string",
-            "enum" => ["mock"],
+            "enum" => ["mock", "codex"],
             "description" =>
-              "Optional scheduler provider. The current scheduler API supports mock."
+              "Optional scheduler provider. Defaults to mock; codex spends a real Codex turn."
           },
           "budget" => %{
             "type" => "integer",
@@ -475,9 +475,9 @@ defmodule Workflow.MCP.Stdio do
           },
           "provider" => %{
             "type" => "string",
-            "enum" => ["mock"],
+            "enum" => ["mock", "codex"],
             "description" =>
-              "Optional scheduler provider. The current scheduler API supports mock."
+              "Optional scheduler provider. Defaults to mock; codex spends a real Codex turn."
           }
         },
         "required" => ["run_id"],

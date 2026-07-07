@@ -52,13 +52,14 @@ MCP behavior:
 - `initialize`, `tools/list`, `tools/call`, and notifications
 - `workflow_validate` input schema requires `script_path`
 - `workflow_start` input schema requires `script_path` and accepts optional
-  `run_id`, optional `provider` (`mock`), and optional non-negative integer
-  `budget`
+  `run_id`, optional `provider` (`mock` or `codex`), and optional
+  non-negative integer `budget`. The scheduler API defaults to `mock`;
+  selecting `codex` spends a real Codex provider turn.
 - `workflow_status` input schema requires `run_id`
 - `workflow_inspect` input schema requires `run_id`
 - `workflow_resume` input schema requires `run_id` and accepts optional
   `script_path`, optional scheduler-supported `script` alias, and optional
-  `provider` (`mock`)
+  `provider` (`mock` or `codex`)
 - `workflow_open_ui` input schema requires `run_id`
 - `tools/call` health-checks `GET /api/health` before scheduler operations
 - when health fails, the server discovers and starts a packaged scheduler
@@ -167,14 +168,21 @@ make setup
 make test
 make proof
 make proof-mcp
+make proof-mcp-live
 make proof-live
+make proof-release-live
 ```
 
-`make proof-live` spends one real Codex provider turn through the packaged
-release. `make proof-mcp` copies the plugin package to a temp install location
-and proves MCP lifecycle, validation, mock start, status polling, event
-inspection, resume, typed scheduler errors, and open-ui response against the
-copied package's scheduler release.
+`make proof-mcp` copies the plugin package to a temp install location and proves
+MCP lifecycle, validation, mock start, status polling, event inspection,
+resume, typed scheduler errors, and open-ui response against the copied
+package's scheduler release. `make proof-mcp-live` validates through MCP,
+starts or reuses the packaged scheduler through MCP lifecycle handling, starts a
+live `provider: "codex"` run through `workflow_start`, observes completion
+through `workflow_status`, and asserts nonzero token usage from the scheduler
+projection. It spends one real Codex provider turn. `make proof-live` aliases
+the MCP live proof; `make proof-release-live` keeps the legacy direct
+packaged-release live proof.
 
 ## Safety And Testing
 

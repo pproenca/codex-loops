@@ -16,6 +16,18 @@ defmodule Workflow.Web.Endpoint do
 
   socket("/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session_options]])
 
+  plug(Plug.Static,
+    at: "/assets/phoenix",
+    from: {:phoenix, "priv/static"},
+    only: ~w(phoenix.js)
+  )
+
+  plug(Plug.Static,
+    at: "/assets/phoenix_live_view",
+    from: {:phoenix_live_view, "priv/static"},
+    only: ~w(phoenix_live_view.js)
+  )
+
   plug(Plug.Session, @session_options)
   plug(Workflow.Web.Router)
 end

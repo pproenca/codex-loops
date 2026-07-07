@@ -14,6 +14,8 @@ defmodule Workflow.Status do
             tree_name: nil,
             tree_version: nil,
             phase: nil,
+            current_phase_id: nil,
+            phases: [],
             logs: [],
             agents: [],
             rejected: [],
@@ -40,7 +42,8 @@ defmodule Workflow.Status do
   end
 
   defp apply_event(%Event{type: :phase_entered, payload: p}, s) do
-    %{s | phase: p.name} |> tick()
+    phase = %{id: "phase-#{length(s.phases)}", name: p.name, address: p.address, agents: []}
+    %{s | phase: p.name, current_phase_id: phase.id, phases: s.phases ++ [phase]} |> tick()
   end
 
   defp apply_event(%Event{type: :log_emitted, payload: p}, s) do
@@ -48,24 +51,55 @@ defmodule Workflow.Status do
   end
 
   defp apply_event(%Event{type: :agent_committed, payload: p}, s) do
+    s = ensure_phase(s)
+
     agent = %{
       address: p.address,
+      iteration: p.iteration,
       prompt: p.prompt,
       result: p.result,
       usage: p.usage,
-      idempotency_key: p.idempotency_key
+      idempotency_key: p.idempotency_key,
+      activity: Map.get(p, :activity, []),
+      phase_id: s.current_phase_id,
+      phase_name: phase_name(s)
     }
 
-    %{s | agents: s.agents ++ [agent], usage: Usage.add(s.usage, p.usage)} |> tick()
+    %{
+      s
+      | agents: s.agents ++ [agent],
+        phases: append_agent_to_phase(s.phases, s.current_phase_id, agent),
+        usage: Usage.add(s.usage, p.usage)
+    }
+    |> tick()
   end
 
   defp apply_event(%Event{type: :agent_attempt_rejected, payload: p}, s) do
-    rejection = %{address: p.address, attempt: p.attempt, reason: p.reason}
+    s = ensure_phase(s)
+
+    rejection = %{
+      address: p.address,
+      iteration: p.iteration,
+      attempt: p.attempt,
+      prompt: p.prompt,
+      output: p.output,
+      reason: p.reason,
+      activity: Map.get(p, :activity, []),
+      phase_id: s.current_phase_id,
+      phase_name: phase_name(s)
+    }
+
     %{s | rejected: s.rejected ++ [rejection], usage: Usage.add(s.usage, p.usage)} |> tick()
   end
 
   defp apply_event(%Event{type: :agent_failed, payload: p}, s) do
-    failure = %{address: p.address, attempts: p.attempts, reason: p.reason}
+    failure = %{
+      address: p.address,
+      iteration: p.iteration,
+      attempts: p.attempts,
+      reason: p.reason
+    }
+
     %{s | state: :failed, failure: failure} |> tick()
   end
 
@@ -125,4 +159,25 @@ defmodule Workflow.Status do
   end
 
   defp tick(%__MODULE__{} = s), do: %{s | event_count: s.event_count + 1}
+
+  defp ensure_phase(%__MODULE__{current_phase_id: nil} = s) do
+    phase = %{id: "phase-default", name: "Default phase", address: nil, agents: []}
+    %{s | current_phase_id: phase.id, phases: s.phases ++ [phase]}
+  end
+
+  defp ensure_phase(%__MODULE__{} = s), do: s
+
+  defp append_agent_to_phase(phases, phase_id, agent) do
+    Enum.map(phases, fn
+      %{id: ^phase_id, agents: agents} = phase -> %{phase | agents: agents ++ [agent]}
+      phase -> phase
+    end)
+  end
+
+  defp phase_name(%__MODULE__{phases: phases, current_phase_id: phase_id}) do
+    case Enum.find(phases, &(&1.id == phase_id)) do
+      nil -> nil
+      phase -> phase.name
+    end
+  end
 end

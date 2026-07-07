@@ -10,6 +10,27 @@ defmodule Workflow.RunTest do
   alias Workflow.Provider.Usage
   alias Workflow.Test.{EchoProvider, GateProvider}
 
+  defmodule ActivityProvider do
+    @behaviour Workflow.Provider
+
+    @impl true
+    def run_agent(prompt, _schema, _key, opts) do
+      if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt})
+
+      activity = [
+        %{
+          kind: "tool",
+          label: "Shell",
+          summary: "mix test test/workflow/run_test.exs",
+          status: "completed"
+        }
+      ]
+
+      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 2, output_tokens: 3, total_tokens: 5},
+       activity}
+    end
+  end
+
   defmodule DemoWorkflow do
     use Workflow
 
@@ -59,6 +80,55 @@ defmodule Workflow.RunTest do
              %IdempotencyKey{run_id: id, node_path: [2], iteration: 0}
   end
 
+  test "richer provider tuples journal normalized activity on committed agents" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(DemoWorkflow, run_id: id, provider: {ActivityProvider, sink: self()})
+
+    agent = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
+
+    assert agent.payload.activity == [
+             %{
+               kind: "tool",
+               label: "Shell",
+               summary: "mix test test/workflow/run_test.exs",
+               status: "completed"
+             }
+           ]
+
+    [folded_agent] = Status.of(id).agents
+    assert folded_agent.activity == agent.payload.activity
+  end
+
+  test "legacy committed and rejected agent events fold with empty activity" do
+    node = %Workflow.Node.Agent{address: [0], prompt: "classify"}
+
+    committed =
+      Event.agent_committed(
+        node,
+        0,
+        %IdempotencyKey{run_id: "r", node_path: [0], iteration: 0},
+        %{"label" => "ok"},
+        %Usage{total_tokens: 1}
+      )
+
+    rejected =
+      Event.agent_attempt_rejected(
+        node,
+        0,
+        0,
+        %{"bad" => true},
+        "missing label",
+        %Usage{total_tokens: 1}
+      )
+
+    status = Status.fold([committed, rejected], "r")
+
+    assert [%{activity: []}] = status.agents
+    assert [%{activity: []}] = status.rejected
+  end
+
   test "a legacy literal-prompt agent still sends and journals the exact binary prompt" do
     id = run_id()
 
@@ -89,6 +159,98 @@ defmodule Workflow.RunTest do
 
     # Purity: folding the same events by hand yields the same model.
     assert Status.fold(Journal.fold(id), id) == status
+  end
+
+  test "status groups agents under the latest entered phase with an implicit default phase" do
+    usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+    key = %IdempotencyKey{run_id: "r", node_path: [0], iteration: 0}
+
+    events = [
+      Event.agent_committed(
+        %Workflow.Node.Agent{address: [0], prompt: "preflight"},
+        0,
+        key,
+        :preflight,
+        usage
+      ),
+      Event.phase_entered(%Workflow.Node.Phase{address: [1], name: "plan"}),
+      Event.agent_committed(
+        %Workflow.Node.Agent{address: [2], prompt: "plan"},
+        0,
+        key,
+        :plan,
+        usage
+      ),
+      Event.phase_entered(%Workflow.Node.Phase{address: [3], name: "build"}),
+      Event.agent_committed(
+        %Workflow.Node.Agent{address: [4], prompt: "build"},
+        0,
+        key,
+        :build,
+        usage
+      )
+    ]
+
+    status = Status.fold(events, "r")
+
+    assert Enum.map(status.phases, & &1.name) == ["Default phase", "plan", "build"]
+
+    assert [
+             %{id: "phase-default", agents: [%{prompt: "preflight", phase_id: "phase-default"}]},
+             %{id: "phase-1", agents: [%{prompt: "plan", phase_id: "phase-1"}]},
+             %{id: "phase-2", agents: [%{prompt: "build", phase_id: "phase-2"}]}
+           ] = status.phases
+  end
+
+  test "status keeps same-address loop agents distinct by iteration" do
+    usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+    node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
+
+    events = [
+      Event.phase_entered(%Workflow.Node.Phase{address: [0], name: "loop"}),
+      Event.agent_attempt_rejected(
+        node,
+        0,
+        0,
+        %{"bad" => 0},
+        {:missing_required, "label"},
+        usage
+      ),
+      Event.agent_committed(
+        node,
+        0,
+        %IdempotencyKey{run_id: "r", node_path: [1], iteration: 0},
+        %{"label" => "zero"},
+        usage
+      ),
+      Event.agent_attempt_rejected(
+        node,
+        1,
+        0,
+        %{"bad" => 1},
+        {:missing_required, "label"},
+        usage
+      ),
+      Event.agent_committed(
+        node,
+        1,
+        %IdempotencyKey{run_id: "r", node_path: [1], iteration: 1},
+        %{"label" => "one"},
+        usage
+      )
+    ]
+
+    status = Status.fold(events, "r")
+
+    assert Enum.map(status.agents, &{&1.address, &1.iteration, &1.result}) == [
+             {[1], 0, %{"label" => "zero"}},
+             {[1], 1, %{"label" => "one"}}
+           ]
+
+    assert Enum.map(status.rejected, &{&1.address, &1.iteration, &1.attempt}) == [
+             {[1], 0, 0},
+             {[1], 1, 0}
+           ]
   end
 
   test "a post-commit broadcast fires on every committed event" do

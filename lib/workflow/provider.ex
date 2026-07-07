@@ -28,13 +28,23 @@ defmodule Workflow.Provider do
   """
 
   @type result :: term()
+  @type activity :: [
+          %{
+            optional(:kind) => String.t(),
+            optional(:label) => String.t(),
+            optional(:summary) => String.t(),
+            optional(:status) => String.t()
+          }
+        ]
 
   @callback run_agent(
               prompt :: String.t(),
               schema :: map() | nil,
               key :: Workflow.IdempotencyKey.t(),
               opts :: term()
-            ) :: {:ok, result(), Workflow.Provider.Usage.t()}
+            ) ::
+              {:ok, result(), Workflow.Provider.Usage.t()}
+              | {:ok, result(), Workflow.Provider.Usage.t(), activity()}
 
   @typedoc "A resolved backend: the provider module plus its opaque per-run opts."
   @type t :: {module(), term()}

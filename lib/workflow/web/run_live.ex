@@ -19,7 +19,7 @@ defmodule Workflow.Web.RunLive do
   """
   use Phoenix.LiveView
 
-  alias Workflow.Status
+  alias Workflow.{RunInspector, Status}
 
   @impl true
   def mount(%{"run_id" => run_id}, _session, socket) do
@@ -46,37 +46,40 @@ defmodule Workflow.Web.RunLive do
   # The single point where state enters the socket: a fresh fold of the journal.
   defp assign_projection(socket, run_id) do
     status = Status.of(run_id)
-    phase_id = valid_phase_id(status, socket.assigns[:focused_phase_id]) || first_phase_id(status)
+    inspector = RunInspector.from_status(status)
 
-    agent_id =
-      valid_agent_id(status, phase_id, socket.assigns[:selected_agent_id]) ||
-        first_agent_id(status, phase_id)
+    selection =
+      RunInspector.selection(
+        inspector,
+        socket.assigns[:focused_phase_id],
+        socket.assigns[:selected_agent_id]
+      )
 
     assign(socket,
       run_id: run_id,
       status: status,
-      focused_phase_id: phase_id,
-      selected_agent_id: agent_id
+      inspector: inspector
     )
+    |> assign_selection(selection)
   end
 
   defp focus_phase(socket, phase_id) do
-    status = socket.assigns.status
-    phase_id = valid_phase_id(status, phase_id) || first_phase_id(status)
-
-    assign(socket,
-      focused_phase_id: phase_id,
-      selected_agent_id: first_agent_id(status, phase_id)
-    )
+    socket.assigns.inspector
+    |> RunInspector.selection(phase_id, nil)
+    |> then(&assign_selection(socket, &1))
   end
 
   defp select_agent(socket, agent_id) do
-    status = socket.assigns.status
-    phase_id = socket.assigns.focused_phase_id
+    socket.assigns.inspector
+    |> RunInspector.selection(socket.assigns.focused_phase_id, agent_id)
+    |> then(&assign_selection(socket, &1))
+  end
 
+  defp assign_selection(socket, %{focused_phase_id: phase_id, selected_agent_id: agent_id}) do
     assign(socket,
-      selected_agent_id:
-        valid_agent_id(status, phase_id, agent_id) || first_agent_id(status, phase_id)
+      focused_phase_id: phase_id,
+      selected_agent_id: agent_id,
+      inspector_detail: RunInspector.detail(socket.assigns.inspector, phase_id, agent_id)
     )
   end
 
@@ -393,7 +396,7 @@ defmodule Workflow.Web.RunLive do
           <dt :if={@status.phase}>phase</dt>
           <dd :if={@status.phase} data-testid="phase">{@status.phase}</dd>
           <dt>agents</dt>
-          <dd data-testid="agent-count">{plural_count(length(@status.agents), "agent")}</dd>
+          <dd data-testid="agent-count">{plural_count(length(@inspector.agents), "agent")}</dd>
           <dt>tokens</dt>
           <dd data-testid="usage">{@status.usage.total_tokens}</dd>
           <dt>events</dt>
@@ -404,7 +407,7 @@ defmodule Workflow.Web.RunLive do
       <section data-testid="inspector">
         <nav data-testid="phase-list" aria-label="Phases">
           <button
-            :for={phase <- @status.phases}
+            :for={phase <- @inspector.phases}
             type="button"
             phx-click="focus_phase"
             phx-value-id={phase.id}
@@ -413,25 +416,24 @@ defmodule Workflow.Web.RunLive do
           >
             {phase.name} ({length(phase.agents)})
           </button>
-          <p :if={@status.phases == []}>No phases yet</p>
+          <p :if={@inspector.phases == []}>No phases yet</p>
         </nav>
 
         <section data-testid="agents">
-          <% phase = focused_phase(@status, @focused_phase_id) %>
-          <% agents = if phase, do: phase.agents, else: [] %>
+          <% agents = @inspector_detail.agents %>
           <h2>Agents ({length(agents)})</h2>
           <ol data-testid="phase-agents">
             <li
               :for={agent <- agents}
               data-address={inspect(agent.address)}
               data-iteration={agent.iteration}
-              data-testid={"phase-agent-#{agent_slug(agent)}"}
+              data-testid={"phase-agent-#{agent.slug}"}
             >
               <button
                 type="button"
                 phx-click="select_agent"
-                phx-value-id={agent_id(agent)}
-                aria-pressed={agent_id(agent) == @selected_agent_id}
+                phx-value-id={agent.id}
+                aria-pressed={agent.id == @selected_agent_id}
               >
                 {agent.prompt}
               </button>
@@ -440,9 +442,9 @@ defmodule Workflow.Web.RunLive do
         </section>
 
         <section data-testid="agent-detail">
-          <% agent = selected_agent(@status, @focused_phase_id, @selected_agent_id) %>
-          <% rejections = detail_rejections(@status, @focused_phase_id, @selected_agent_id) %>
-          <% failed_rejections = failed_rejections(@status, rejections) %>
+          <% agent = @inspector_detail.agent %>
+          <% rejections = @inspector_detail.rejected_attempts %>
+          <% failed_rejections = @inspector_detail.failed_rejected_attempts %>
           <%= if agent do %>
             <h2>Agent {inspect(agent.address)}</h2>
             <p>iteration {agent.iteration}</p>
@@ -451,14 +453,14 @@ defmodule Workflow.Web.RunLive do
             <h3>Activity</h3>
             <ol>
               <li :for={entry <- agent.activity}>
-                <strong>{activity_label(entry)}</strong>
-                <span :if={activity_status(entry)}> {activity_status(entry)}</span>
-                <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
+                <strong>{entry.label}</strong>
+                <span :if={entry.status}> {entry.status}</span>
+                <span :if={entry.summary}> {entry.summary}</span>
               </li>
             </ol>
             <p :if={agent.activity == []}>No activity recorded</p>
             <h3>Outcome</h3>
-            <pre>{inspect(agent.result)}</pre>
+            <pre>{inspect(agent.outcome)}</pre>
           <% else %>
             <p :if={rejections == []}>No agent selected</p>
           <% end %>
@@ -471,9 +473,9 @@ defmodule Workflow.Web.RunLive do
                 <pre>{inspect(rejection.output)}</pre>
                 <ol :if={rejection.activity != []}>
                   <li :for={entry <- rejection.activity}>
-                    <strong>{activity_label(entry)}</strong>
-                    <span :if={activity_status(entry)}> {activity_status(entry)}</span>
-                    <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
+                    <strong>{entry.label}</strong>
+                    <span :if={entry.status}> {entry.status}</span>
+                    <span :if={entry.summary}> {entry.summary}</span>
                   </li>
                 </ol>
                 <p :if={rejection.activity == []}>No activity recorded</p>
@@ -489,9 +491,9 @@ defmodule Workflow.Web.RunLive do
                 <pre>{inspect(rejection.output)}</pre>
                 <ol :if={rejection.activity != []}>
                   <li :for={entry <- rejection.activity}>
-                    <strong>{activity_label(entry)}</strong>
-                    <span :if={activity_status(entry)}> {activity_status(entry)}</span>
-                    <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
+                    <strong>{entry.label}</strong>
+                    <span :if={entry.status}> {entry.status}</span>
+                    <span :if={entry.summary}> {entry.summary}</span>
                   </li>
                 </ol>
                 <p :if={rejection.activity == []}>No activity recorded</p>
@@ -518,98 +520,8 @@ defmodule Workflow.Web.RunLive do
     """
   end
 
-  defp first_phase_id(%Status{phases: [%{id: id} | _]}), do: id
-  defp first_phase_id(%Status{}), do: nil
-
-  defp valid_phase_id(%Status{} = status, phase_id) when is_binary(phase_id) do
-    if Enum.any?(status.phases, &(&1.id == phase_id)), do: phase_id
-  end
-
-  defp valid_phase_id(%Status{}, _phase_id), do: nil
-
-  defp first_agent_id(%Status{} = status, phase_id) do
-    case focused_phase(status, phase_id) do
-      %{agents: [agent | _]} -> agent_id(agent)
-      _phase -> nil
-    end
-  end
-
-  defp valid_agent_id(%Status{} = status, phase_id, agent_id) when is_binary(agent_id) do
-    status
-    |> focused_phase(phase_id)
-    |> case do
-      %{agents: agents} ->
-        if Enum.any?(agents, &(agent_id(&1) == agent_id)), do: agent_id
-
-      _phase ->
-        nil
-    end
-  end
-
-  defp valid_agent_id(%Status{}, _phase_id, _agent_id), do: nil
-
-  defp focused_phase(%Status{} = status, phase_id),
-    do: Enum.find(status.phases, &(&1.id == phase_id))
-
-  defp selected_agent(%Status{} = status, phase_id, agent_id) do
-    status
-    |> focused_phase(phase_id)
-    |> case do
-      %{agents: agents} -> Enum.find(agents, &(agent_id(&1) == agent_id))
-      _phase -> nil
-    end
-  end
-
-  defp detail_rejections(%Status{} = status, phase_id, agent_id) do
-    case selected_agent(status, phase_id, agent_id) do
-      %{address: address, iteration: iteration} ->
-        Enum.filter(status.rejected, &(&1.address == address and &1.iteration == iteration))
-
-      nil ->
-        Enum.filter(status.rejected, &(&1.phase_id == phase_id))
-    end
-  end
-
-  defp failed_rejections(%Status{failure: nil}, _visible_rejections), do: []
-
-  defp failed_rejections(
-         %Status{failure: %{address: address, iteration: iteration}} = status,
-         visible_rejections
-       ) do
-    visible = MapSet.new(Enum.map(visible_rejections, &rejection_id/1))
-
-    status.rejected
-    |> Enum.filter(&(&1.address == address and &1.iteration == iteration))
-    |> Enum.reject(&(rejection_id(&1) in visible))
-  end
-
-  defp rejection_id(rejection), do: {rejection.address, rejection.iteration, rejection.attempt}
-
-  defp agent_id(agent),
-    do:
-      "agent-" <> Enum.map_join(agent.address, "-", &to_string/1) <> "-i#{agent_iteration(agent)}"
-
-  defp agent_slug(agent) do
-    slug =
-      agent.prompt
-      |> String.downcase()
-      |> String.replace(~r/[^a-z0-9]+/, "-")
-      |> String.trim("-")
-
-    case slug do
-      "" -> agent_id(agent)
-      slug -> "#{slug}-i#{agent_iteration(agent)}"
-    end
-  end
-
-  defp agent_iteration(agent), do: Map.get(agent, :iteration, 0)
-
   defp plural_count(1, word), do: "1 #{word}"
   defp plural_count(count, word), do: "#{count} #{word}s"
 
   defp csrf_token, do: Plug.CSRFProtection.get_csrf_token()
-
-  defp activity_label(entry), do: Map.get(entry, :label) || Map.get(entry, "label") || "Activity"
-  defp activity_status(entry), do: Map.get(entry, :status) || Map.get(entry, "status")
-  defp activity_summary(entry), do: Map.get(entry, :summary) || Map.get(entry, "summary")
 end

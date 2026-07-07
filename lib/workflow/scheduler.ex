@@ -7,7 +7,7 @@ defmodule Workflow.Scheduler do
   unexpected process failures are left to crash under supervision.
   """
 
-  alias Workflow.Scheduler.{Error, Health}
+  alias Workflow.Scheduler.{Error, Health, Validation}
 
   @app :codex_loops
 
@@ -29,6 +29,25 @@ defmodule Workflow.Scheduler do
 
   @spec start_run(map()) :: {:error, Error.t()}
   def start_run(_params), do: {:error, Error.run_start_not_available()}
+
+  @spec validate_workflow(map()) :: {:ok, Validation.t()} | {:error, Error.t()}
+  def validate_workflow(%{"script_path" => path}) when is_binary(path),
+    do: validate_workflow_path(path)
+
+  def validate_workflow(%{script_path: path}) when is_binary(path),
+    do: validate_workflow_path(path)
+
+  def validate_workflow(%{"script" => path}) when is_binary(path),
+    do: validate_workflow_path(path)
+
+  def validate_workflow(_params), do: {:error, Error.missing_script_path()}
+
+  defp validate_workflow_path(path) do
+    case Workflow.Script.load_tree(path) do
+      {:ok, tree} -> {:ok, Validation.from_tree(tree, path)}
+      {:error, error} -> {:error, Error.workflow_validation(error)}
+    end
+  end
 
   defp application_started?(app) do
     Enum.any?(Application.started_applications(), fn

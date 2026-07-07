@@ -27,7 +27,7 @@ defmodule Workflow.CLI do
   entry that simply halts on `exec/1`.
   """
 
-  alias Workflow.{Journal, Status, Event, Run}
+  alias Workflow.{Journal, Status, Event, Run, Script}
   alias Workflow.CLI.Error
 
   # OptionParser switch types, keyed by the canonical (underscored) option name.
@@ -327,35 +327,22 @@ defmodule Workflow.CLI do
   # --- Workflow loading: the same compile-time gate as execution (#2) ---
 
   defp load_tree(path) do
-    if File.regular?(path),
-      do: compile_tree(path),
-      else: {:error, Error.new(:usage, "workflow script not found: #{path}")}
-  end
-
-  defp compile_tree(path) do
-    modules = Code.compile_file(path)
-
-    case Enum.find(modules, fn {mod, _bin} -> function_exported?(mod, :__workflow__, 1) end) do
-      {mod, _bin} ->
-        {:ok, mod.__workflow__(:tree)}
-
-      nil ->
-        {:error,
-         Error.new(
-           :validation,
-           "no workflow defined in #{path}",
-           "define one with `use Workflow` and a `workflow \"name\" do ... end` block"
-         )}
+    case Script.load_tree(path) do
+      {:ok, tree} -> {:ok, tree}
+      {:error, error} -> {:error, script_error_to_cli(error)}
     end
-  rescue
-    # The `workflow` macro raises this from the compile-time gate; surface its
-    # rustc-style findings as a located validation failure (exit 6). Ordinary
-    # Elixir parser/compiler failures are also expected user-script failures, so
-    # they must keep the CLI's JSON/exit-code contract instead of bubbling as a
-    # stacktrace.
-    e in [Workflow.CompileError, SyntaxError, TokenMissingError, CompileError] ->
-      {:error, Error.new(:validation, Exception.message(e))}
   end
+
+  defp script_error_to_cli(%Script.Error{kind: :script_not_found, message: message}),
+    do: Error.new(:usage, message)
+
+  defp script_error_to_cli(%Script.Error{kind: :no_workflow, message: message, details: details}),
+    do: Error.new(:validation, message, Map.get(details, :hint))
+
+  # The `workflow` macro raises Workflow.CompileError from the compile-time gate;
+  # parser/compiler failures are also expected user-script failures. Keep the CLI
+  # JSON/exit-code contract instead of bubbling a stacktrace.
+  defp script_error_to_cli(%Script.Error{message: message}), do: Error.new(:validation, message)
 
   # --- Option/argument parsing ---
 

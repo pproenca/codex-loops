@@ -25,6 +25,37 @@ defmodule Workflow.Scheduler.Error do
     }
   end
 
+  @spec missing_script_path() :: t()
+  def missing_script_path do
+    %__MODULE__{
+      status: 400,
+      code: "scheduler.validation.missing_script_path",
+      message: "Missing workflow script path.",
+      details: %{field: "script_path"}
+    }
+  end
+
+  @spec workflow_validation(Workflow.Script.Error.t()) :: t()
+  def workflow_validation(%Workflow.Script.Error{kind: :script_not_found} = error) do
+    %__MODULE__{
+      status: 404,
+      code: "scheduler.validation.script_not_found",
+      message: error.message,
+      details: validation_details(error)
+    }
+  end
+
+  def workflow_validation(%Workflow.Script.Error{} = error) do
+    type = error.kind |> Atom.to_string()
+
+    %__MODULE__{
+      status: 422,
+      code: "scheduler.validation.#{type}",
+      message: "Workflow script failed validation.",
+      details: validation_details(error)
+    }
+  end
+
   @spec malformed_json() :: t()
   def malformed_json do
     %__MODULE__{
@@ -51,5 +82,12 @@ defmodule Workflow.Scheduler.Error do
       message: "Scheduler runtime dependencies are unavailable.",
       details: %{checks: checks}
     }
+  end
+
+  defp validation_details(%Workflow.Script.Error{} = error) do
+    error.details
+    |> Map.put(:path, error.path)
+    |> Map.put(:reason, error.message)
+    |> Map.put(:type, error.kind)
   end
 end

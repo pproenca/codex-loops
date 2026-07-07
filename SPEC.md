@@ -2452,7 +2452,10 @@ over the journal (it consults no process state). `state` transitions:
 The fold accumulates `phases`, `logs`, `agents`, `rejected`, `accumulators`,
 `verifications`, `judgments`, `usage` (summed only from `agent_committed` and
 `agent_attempt_rejected` — rejections still pay), and sets `result = value` on
-`run_completed`. Every clause increments `event_count`, so the fold is total.
+`run_completed`. Every folded journal event increments `event_count`. Unknown/new event
+types MUST be accepted by the fold, MUST increment `event_count`, and MUST leave every
+other `Workflow.Status` field unchanged. This preserves the open event discriminator in
+§7.1 while keeping resume/status/inspector reads total over additive logs.
 
 **List-projection shapes (pinned).** These projections live in the `Workflow.Status` struct
 returned by `Workflow.Status.of/1` (§7.6) and feed the inspector projection (§7.3.1). Of
@@ -2599,6 +2602,13 @@ AgentSlug(agent):
 `AgentSlug` is for display/testing convenience only and MUST NOT replace `AgentId` as
 identity.
 
+When an `InspectorAgent` is serialized through the public scheduler API or MCP tools, its
+`idempotency_key` field MUST be JSON-safe: either `nil`, or exactly the map
+`%{"run_id" => String.t(), "node_path" => [non_neg_integer()], "iteration" =>
+non_neg_integer(), "attempt" => non_neg_integer()}`. An implementation MAY hold the key
+internally as a host-language struct or atom-keyed map, but the public JSON shape MUST be
+the four-key map above and MUST NOT be flattened, hashed, or replaced with a string.
+
 ```
 InspectorRejection(rejection):
   - Let {iteration} be AgentIteration(rejection).
@@ -2724,7 +2734,90 @@ Run API return values:
 - `{:error, {:already_running, pid}}` when a live writer holds the lease.
 - `{:error, {:run_crashed, reason}}` on writer crash.
 
-### 7.5 CLI envelope, error object, exit codes
+### 7.5 Scheduler API/MCP JSON, CLI envelope, error object, exit codes
+
+The public scheduler HTTP API is a separate JSON contract from the legacy CLI
+`--json` envelope below. Successful scheduler responses MUST be shaped as:
+
+```
+{"api_version": "scheduler.v1", "data": <endpoint data>}
+```
+
+Typed scheduler errors MUST be shaped as:
+
+```
+{"api_version": "scheduler.v1",
+ "error": {"code": <string>, "message": <string>, "details": <map>}}
+```
+
+MCP workflow tools that read scheduler status or inspect data are adapters over this
+scheduler API. They MUST preserve the scheduler `data` shapes below as JSON-safe
+structured content, while surfacing typed scheduler errors as MCP errors.
+
+`GET /api/runs/:id` (`workflow_status`) returns `data` with the existing scheduler status
+fields plus the additive `inspector` field:
+
+```
+%{
+  "run_id" => String.t(),
+  "state" => "pending" | "running" | "completed" | "failed",
+  "workflow_name" => String.t() | nil,
+  "tree_name" => String.t() | nil,
+  "phase" => String.t() | nil,
+  "logs" => [String.t()],
+  "agent_count" => non_neg_integer(),
+  "event_count" => non_neg_integer(),
+  "usage" => %{"input_tokens" => non_neg_integer(),
+               "output_tokens" => non_neg_integer(),
+               "total_tokens" => non_neg_integer()},
+  "inspector" => SchedulerInspector(status),
+  "result" => json_value() | String.t() | nil,
+  "failure" => SchedulerFailure(status.failure) | nil,
+  "ui_path" => String.t(),
+  "ui_url" => String.t()
+}
+```
+
+`GET /api/runs/:id/events` (`workflow_inspect`) returns:
+
+```
+%{
+  "run_id" => String.t(),
+  "events" => [SchedulerEvent(event)],
+  "inspector" => SchedulerInspector(status)
+}
+```
+
+`SchedulerEvent(event)` is the compact, scheduler-owned projection of one journal event:
+`%{"seq" => event.seq, "type" => Atom.to_string(event.type)}` plus `"address" =>
+event.payload.address` when that key is present and non-`nil`. It MUST NOT expose
+`payload` wholesale, raw journal blobs, raw Codex JSONL, provider-private envelopes, or
+any event field outside `seq`, `type`, and optional `address`. Unknown/new event types
+MUST still appear in this compact list, and because §7.3 counts every folded event,
+`SchedulerInspector(status)["event_count"]` MUST equal the number of journal events folded,
+including unknown/new event types.
+
+`SchedulerInspector(status)` is the public JSON serialization of `RunInspector(status)`
+(§7.3.1) plus status-derived summary fields. It MUST contain exactly these top-level keys:
+`"run_id"`, `"phases"`, `"agents"`, `"rejected_attempts"`,
+`"failed_rejected_attempts"`, `"failure"`, `"usage"`, and `"event_count"`. The first five
+fields come from `RunInspector(status)`. `"failure"` is `SchedulerFailure(status.failure)`
+or `nil`; `"usage"` is the status usage map with `"input_tokens"`, `"output_tokens"`, and
+`"total_tokens"`; and `"event_count"` is `status.event_count`.
+
+Serialized inspector agents, including agents nested under `"phases"`, MUST use the
+`InspectorAgent` fields from §7.3.1 with JSON object keys. Their `"idempotency_key"` MUST
+be either `nil` or exactly
+`%{"run_id" => String.t(), "node_path" => [non_neg_integer()], "iteration" =>
+non_neg_integer(), "attempt" => non_neg_integer()}`. Serialized activity entries MUST be
+the normalized four-key shape from `NormalizeActivityEntry`; raw provider fields and raw
+journal payload maps MUST NOT pass through the scheduler inspector.
+
+`SchedulerFailure(nil)` is `nil`. `SchedulerFailure(%{address, attempts, reason})` is
+`%{"address" => address, "attempts" => attempts, "reason" => inspect(reason)}`. As in the
+CLI envelope, `inspect/1` string rendering is byte-normative only for the Elixir
+embedding; non-Elixir hosts MUST return JSON-safe display text for non-JSON failure
+reasons.
 
 Under `--json`, stdout carries **exactly one** final JSON object, which always has a
 `"command"` field; progress/warnings go to stderr; on failure the last stderr line is a
@@ -2758,18 +2851,22 @@ exit 6; a missing script file, a bad option, an **absent/`nil` `:provider`** opt
 pre-run provider-resolution failure; it is distinct from a provider that resolves but then
 fails a call at run time, which is `{:run_crashed, reason}` (exit 1, §6.4.1).
 
-The run projection envelope (for `run`/`test`/`resume`/`status`/`inspect`) carries
+The legacy CLI run projection envelope (for `run`/`test`/`resume`/`status`/`inspect`) carries
 **exactly** these fields: `runId, state, treeName, phase, logs, agentCount, eventCount,
-usage, result, failure`, plus a `command` field added by the caller. Here `logs` is the §7.3
-`logs` projection verbatim — an ordered (seq-order) JSON array of the `log_emitted`
-**message strings** — and `agentCount` is `length(agents)` (the §7.3 `agents` list); `usage`
-is `%{"inputTokens", "outputTokens", "totalTokens"}`; `failure` is `nil` or
+usage, result, failure`, plus a `command` field added by the caller. This exact-field
+restriction applies only to the CLI envelope; it does **not** constrain the scheduler
+HTTP API or MCP JSON shapes defined above, whose status data includes the additive
+`inspector` field. Here `logs` is the §7.3 `logs` projection verbatim — an ordered
+(seq-order) JSON array of the `log_emitted` **message strings** — and `agentCount` is
+`length(agents)` (the §7.3 `agents` list); `usage` is
+`%{"inputTokens", "outputTokens", "totalTokens"}`; `failure` is `nil` or
 `%{"address", "attempts", "reason" => inspect(reason)}`. The §7.3 `agents`, `rejected`,
-`verifications`, and `judgments` list projections are **not** envelope fields: the envelope
-exposes the agent stream solely as the `agentCount` integer, and the rejection/verification/
-judgment lists are reachable only through the `Workflow.Status` struct (`Workflow.Status.of/1`,
-§7.3, §7.6). A value that is not JSON-encodable is rendered
-via `inspect/1` so the envelope always encodes; as in §4.4, this `inspect/1` fallback is
+`verifications`, and `judgments` list projections are **not** legacy CLI envelope fields:
+the envelope exposes the agent stream solely as the `agentCount` integer, and the
+rejection/verification/judgment lists are reachable through the `Workflow.Status` struct
+(`Workflow.Status.of/1`, §7.3, §7.6) and, where serialized for scheduler/MCP clients,
+through `SchedulerInspector(status)`. A value that is not JSON-encodable is rendered via
+`inspect/1` so the envelope always encodes; as in §4.4, this `inspect/1` fallback is
 byte-normative **only for the Elixir embedding** — a non-Elixir host MUST still produce an
 encodable envelope, but its string rendering of a non-JSON-encodable value is
 implementation-defined.

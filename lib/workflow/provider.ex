@@ -28,14 +28,9 @@ defmodule Workflow.Provider do
   """
 
   @type result :: term()
-  @type activity :: [
-          %{
-            optional(:kind) => String.t(),
-            optional(:label) => String.t(),
-            optional(:summary) => String.t(),
-            optional(:status) => String.t()
-          }
-        ]
+  @type activity_key :: :kind | :label | :summary | :status | String.t()
+  @type activity_entry :: %{optional(activity_key()) => term()}
+  @type activity :: [activity_entry()]
 
   @callback run_agent(
               prompt :: String.t(),

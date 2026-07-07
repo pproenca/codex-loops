@@ -158,6 +158,8 @@ defmodule Workflow.Status do
     %{s | state: :completed, result: p.value} |> tick()
   end
 
+  defp apply_event(%Event{}, s), do: tick(s)
+
   defp tick(%__MODULE__{} = s), do: %{s | event_count: s.event_count + 1}
 
   defp ensure_phase(%__MODULE__{current_phase_id: nil} = s) do

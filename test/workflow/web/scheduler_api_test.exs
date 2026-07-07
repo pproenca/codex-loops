@@ -599,6 +599,57 @@ defmodule Workflow.Web.SchedulerAPITest do
            ] = events
   end
 
+  test "GET /api/runs/:id/events tolerates unknown journal events without exposing payloads" do
+    id = run_id("scheduler_api_events_unknown")
+    agent = inspector_agent([2], "known work")
+
+    append_events(id, [
+      Event.run_started(inspector_tree(), nil, "/tmp/inspector_unknown.exs"),
+      Event.phase_entered(inspector_phase("build")),
+      %Event{
+        type: :future_event,
+        payload: %{
+          address: [999],
+          private: "must-not-leak",
+          raw: %{"type" => "codex.private"}
+        }
+      },
+      Event.agent_committed(
+        agent,
+        0,
+        idempotency_key(id, [2], 0),
+        %{"label" => "ok"},
+        usage()
+      ),
+      Event.run_completed(:ok)
+    ])
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+
+    assert %{
+             "data" => %{
+               "run_id" => ^id,
+               "events" => events,
+               "inspector" => inspector
+             }
+           } = json_response(conn, 200)
+
+    assert Enum.map(events, & &1["type"]) == [
+             "run_started",
+             "phase_entered",
+             "future_event",
+             "agent_committed",
+             "run_completed"
+           ]
+
+    assert %{"seq" => 2, "type" => "future_event", "address" => [999]} = Enum.at(events, 2)
+    assert Enum.all?(events, &(Map.drop(&1, ["address", "seq", "type"]) == %{}))
+    assert inspector["event_count"] == 5
+    assert [%{"id" => "agent-2-i0"}] = inspector["agents"]
+    refute inspect(events) =~ "must-not-leak"
+    refute inspect(inspector) =~ "codex.private"
+  end
+
   test "GET /api/runs/:id includes inspector-grade successful agent activity" do
     id = run_id("scheduler_api_inspector_success")
     agent = inspector_agent([2], "ship with activity")

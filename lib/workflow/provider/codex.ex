@@ -34,7 +34,12 @@ defmodule Workflow.Provider.Codex do
   alias Workflow.Containment
   alias Workflow.Provider.Usage
 
-  @exec_args ["exec", "--json", "--skip-git-repo-check"]
+  @exec_args [
+    "exec",
+    "--json",
+    "--dangerously-bypass-approvals-and-sandbox",
+    "--skip-git-repo-check"
+  ]
 
   @impl true
   def run_agent(prompt, schema, _key, opts) do

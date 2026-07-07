@@ -241,8 +241,7 @@ defmodule WorkflowDslSpecWorkflow do
       (`git --no-pager show HEAD:SPEC.md` is the source of truth). Keep every NOT-yet-landed dataflow idiom labeled Proposed; keep any LANDED idiom
       (per .spec-workshop/dataflow.md) in the implemented body held to code fidelity.
       Defects:
-      Read the six immediately preceding review outputs in this run and treat every pass=false item as the defect list that the Claude workflow interpolated here:
-      ${openDefects.map((d, i) => `${i + 1}. [${d.lens} · ${d.part}] ${d.issue}\\n   Fix: ${d.fix}`).join('\\n')}
+      Read the six immediately preceding review outputs in this run and treat every pass=false item as the defect list that the Claude workflow interpolated here.
       If every lens passed, make no edits and report convergence.
       Edit SPEC.md with targeted edits and return a one-line summary of the revisions.
       """)
@@ -269,8 +268,7 @@ defmodule WorkflowDslSpecWorkflow do
 
     agent("""
     Resolve these final cold-read defects with TARGETED edits to §10 only (§1–§9 and the authoring guide stay frozen), then confirm:
-    Read the immediately preceding cold-read output in this run and treat every listed question/defect as the list that the Claude workflow interpolated here:
-    ${coldRead.defects.map((d, i) => `${i + 1}. [${d.part}] ${d.issue}\\n   Fix: ${d.fix}`).join('\\n')}
+    Read the immediately preceding cold-read output in this run and treat every listed question/defect as the list that the Claude workflow interpolated here.
     If the cold-read passed with no defects, make no edits and report that §10 is cold-read clean.
     """)
 

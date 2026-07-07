@@ -8,7 +8,7 @@ defmodule Workflow.Scheduler.RunProjection do
   """
 
   alias Workflow.Provider.Usage
-  alias Workflow.{RunInspector, Status}
+  alias Workflow.{IdempotencyKey, RunInspector, Status}
 
   @enforce_keys [
     :run_id,
@@ -138,6 +138,7 @@ defmodule Workflow.Scheduler.RunProjection do
       outcome: jsonable(agent.outcome),
       result: jsonable(agent.result),
       usage: usage_map(agent.usage),
+      idempotency_key: idempotency_key_map(agent.idempotency_key),
       activity: Enum.map(agent.activity, &inspector_activity/1),
       phase_id: agent.phase_id,
       phase_name: agent.phase_name
@@ -177,6 +178,37 @@ defmodule Workflow.Scheduler.RunProjection do
   end
 
   defp usage_map(_usage), do: usage_map(%Usage{})
+
+  defp idempotency_key_map(%IdempotencyKey{} = key) do
+    %{
+      run_id: key.run_id,
+      node_path: key.node_path,
+      iteration: key.iteration,
+      attempt: key.attempt
+    }
+  end
+
+  defp idempotency_key_map(%{run_id: run_id, node_path: node_path, iteration: iteration} = key) do
+    %{
+      run_id: run_id,
+      node_path: node_path,
+      iteration: iteration,
+      attempt: Map.get(key, :attempt, 0)
+    }
+  end
+
+  defp idempotency_key_map(
+         %{"run_id" => run_id, "node_path" => node_path, "iteration" => iteration} = key
+       ) do
+    %{
+      run_id: run_id,
+      node_path: node_path,
+      iteration: iteration,
+      attempt: Map.get(key, "attempt", 0)
+    }
+  end
+
+  defp idempotency_key_map(_key), do: nil
 
   defp encode_failure(nil), do: nil
 

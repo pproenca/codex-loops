@@ -668,11 +668,22 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert [projected_agent] = inspector["agents"]
     assert projected_agent == phase_agent
 
+    expected_idempotency_key = %{
+      "run_id" => id,
+      "node_path" => [2],
+      "iteration" => 0,
+      "attempt" => 0
+    }
+
+    assert projected_agent["idempotency_key"] == expected_idempotency_key
+    assert phase_agent["idempotency_key"] == expected_idempotency_key
+
     assert %{
              "id" => "agent-2-i0",
              "slug" => "ship-with-activity-i0",
              "address" => [2],
              "iteration" => 0,
+             "idempotency_key" => ^expected_idempotency_key,
              "prompt" => "ship with activity",
              "outcome" => %{"label" => "done"},
              "result" => %{"label" => "done"},

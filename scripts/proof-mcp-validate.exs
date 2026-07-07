@@ -580,6 +580,12 @@ defmodule ProofMCPValidate do
           "outcome" => %{"echo" => "Reply with proof-ok"},
           "result" => %{"echo" => "Reply with proof-ok"},
           "usage" => %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+          "idempotency_key" => %{
+            "run_id" => run_id,
+            "node_path" => [2],
+            "iteration" => 0,
+            "attempt" => 0
+          },
           "activity" => [],
           "phase_id" => "phase-0",
           "phase_name" => "proof"

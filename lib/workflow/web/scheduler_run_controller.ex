@@ -14,6 +14,13 @@ defmodule Workflow.Web.SchedulerRunController do
     end
   end
 
+  def resume(conn, %{"id" => id} = params) do
+    case Scheduler.resume_run(id, Map.delete(params, "id")) do
+      {:ok, start} -> SchedulerAPI.ok(conn, RunStart.to_map(start))
+      {:error, error} -> SchedulerAPI.error(conn, error)
+    end
+  end
+
   def show(conn, %{"id" => id}) do
     case Scheduler.get_run(id) do
       {:ok, projection} -> SchedulerAPI.ok(conn, RunProjection.to_map(projection))

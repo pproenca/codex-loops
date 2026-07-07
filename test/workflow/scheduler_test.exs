@@ -3,7 +3,7 @@ defmodule Workflow.SchedulerTest do
 
   import ExUnit.CaptureIO
 
-  alias Workflow.{Run, Scheduler, Script}
+  alias Workflow.{Journal, Run, Scheduler, Script}
   alias Workflow.Test.GateProvider
 
   defp write_script(source, prefix \\ "wf") do
@@ -38,8 +38,39 @@ defmodule Workflow.SchedulerTest do
     """)
   end
 
+  defp two_agent_workflow do
+    write_workflow(~S"""
+    workflow "scheduler-two-agents" do
+      agent "first"
+      agent "second"
+      return :ok
+    end
+    """)
+  end
+
   defp run_id(prefix),
     do: "#{prefix}_#{System.unique_integer([:positive])}"
+
+  defp await_lease_released(run_id, tries \\ 200) do
+    cond do
+      Registry.lookup(Workflow.Run.Registry, run_id) == [] ->
+        :ok
+
+      tries == 0 ->
+        flunk("lease for #{run_id} was never released")
+
+      true ->
+        Process.sleep(5)
+        await_lease_released(run_id, tries - 1)
+    end
+  end
+
+  defp kill_and_await(run_id, pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+    await_lease_released(run_id)
+  end
 
   defp wait_for_projection(id, state \\ :completed, attempts \\ 50)
 
@@ -399,6 +430,161 @@ defmodule Workflow.SchedulerTest do
              %{seq: 3, type: "agent_committed", address: [2]},
              %{seq: 4, type: "run_completed"}
            ] = events
+  end
+
+  test "resume recovers a journaled script path and does not duplicate completed run events" do
+    path = demo_workflow()
+    id = run_id("scheduler_resume_completed")
+
+    assert {:ok, _start} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock"
+             })
+
+    projection = wait_for_projection(id)
+    before_events = Journal.fold(id)
+    before_types = Enum.map(before_events, & &1.type)
+
+    assert projection.event_count == length(before_events)
+
+    assert {:ok, resume} = Scheduler.resume_run(id)
+    assert resume.run_id == id
+    assert resume.state == :accepted
+    assert resume.ui_path == "/runs/#{id}"
+
+    await_lease_released(id)
+
+    after_events = Journal.fold(id)
+    assert Enum.map(after_events, & &1.type) == before_types
+
+    assert {:ok, %{state: :completed, event_count: event_count}} = Scheduler.get_run(id)
+    assert event_count == length(after_events)
+  end
+
+  test "resume accepts an explicit script path when the journal has no script path" do
+    path = demo_workflow()
+    id = run_id("scheduler_resume_explicit")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id} =
+             Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+
+    assert %Workflow.Event{payload: %{script_path: nil}} =
+             Enum.find(Journal.fold(id), &(&1.type == :run_started))
+
+    before_count = id |> Journal.fold() |> length()
+
+    assert {:ok, resume} =
+             Scheduler.resume_run(id, %{"script_path" => path, "provider" => "mock"})
+
+    assert resume.run_id == id
+    await_lease_released(id)
+
+    assert id |> Journal.fold() |> length() == before_count
+    assert {:ok, %{state: :completed}} = Scheduler.get_run(id)
+  end
+
+  test "resume returns typed errors for unknown runs and missing recoverable scripts" do
+    unknown = run_id("scheduler_resume_unknown")
+
+    assert {:error, %Scheduler.Error{} = error} = Scheduler.resume_run(unknown)
+    assert error.status == 404
+    assert error.code == "scheduler.run.not_found"
+    assert error.details == %{run_id: unknown}
+
+    path = demo_workflow()
+    id = run_id("scheduler_resume_missing_script")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id} =
+             Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+
+    assert {:error, %Scheduler.Error{} = error} = Scheduler.resume_run(id)
+    assert error.status == 400
+    assert error.code == "scheduler.validation.missing_script_path"
+    assert error.details == %{field: "script_path"}
+  end
+
+  test "resume validates explicit script paths and provider inputs" do
+    path = demo_workflow()
+    id = run_id("scheduler_resume_validation")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id} =
+             Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.resume_run(id, %{"script_path" => bad_workflow(), "provider" => "mock"})
+
+    assert error.status == 422
+    assert error.code == "scheduler.validation.workflow_dsl"
+    assert error.details.reason =~ "unknown combinator `frobnicate`"
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.resume_run(id, %{"script_path" => path, "provider" => "codex"})
+
+    assert error.status == 400
+    assert error.code == "scheduler.run.invalid_provider"
+  end
+
+  @tag :capture_log
+  test "resume returns a typed already-running error when a live writer holds the lease" do
+    path = demo_workflow()
+    id = run_id("scheduler_resume_running")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id, writer} =
+             Run.start(tree,
+               run_id: id,
+               provider: {GateProvider, sink: self()},
+               script_path: Path.expand(path)
+             )
+
+    assert_receive {:agent_called, "ship it"}
+    assert_receive {:at_agent, ^writer}
+
+    assert {:error, %Scheduler.Error{} = error} = Scheduler.resume_run(id)
+    assert error.status == 409
+    assert error.code == "scheduler.run.already_running"
+    assert error.details == %{run_id: id}
+
+    send(writer, :proceed)
+    await_lease_released(id)
+  end
+
+  @tag :capture_log
+  test "resume through scheduler does not repeat already committed agent effects" do
+    path = two_agent_workflow()
+    id = run_id("scheduler_resume_once")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id, writer} =
+             Run.start(tree,
+               run_id: id,
+               provider: {GateProvider, sink: self(), gate_on: "second"},
+               script_path: Path.expand(path)
+             )
+
+    assert_receive {:agent_called, "first"}
+    assert_receive {:agent_called, "second"}
+    assert_receive {:at_agent, ^writer}
+
+    assert [%{payload: %{address: [0]}}] =
+             Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
+
+    kill_and_await(id, writer)
+
+    assert {:ok, %{run_id: ^id, state: :accepted}} = Scheduler.resume_run(id)
+    wait_for_projection(id)
+
+    assert Journal.fold(id)
+           |> Enum.filter(&(&1.type == :agent_committed))
+           |> Enum.map(& &1.payload.address) == [[0], [1]]
+
+    assert {:ok, %{state: :completed, event_count: event_count}} = Scheduler.get_run(id)
+    assert event_count == length(Journal.fold(id))
   end
 
   test "starts a mock-provider run with a generated run id" do

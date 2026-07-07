@@ -65,6 +65,38 @@ defmodule Workflow.Scheduler do
 
   def start_run(_params), do: {:error, Error.missing_script_path()}
 
+  @spec resume_run(String.t(), map()) :: {:ok, RunStart.t()} | {:error, Error.t()}
+  def resume_run(run_id, params \\ %{})
+
+  def resume_run(run_id, params) when is_binary(run_id) and is_map(params) do
+    with {:ok, run_id} <- route_safe_run_id(run_id),
+         :ok <- ensure_run_exists(run_id),
+         {:ok, provider} <- run_provider(params),
+         :ok <- ensure_not_running(run_id),
+         {:ok, path} <- resume_script_path(run_id, params),
+         {:ok, tree} <- Script.load_tree(path) do
+      case Run.start(tree,
+             run_id: run_id,
+             provider: provider,
+             script_path: Path.expand(path)
+           ) do
+        {:ok, ^run_id, _pid} ->
+          {:ok, RunStart.accepted(run_id)}
+
+        {:error, {:already_running, _pid}} ->
+          {:error, Error.run_already_running(run_id)}
+
+        {:error, reason} ->
+          {:error, Error.run_start_failed(reason)}
+      end
+    else
+      {:error, %Workflow.Script.Error{} = error} -> {:error, Error.workflow_validation(error)}
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
+
+  def resume_run(_run_id, _params), do: {:error, Error.invalid_run_id()}
+
   @spec get_run(String.t()) :: {:ok, RunProjection.t()} | {:error, Error.t()}
   def get_run(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
     if run_id in Journal.run_ids() do
@@ -100,17 +132,44 @@ defmodule Workflow.Scheduler do
   def validate_workflow(_params), do: {:error, Error.missing_script_path()}
 
   defp run_script_path(params) do
+    case explicit_script_path(params) do
+      {:ok, path} -> {:ok, path}
+      :missing -> {:error, Error.missing_script_path()}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp explicit_script_path(params) do
     case fetch_param(params, :script_path, "script_path") do
       {:ok, path} when is_binary(path) and byte_size(path) > 0 -> {:ok, path}
-      :missing -> script_path_alias(params)
+      :missing -> explicit_script_alias(params)
       {:ok, _invalid} -> {:error, Error.missing_script_path()}
     end
   end
 
-  defp script_path_alias(params) do
+  defp explicit_script_alias(params) do
     case fetch_param(params, :script, "script") do
       {:ok, path} when is_binary(path) and byte_size(path) > 0 -> {:ok, path}
-      _missing_or_invalid -> {:error, Error.missing_script_path()}
+      :missing -> :missing
+      {:ok, _invalid} -> {:error, Error.missing_script_path()}
+    end
+  end
+
+  defp resume_script_path(run_id, params) do
+    case explicit_script_path(params) do
+      {:ok, path} -> {:ok, path}
+      :missing -> journaled_script_path(run_id)
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp journaled_script_path(run_id) do
+    case Enum.find(Journal.fold(run_id), &(&1.type == :run_started)) do
+      %{payload: %{script_path: path}} when is_binary(path) and byte_size(path) > 0 ->
+        {:ok, path}
+
+      _missing_or_unrecorded ->
+        {:error, Error.missing_script_path()}
     end
   end
 
@@ -127,6 +186,21 @@ defmodule Workflow.Scheduler do
       {:ok, id}
     else
       {:error, Error.invalid_run_id()}
+    end
+  end
+
+  defp ensure_run_exists(run_id) do
+    if run_id in Journal.run_ids() do
+      :ok
+    else
+      {:error, Error.run_not_found(run_id)}
+    end
+  end
+
+  defp ensure_not_running(run_id) do
+    case Registry.lookup(Workflow.Run.Registry, run_id) do
+      [] -> :ok
+      [{_pid, _value} | _rest] -> {:error, Error.run_already_running(run_id)}
     end
   end
 

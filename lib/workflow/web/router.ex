@@ -1,6 +1,6 @@
 defmodule Workflow.Web.Router do
   @moduledoc """
-  Routes the live read surface. `/runs/:run_id` mounts the journal-projecting
+  Routes the live read surface. `/runs/:run_id` mounts the scheduler-snapshot
   LiveView for a run; `run_id` is the only routing input.
   """
   use Phoenix.Router

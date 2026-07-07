@@ -3,7 +3,7 @@ defmodule Workflow.SchedulerTest do
 
   import ExUnit.CaptureIO
 
-  alias Workflow.{Journal, Run, Scheduler, Script}
+  alias Workflow.{Journal, Run, Scheduler, Script, Status}
   alias Workflow.Test.GateProvider
 
   defp write_script(source, prefix \\ "wf") do
@@ -505,6 +505,130 @@ defmodule Workflow.SchedulerTest do
 
     assert {:ok, %{state: :completed, event_count: event_count}} = Scheduler.get_run(id)
     assert event_count == length(after_events)
+  end
+
+  @tag :capture_log
+  test "run projection lifecycle action is for monitoring affordances, not every accepted command" do
+    path = demo_workflow()
+    completed_id = run_id("scheduler_lifecycle_completed")
+
+    assert {:ok, _start} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => completed_id,
+               "provider" => "mock"
+             })
+
+    assert %{lifecycle_action: completed_action} = wait_for_projection(completed_id)
+
+    assert completed_action == %{
+             action: :none,
+             label: "No lifecycle action",
+             enabled: false,
+             reason: "Run is completed.",
+             method: nil,
+             href: nil
+           }
+
+    assert {:ok, %{run_id: ^completed_id, state: :accepted}} = Scheduler.resume_run(completed_id)
+    await_lease_released(completed_id)
+    assert %{lifecycle_action: ^completed_action} = wait_for_projection(completed_id)
+
+    running_id = run_id("scheduler_lifecycle_running")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^running_id, writer} =
+             Run.start(tree,
+               run_id: running_id,
+               provider: {GateProvider, sink: self()},
+               script_path: Path.expand(path)
+             )
+
+    assert_receive {:agent_called, "ship it"}
+    assert_receive {:at_agent, ^writer}
+
+    assert {:ok,
+            %{
+              state: :running,
+              lifecycle_action: %{
+                action: :pause_unavailable,
+                label: "Pause unavailable",
+                enabled: false,
+                method: nil,
+                href: nil
+              }
+            }} = Scheduler.get_run(running_id)
+
+    kill_and_await(running_id, writer)
+
+    assert {:ok, %{state: :running, lifecycle_action: resume_action}} =
+             Scheduler.get_run(running_id)
+
+    assert resume_action == %{
+             action: :resume,
+             label: "Resume",
+             enabled: true,
+             reason: "The writer is stopped before a terminal event.",
+             method: "post",
+             href: "/api/runs/#{running_id}/resume"
+           }
+  end
+
+  @tag :capture_log
+  test "get_run_snapshot returns status and run projection from one scheduler read" do
+    path = demo_workflow()
+    id = run_id("scheduler_snapshot")
+
+    assert {:ok, _start} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock"
+             })
+
+    completed_projection = wait_for_projection(id)
+
+    assert {:ok, %{status: %Status{} = status, run_projection: snapshot_projection}} =
+             Scheduler.get_run_snapshot(id)
+
+    assert status.run_id == id
+    assert status.state == :completed
+    assert snapshot_projection.run_id == id
+    assert snapshot_projection.state == status.state
+    assert snapshot_projection.event_count == status.event_count
+    assert snapshot_projection.lifecycle_action == completed_projection.lifecycle_action
+  end
+
+  @tag :capture_log
+  test "run projection renders resume unavailable when incomplete run has no script path" do
+    path = demo_workflow()
+    id = run_id("scheduler_lifecycle_missing_script")
+    {:ok, tree} = Script.load_tree(path)
+
+    assert {:ok, ^id, writer} =
+             Run.start(tree,
+               run_id: id,
+               provider: {GateProvider, sink: self()}
+             )
+
+    assert_receive {:agent_called, "ship it"}
+    assert_receive {:at_agent, ^writer}
+
+    assert %Workflow.Event{payload: %{script_path: nil}} =
+             Enum.find(Journal.fold(id), &(&1.type == :run_started))
+
+    kill_and_await(id, writer)
+
+    assert {:ok, %{state: :running, lifecycle_action: action}} = Scheduler.get_run(id)
+
+    assert action == %{
+             action: :resume_unavailable,
+             label: "Resume unavailable",
+             enabled: false,
+             reason: "No journaled script path is available.",
+             method: nil,
+             href: nil
+           }
   end
 
   test "resume accepts an explicit script path when the journal has no script path" do

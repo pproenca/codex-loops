@@ -15,6 +15,12 @@ defmodule Workflow.MCP.SchedulerClient do
           required(:protocol) => String.t()
         }
 
+  @type scheduler_result ::
+          {:ok, map()}
+          | {:scheduler_error, map()}
+          | {:unexpected, non_neg_integer(), term()}
+          | {:error, String.t()}
+
   @spec config() :: config()
   def config do
     case System.get_env("CODEX_LOOPS_SCHEDULER_URL") do
@@ -38,14 +44,25 @@ defmodule Workflow.MCP.SchedulerClient do
     end
   end
 
-  @spec validate_workflow(String.t()) ::
-          {:ok, map()}
-          | {:scheduler_error, map()}
-          | {:unexpected, non_neg_integer(), term()}
-          | {:error, String.t()}
+  @spec validate_workflow(String.t()) :: scheduler_result()
   def validate_workflow(script_path) when is_binary(script_path) do
-    case request(:post, "/api/workflows/validate", %{"script_path" => script_path}) do
-      {:ok, status, payload} when status in 200..299 ->
+    scheduler_request(:post, "/api/workflows/validate", %{"script_path" => script_path})
+  end
+
+  @spec start_run(map()) :: scheduler_result()
+  def start_run(attrs) when is_map(attrs) do
+    scheduler_request(:post, "/api/runs", attrs)
+  end
+
+  @spec get_run(String.t()) :: scheduler_result()
+  def get_run(run_id) when is_binary(run_id) do
+    scheduler_request(:get, "/api/runs/" <> path_segment(run_id))
+  end
+
+  defp scheduler_request(method, path, body \\ nil) do
+    case request(method, path, body) do
+      {:ok, status, %{"api_version" => "scheduler.v1", "data" => _data} = payload}
+      when status in 200..299 ->
         {:ok, payload}
 
       {:ok, _status, %{"api_version" => "scheduler.v1", "error" => %{} = _error} = payload} ->
@@ -188,4 +205,13 @@ defmodule Workflow.MCP.SchedulerClient do
       _other -> fallback
     end
   end
+
+  defp path_segment(value), do: URI.encode(value, &path_segment_unreserved?/1)
+
+  defp path_segment_unreserved?(character)
+       when character in ?a..?z or character in ?A..?Z or character in ?0..?9 or
+              character in [?-, ?., ?_, ?~],
+       do: true
+
+  defp path_segment_unreserved?(_character), do: false
 end

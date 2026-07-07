@@ -9,20 +9,28 @@ defmodule CodexLoops.MixProject do
       elixirc_paths: elixirc_paths(Mix.env()),
       elixirc_options: [warnings_as_errors: true],
       start_permanent: Mix.env() == :prod,
-      escript: [main_module: Workflow.CLI, name: "agent-loops"],
+      releases: releases(),
       deps: deps()
     ]
   end
 
   def application do
     [
-      extra_applications: [:logger, :crypto],
+      extra_applications: [:logger, :crypto, :inets, :ssl],
       mod: {Workflow.Application, []}
     ]
   end
 
   defp elixirc_paths(:test), do: ["lib", "test/support"]
   defp elixirc_paths(_), do: ["lib"]
+
+  defp releases do
+    [
+      agent_loops: [
+        include_executables_for: [:unix]
+      ]
+    ]
+  end
 
   defp deps do
     [

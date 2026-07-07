@@ -5,51 +5,36 @@ description: "Use when the user explicitly asks for Codex Loops, dynamic workflo
 
 # Codex Loops
 
-Codex Loops is the local, path-first workflow runner for Codex dynamic
-workflows. Use this skill only when the user explicitly asks for Codex Loops,
-fanout/multi-agent orchestration, ultracode-style work, workflow lifecycle
-inspection, an executable workflow script, or a reusable Codex skill that
-captures a workflow-shaped operating procedure.
+Codex Loops is a local, path-first workflow runner for Codex dynamic workflows.
+Use this skill only when the user explicitly asks for Codex Loops, dynamic
+workflows, fanout/multi-agent orchestration, ultracode-style work, workflow
+lifecycle inspection, an executable workflow script, or a reusable Codex skill
+that captures a workflow-shaped operating procedure.
 
-The runner is local and journal-backed. The journal is an append-only event
-log; `status`, `inspect`, `list`, `serve`, and `resume` read it directly.
-Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite`. New
-`test`, `workflow`, and `run` commands use `--run-id` for stable identity and
-`status`, `inspect`, `resume`, and `serve` use `--run-id` for explicit run
-selection. Omitted `--run-id` means the latest run. `--journal` is removed on
-every command. The runner supports local background launch and a live status UI. It
-does not implement hosted workflow services, external workflow UIs, or
-per-agent skip/retry controls in this package.
+The product surface is the Codex plugin MCP adapter plus the local
+Elixir/Phoenix scheduler. MCP manages lifecycle and calls the scheduler HTTP
+API. Elixir owns runtime supervision, workflow workers, Phoenix PubSub/LiveView,
+and the SQLite journal. Run data is stored at
+`~/.codex/workflows/runs_1.sqlite` by default, or at `CODEX_LOOPS_JOURNAL_PATH`
+when set.
 
-Live SDK execution must use the TypeScript `@openai/codex-sdk` package.
-`--codex-path-override` may point that SDK at a local Codex executable; do not
-swap in another TypeScript SDK or module shim.
+## MCP Surface
 
-Use the published CLI surface:
+- `workflow_validate`: validate an existing `.exs` workflow script.
+- `workflow_start`: start a run from an existing workflow script. Use
+  `provider: "mock"` for offline proof and `provider: "codex"` only after
+  approval, because it spends a real Codex turn.
+- `workflow_status`: read the scheduler's journal-backed run projection.
+- `workflow_inspect`: read ordered scheduler event projections.
+- `workflow_resume`: resume an existing run through the scheduler API.
+- `workflow_open_ui`: return the Phoenix LiveView run URL.
 
-<!-- gen:commands -->
+If working from a repo clone, the packaged binary is built with:
+
 ```bash
-agent-loops draft --goal '<goal>' [--name name] [--output .codex/workflows/name.ts] [--json]
-agent-loops validate <script-or-name> --args '<json>' [--json] [--no-input]
-agent-loops test <script-or-name> --args '<json>' [--run-id <id>] [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' --background [--status-server] [--json] [--no-input]
-agent-loops run <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops resume [--run-id <id>] [--provider sdk|mock] [--approved] [--json] [--no-input]
-agent-loops inspect [--run-id <id>] [--json]
-agent-loops status [--run-id <id>] [--event-limit 5] [--json]
-agent-loops list [--limit 20] [--event-limit 5] [--json]
-agent-loops serve [--run-id <id>] [--host 127.0.0.1] [--port 0] [--json]
-agent-loops help
+make release
+make proof-mcp
 ```
-<!-- /gen:commands -->
-
-Invoke via `npx -y agent-loops <command> ...`, or via
-`agent-loops <command> ...` when the package binary is already installed. `run`
-is an alias for `workflow`. `list --json` summarizes known runs from SQLite.
-`draft` writes a deterministic scaffold (no LLM), runs the
-compatibility validation gate, and returns `nextSteps`. It does not execute a
-mock workflow; run `test --provider mock` explicitly before live SDK execution.
 
 ## Artifact Selection
 
@@ -57,192 +42,109 @@ Before writing files, classify what the user means by "workflow":
 
 - **Executable workflow script**: use this path when the user asks to run,
   execute, test, resume, inspect, launch, or automate work through Codex Loops.
-  Author `.codex/workflows/<name>.ts`, then use the validation or mock-test
-  gate before live SDK execution.
+  Author `.codex/workflows/<name>.exs`, then validate and mock-test before live
+  Codex execution.
 - **Reusable Codex skill**: use this path when the user asks to save a workflow
   as a skill, playbook, reusable procedure, or future Codex behavior. Write or
-  update a `SKILL.md` in a user-approved skill location using Codex skill
-  conventions. Do not call `agent-loops draft`, `agent-loops validate`,
-  `agent-loops test`, `agent-loops workflow`, `agent-loops run`, or
-  `agent-loops resume` unless the user also asks for an executable script.
-- **Both**: when the user explicitly asks for both, write the reusable skill as
-  the operating guide and create a tested workflow script only for the
-  executable part.
-- **Ambiguous**: when the user only says "turn this into a workflow" and the
-  intended artifact is unclear, ask: "Do you want this saved as an executable workflow script, a reusable Codex skill, or both?"
-
-For skill-saving requests, produce skill frontmatter, trigger guidance, workflow
-steps, safety gates, and verification expectations. Treat the skill as reusable
-operator guidance, not as a TypeScript workflow script.
-
-## When To Use
-
-Use a workflow when the task benefits from independent agents, phased synthesis,
-parallel read-only review, adversarial checks, or guarded mutation after a
-preflight. Scout locally first when the inventory is unknown: use `rg --files`,
-focused `rg`, and small file reads before authoring the workflow.
-
-Do not use Codex Loops for trivial single-file edits, basic command output, or
-questions the main agent can answer directly.
+  update a `SKILL.md` in a user-approved skill location. Do not call MCP
+  execution tools unless the user also asks for an executable script.
+- **Both**: when explicitly requested, write the reusable skill as the operating
+  guide and create a tested workflow script for the executable path.
+- **Ambiguous**: ask whether the user wants an executable workflow script, a
+  reusable Codex skill, or both.
 
 ## Authoring Contract
 
-Author workflow files under `.codex/workflows/<name>.ts`. Scripts run as plain
-JavaScript in an async workflow context.
+Author executable workflows as Elixir `.exs` files:
+
+```elixir
+defmodule ExampleWorkflow do
+  use Workflow
+
+  workflow "example" do
+    phase "scout"
+    log "starting"
+    agent "Inspect README.md and summarize the project goal."
+    return :ok
+  end
+end
+```
 
 Use a scout-first authoring loop:
 
-1. Scout repository facts first with local tools; capture evidence-backed facts
-   and consequences, not broad guesses.
-2. Translate those facts into workflow constraints: exact files, package
-   contracts, approval posture, mutation limits, and verification commands.
-3. Choose barrier versus pipeline deliberately. Use barriers only where later
-   work genuinely needs all upstream results together; otherwise pipeline work
-   so review and verification can stay close to each changed unit.
-4. Write domain-rich worker prompts with exact files or search scope,
-   constraints, closed schemas, and the expected output shape.
-5. Add adversarial verification and, for mutating workflows, a final build or
-   test gate that must pass before reporting completion.
-6. Run `validate` or `test --provider mock` first. Use live SDK execution only
-   after approval.
+1. Scout repository facts first with local tools; capture evidence-backed facts.
+2. Translate facts into exact files, prompts, schemas, budgets, and stop
+   conditions.
+3. Choose simple sequential phases unless the task genuinely needs fanout,
+   `parallel`, `pipeline`, or loop combinators.
+4. Write domain-rich worker prompts with exact paths or search scope,
+   constraints, closed schemas, and expected output shape.
+5. For mutating workflows, include adversarial verification and a final build or
+   test gate before reporting completion.
+6. Run `workflow_validate` and a mock `workflow_start` before live execution.
 
-Required DSL facts:
+Useful DSL forms:
 
-- `export const meta = {...}` must be the first statement, a pure literal, and
-  include string `name` and `description`.
-- `args` is the parsed JSON value from `--args`, not a JSON-encoded string.
-- `budget` exposes `total`, `spent()`, and `remaining()` for task-budget
-  visibility; it is separate from provider max-output tokens and dollar/cost
-  accounting.
-- `agent(prompt, opts?)` spawns one Codex worker. Schema-backed agents must
-  return through the provider structured-output channel; ordinary final text is
-  not accepted as structured output.
-- `pipeline(items, ...stages)` is the default multi-stage primitive.
-- `parallel(thunks)` is a barrier and must receive functions such as
-  `() => agent(...)`, not already-started promises.
-- Pass an explicit `label` to each branch of identical-content fan-out (same
-  prompt, schema, and options); default labels are content-derived, so
-  identical siblings may swap result positions on resume without labels.
-- `workflow(nameOrRef, args?)` invokes one child workflow by saved name or
-  `{ scriptPath }`; child workflows share the parent journal and limits.
-- `phase(title)` and `log(message)` annotate progress.
-- Scripts cannot use Node APIs, imports, dynamic time, random values, TypeScript
-  syntax, or runner-only mutation helpers.
-
-Prefer closed, deterministic outputs. For mutating workflows, either keep the
-workflow plan-first and let the host/main Codex agent apply reviewed edits, or
-make the live workflow's write scope explicit and narrow with `workspace-write`
-or `full-access` isolation. In both cases, return exact file paths, expected
-changes, and verification commands.
-
-## Runtime Contract
-
-Every run journal records a `runtimeContract` with:
-
-- activation source and command
-- permission decision and caller-owned approval source
-- structured-output fail-closed policy
-- scheduling limits and visible queued/running/done/failed/killed states
-- task-budget/accounting policy
-- resume cache key
-- hosted-service support set to `false`
-
-Use `status` or `inspect` to relay those fields when the user asks what is
-running, why a run failed, whether it is stale, or how to resume.
+- `workflow "name" do ... end`
+- `phase "title"`
+- `log "message"`
+- `agent "prompt"`
+- `agent "prompt", schema: %{...}, retries: n`
+- `return value`
+- Advanced orchestration: `parallel`, `pipeline`, `collect`, `while_budget`,
+  `until_dry`, `verify`, `judge`, `synthesize`, and `fan_out`.
 
 ## Testing Gate
 
-Before live SDK execution:
+Before live Codex execution:
 
-1. Run `validate` or `test --provider mock` with bounded args.
-2. Read the JSON result, especially `snapshot.status`, `budgetPlan`,
-   `runtimeContract`, `snapshot.phases` node summaries, and any failed node
-   errors.
-3. If mutation is possible, report the workflow path, run id, `databasePath`,
-   exact args, budget preset and caps, intended write scope, and verification
-   command.
-4. Ask for or rely on explicit caller approval before live SDK execution. Pass
-   `--approved` only after that approval exists.
+```bash
+workflow_validate script_path=.codex/workflows/<name>.exs
+workflow_start script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_status run_id=<id>
+```
 
-If validation or testing fails, stop and report the failure. Do not execute a
-generated mutating workflow when the intended write scope is unclear.
-
-When any `--json` invocation fails, the last stderr line is a single-line JSON
-error object `{code, exitCode, message, hint?, details?}` — parse that instead
-of scraping prose diagnostics.
+Read the JSON payload. If validation or mock testing fails, stop and report the
+failure. Do not execute generated mutating workflows when write scope,
+verification commands, or caller approval are unclear.
 
 ## Live Execution
 
 Run live workflows only after the testing gate is satisfied:
 
 ```bash
-npx -y agent-loops workflow .codex/workflows/<name>.ts \
-  --args '<json>' \
-  --run-id <id> \
-  --provider sdk \
-  --budget small \
-  --approved \
-  --json \
-  --no-input
+workflow_start script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
+workflow_status run_id=<id-live>
 ```
 
-After launch, use:
+After launch:
 
 ```bash
-npx -y agent-loops status --run-id <id> --json
-npx -y agent-loops inspect --run-id <id> --json
+workflow_status run_id=<id-live>
+workflow_inspect run_id=<id-live>
+workflow_open_ui run_id=<id-live>
 ```
 
-Omit `--run-id` to target the latest run stored in SQLite.
+Use `workflow_resume run_id=<id> provider=codex` when a run failed and should
+reuse completed journaled nodes.
 
-For local async launch, add `--background`. If the current request also
-explicitly asks to start, serve, show, or open the UI, launch the workflow and
-integrated status server in one command:
+## Development Proofs
+
+For this repo:
 
 ```bash
-npx -y agent-loops workflow <script-or-name> \
-  --args '<json>' \
-  --run-id <id> \
-  --provider sdk \
-  --budget <small|standard|deep> \
-  --approved \
-  --background \
-  --status-server \
-  --json \
-  --no-input
+make setup
+make test
+make proof
+make proof-mcp
+make proof-mcp-live
+make proof-live
 ```
 
-Parse the `async_launched` JSON envelope and relay `runId`, `databasePath`, and
-`statusUrl`.
-
-## Visual Status UI
-
-After a live or background launch, report the run id and ask whether the
-user wants the visual status UI started. Do not start a UI server implicitly
-unless the user's current request explicitly asked to start, serve, or open the
-UI. A concise prompt is enough:
-
-```text
-Do you want me to start the Codex Loops status UI for <run-id>?
-```
-
-If the user says yes for an already-running workflow, start the integrated
-status server from the SQLite run with:
-
-```bash
-npx -y agent-loops serve --run-id <id> --json
-```
-
-Keep that process running while the user needs the page, parse the JSON startup
-envelope for the local `url`, and share that URL. If Browser is available and
-the user asked to see progress visually, open the URL in the in-app browser.
-When the user says no, continue with `status`/`inspect` text updates only.
-`agent-loops-ui` remains available for standalone package testing, but it is
-not the default operator path for this skill.
-
-Use `resume --run-id ...` when a run failed, was killed, or went stale: it
-replays the event log, reuses completed nodes from the journal (an identical
-re-run makes zero provider calls), and re-runs only failed or changed nodes.
-If the script or args changed in a way that invalidates prior node cache keys,
-the changed calls re-run and a `script_changed` notice is recorded. Filesystem
-run artifacts are not read by this version.
+`make proof-mcp` proves MCP lifecycle handling, validation, mock start, status,
+inspect, resume, scheduler typed errors, and open-ui against a copied plugin
+package. `make proof-mcp-live` validates through MCP, starts or reuses the
+packaged scheduler through MCP lifecycle handling, starts a live
+`provider: "codex"` run through `workflow_start`, polls `workflow_status`, and
+asserts nonzero token usage from the scheduler projection. It spends one real
+Codex provider turn. `make proof-live` aliases `make proof-mcp-live`.

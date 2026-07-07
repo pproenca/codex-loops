@@ -1,0 +1,45 @@
+#!/bin/sh
+set -eu
+
+case "${1:-}" in
+  ""|--stdio)
+    ;;
+  -h|--help)
+    echo "Usage: codex-loops-mcp --stdio"
+    exit 0
+    ;;
+  *)
+    echo "Usage: codex-loops-mcp --stdio" >&2
+    exit 2
+    ;;
+esac
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+plugin_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+repo_root=$(CDPATH= cd -- "$plugin_root/../.." && pwd)
+
+if [ -z "${CODEX_LOOPS_SCHEDULER_BIN:-}" ]; then
+  if [ -x "$plugin_root/scheduler/bin/agent_loops" ]; then
+    CODEX_LOOPS_SCHEDULER_BIN="$plugin_root/scheduler/bin/agent_loops"
+  elif [ -x "$repo_root/_build/prod/rel/agent_loops/bin/agent_loops" ]; then
+    CODEX_LOOPS_SCHEDULER_BIN="$repo_root/_build/prod/rel/agent_loops/bin/agent_loops"
+  else
+    {
+      echo "codex-loops MCP could not find a scheduler release."
+      echo "Build one with: make release"
+      echo "Or set CODEX_LOOPS_SCHEDULER_BIN to an executable agent_loops release script."
+    } >&2
+    exit 2
+  fi
+fi
+
+if [ ! -x "$CODEX_LOOPS_SCHEDULER_BIN" ]; then
+  echo "CODEX_LOOPS_SCHEDULER_BIN is not executable: $CODEX_LOOPS_SCHEDULER_BIN" >&2
+  exit 2
+fi
+
+export CODEX_LOOPS_PLUGIN_ROOT="$plugin_root"
+export CODEX_LOOPS_REPO_ROOT="$repo_root"
+export CODEX_LOOPS_SCHEDULER_BIN
+
+exec "$CODEX_LOOPS_SCHEDULER_BIN" eval 'Workflow.MCP.Stdio.main(["--stdio"])'

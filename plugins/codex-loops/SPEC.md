@@ -2,14 +2,15 @@
 
 ## Purpose
 
-Provide one Codex skill for authoring, validating, testing, executing, and
-inspecting local path-first dynamic workflow scripts with the `agent-loops` CLI.
+Provide one Codex skill plus a local Elixir MCP adapter for authoring, validating,
+testing, executing, and inspecting local Elixir workflow scripts.
 
-The plugin is deliberately thin. The published app package owns runner behavior;
-the skill teaches when to use it, how to write compatible workflow scripts, how
-to run the validation and mock-test gates, and how to relay journal-backed
-lifecycle state. It does not define a second runner package or a parallel
-command surface.
+The plugin is deliberately thin. The Elixir runtime owns runner behavior; the
+skill teaches when to use it, how to write compatible `.exs` workflow scripts,
+how to run validation and mock-test gates, and how to relay journal-backed
+lifecycle state. The MCP adapter is the Codex-facing surface: it reaches the
+scheduler only through the published HTTP API and never reads SQLite or calls
+internal scheduler modules directly.
 
 ## Public Surface
 
@@ -17,104 +18,96 @@ Skill:
 
 - `codex-loops`
 
-CLI commands:
+MCP tools:
 
-<!-- gen:commands -->
-```bash
-agent-loops draft --goal '<goal>' [--name name] [--output .codex/workflows/name.ts] [--json]
-agent-loops validate <script-or-name> --args '<json>' [--json] [--no-input]
-agent-loops test <script-or-name> --args '<json>' [--run-id <id>] [--provider mock|sdk] [--budget small|standard|deep] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops workflow <script-or-name> --args '<json>' --background [--status-server] [--json] [--no-input]
-agent-loops run <script-or-name> --args '<json>' [--run-id <id>] [--provider sdk|mock] [--budget small|standard|deep] [--approved] [--json] [--no-input]
-agent-loops resume [--run-id <id>] [--provider sdk|mock] [--approved] [--json] [--no-input]
-agent-loops inspect [--run-id <id>] [--json]
-agent-loops status [--run-id <id>] [--event-limit 5] [--json]
-agent-loops list [--limit 20] [--event-limit 5] [--json]
-agent-loops serve [--run-id <id>] [--host 127.0.0.1] [--port 0] [--json]
-agent-loops help
-```
-<!-- /gen:commands -->
+- `workflow_validate`
+- `workflow_start`
+- `workflow_status`
+- `workflow_inspect`
+- `workflow_resume`
+- `workflow_open_ui`
 
-Programmatic helpers:
+MCP behavior:
 
-- `workflow(nameOrRef: string | { scriptPath: string }, args?: unknown, options?: WorkflowCallOptions): Promise<unknown>`
-- `testWorkflow(nameOrRef: string | { scriptPath: string }, args?: unknown, options?: WorkflowCallOptions): Promise<WorkflowCommandResult>`
+- stdio JSON-RPC transport with newline-delimited messages
+- `initialize`, `tools/list`, `tools/call`, and notifications
+- `workflow_validate` input schema requires `script_path`
+- `workflow_start` input schema requires `script_path` and accepts optional
+  `run_id`, optional `provider` (`mock` or `codex`), and optional
+  non-negative integer `budget`. The scheduler API defaults to `mock`;
+  selecting `codex` spends a real Codex provider turn.
+- `workflow_status` input schema requires `run_id`
+- `workflow_inspect` input schema requires `run_id`
+- `workflow_resume` input schema requires `run_id` and accepts optional
+  `script_path`, optional scheduler-supported `script` alias, and optional
+  `provider` (`mock` or `codex`)
+- `workflow_open_ui` input schema requires `run_id`
+- `tools/call` health-checks `GET /api/health` before scheduler operations
+- when health fails, the server discovers and starts a packaged scheduler
+  release before retrying the operation
+- `workflow_start` calls `POST /api/runs` and returns the scheduler success or
+  error envelope exactly as MCP `structuredContent`
+- `workflow_status` calls `GET /api/runs/:id` and returns the scheduler
+  projection exactly as MCP `structuredContent`
+- `workflow_inspect` calls `GET /api/runs/:id/events` and returns the ordered
+  scheduler event projection exactly as MCP `structuredContent`
+- `workflow_resume` calls `POST /api/runs/:id/resume` and returns the scheduler
+  success or error envelope exactly as MCP `structuredContent`
+- `workflow_open_ui` calls `GET /api/runs/:id` and returns an MCP envelope with
+  the scheduler projection plus absolute `open_url` based on the scheduler base
+  URL
+- scheduler success envelopes are returned as MCP `structuredContent`
+- scheduler typed errors remain typed and are returned as MCP `isError: true`
+- scheduler lifecycle failures use MCP-friendly `scheduler_unavailable` or
+  `scheduler_start_failed` envelopes with actionable details
+- the MCP adapter reaches the scheduler only through HTTP API calls; it does not
+  read SQLite or call `Workflow.Scheduler`, `Workflow.Journal`, or runtime
+  internals directly
+- `make release` assembles the scheduler release into
+  `plugins/codex-loops/scheduler/` so the MCP adapter can run from a copied
+  plugin package without a sibling source `_build` directory
 
-Artifact-aware authoring:
+## Artifact-Aware Authoring
 
 - User asks to run, execute, test, resume, inspect, launch, or automate through
-  Codex Loops: create an executable workflow script and keep the existing
+  Codex Loops: create an executable `.exs` workflow script and keep the
   validation/mock-test gate.
 - User asks to save a workflow as a skill, playbook, reusable procedure, or
   future Codex behavior: create or update a `SKILL.md` in a user-approved skill
-  location and do not call `agent-loops draft`, `agent-loops validate`,
-  `agent-loops test`, `agent-loops workflow`, `agent-loops run`, or
-  `agent-loops resume`.
+  location and do not call Codex Loops execution commands unless the user also
+  asks for an executable script.
 - User asks for both: create the reusable skill as the operating guide and only
   create a workflow script for the executable portion.
 - User says only "workflow" and the artifact is ambiguous: ask whether they want
-  an executable workflow script, a reusable Codex skill, or both before writing
-  files.
+  an executable workflow script, a reusable Codex skill, or both.
 
-Workflow script input is path-first. Inline script and stdin script execution are
-out of scope for this version. Local background launch and a live status UI are
-supported. Hosted workflow services, external workflow UIs, and per-agent
-skip/retry controls are intentionally unsupported by this package.
-Live SDK execution must use the TypeScript `@openai/codex-sdk` package; the
-SDK's `codexPathOverride` option may select the Codex executable but must not
-replace the SDK module itself.
+## Workflow DSL
 
-## Journal And Snapshot
+Workflow scripts are Elixir files:
 
-Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`. The journal
-format remains `agent-loops/journal@2`, with canonical committed event payloads
-stored as `event_json` rows keyed by `(run_id, seq)`. `status`, `inspect`,
-`list`, `resume`, and `serve` are pure folds over those rows; completed nodes
-replay from the journal on resume.
+```elixir
+defmodule ExampleWorkflow do
+  use Workflow
 
-Commands use `--run-id` when they need a stable durable run identifier or an
-explicit run selection. `resume`, `inspect`, `status`, and `serve` use the
-latest run id from SQLite when `--run-id` is omitted. `--journal` is removed on
-every command and fails with `--journal was removed; use --run-id`. JSON
-envelopes expose `runId` and `databasePath`.
+  workflow "example" do
+    phase "scout"
+    log "starting"
+    agent "Inspect README.md and summarize the project goal."
+    return :ok
+  end
+end
+```
 
-Snapshots are derived projections with
-`schemaVersion: "workflow-snapshot/v2"`: one canonical `phases[]` progress
-representation with embedded node summaries
-(`queued|running|done|failed|killed`), `scriptPath` + `scriptSha256` instead of
-embedded script text, and the `runtimeContract`.
+Useful forms:
 
-## DSL Requirements
-
-The workflow DSL is implemented by the `agent-loops` package and executed
-through mock or Codex SDK-backed workers.
-
-Required globals:
-
-- `args`
-- `budget`
-- `agent(prompt, opts?)`
-- `pipeline(items, ...stages)`
-- `parallel(thunks)`
-- `workflow(nameOrRef, args?)`
-- `phase(title)`
-- `log(message)`
-
-Required script constraints:
-
-- `meta` must be the first statement and a pure literal with `name` and
-  `description`.
-- Scripts are plain JavaScript in an async context.
-- Node APIs, imports, dynamic time, random values, TypeScript syntax, and
-  runner-only mutation helpers are not allowed.
-- Schema-backed `agent()` calls return provider-validated objects and fail
-  closed after retry exhaustion.
-- `pipeline()` is the default multi-stage primitive; `parallel()` is a barrier.
-- Identical-content fan-out should pass explicit `label` options so resumed
-  results keep their positions; default labels are content-derived.
-- Child workflows share the parent journal, limits, model policy, and abort
-  signal.
+- `workflow "name" do ... end`
+- `phase "title"`
+- `log "message"`
+- `agent "prompt"`
+- `agent "prompt", schema: %{...}, retries: n`
+- `return value`
+- Advanced orchestration: `parallel`, `pipeline`, `collect`, `while_budget`,
+  `until_dry`, `verify`, `judge`, `synthesize`, and `fan_out`.
 
 Expected authoring loop:
 
@@ -122,112 +115,72 @@ Expected authoring loop:
    writing the workflow.
 2. Translate facts into workflow constraints: file scope, public contracts,
    mutation posture, verification commands, and halt conditions.
-3. Choose barrier versus pipeline per phase and document why that dependency
-   shape is required.
+3. Choose simple sequential phases unless the task genuinely needs fanout or
+   loop combinators.
 4. Use domain-rich worker prompts with exact files, constraints, closed schemas,
    and concrete expected outputs.
 5. Add adversarial verification and a final build or test gate for mutating
    workflows.
-6. Run `validate` or `test --provider mock`; run live SDK only after approval.
+6. Run `workflow_validate` and a mock `workflow_start`; run live Codex only
+   after approval.
 
-## Runtime Contract
+## Journal And Runtime
 
-Snapshots include a `runtimeContract` object that makes guidance decisions
-inspectable:
+Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`, unless
+`CODEX_LOOPS_JOURNAL_PATH` is set. Scheduler status, inspect, and resume
+projections are folds over the journal. Completed nodes replay from the journal
+on resume.
 
-- activation source and command
-- permission decision and caller-owned approval source
-- structured-output fail-closed policy
-- scheduling caps and queue-state visibility
-- task-budget/accounting threshold policy
-- resume cache key
-- hosted-service support set to `false`
+The live provider shells out to `codex exec --json --skip-git-repo-check`.
+Schema-backed agents pass `--output-schema`; the writer validates outputs and
+fails closed after retry exhaustion.
 
-Status and inspect commands must surface this contract without rerunning the
-workflow.
+## Packaging
+
+The production artifact is a Mix release:
+
+```bash
+make release
+test -x _build/prod/rel/agent_loops/bin/agent_loops
+```
+
+The MCP adapter launches the generated `agent_loops` release script when it
+owns scheduler lifecycle.
+
+Development and proof commands:
+
+```bash
+make setup
+make test
+make proof
+make proof-mcp
+make proof-mcp-live
+make proof-live
+```
+
+`make proof-mcp` copies the plugin package to a temp install location and proves
+MCP lifecycle, validation, mock start, status polling, event inspection,
+resume, typed scheduler errors, and open-ui response against the copied
+package's scheduler release. `make proof-mcp-live` validates through MCP,
+starts or reuses the packaged scheduler through MCP lifecycle handling, starts a
+live `provider: "codex"` run through `workflow_start`, observes completion
+through `workflow_status`, and asserts nonzero token usage from the scheduler
+projection. It spends one real Codex provider turn. `make proof-live` aliases
+the MCP live proof.
 
 ## Safety And Testing
 
-Every workflow must pass `agent-loops validate` or `agent-loops test --provider
-mock` before live SDK execution. Generated workflows that can mutate files
-should use bounded args during testing and should return closed plans or a
-declared live write scope, exact file paths, and verification commands before
-the caller authorizes live execution.
+Every executable workflow must pass:
 
-The skill must report:
-
-- workflow path
-- run id and database path
-- budget plan and explicit caps
-- runtime contract, including permission and hosted-service support
-- test result and failed node diagnostics, if any
-- exact args
-- intended file changes or a no-change statement
-
-Live execution remains caller-owned. The skill should stop when tests fail or
-when the intended write scope is unclear. Pass `--approved` only when the caller
-or host UI has already approved the live SDK run.
-
-Visual status UI launch is also caller-owned. If the current request asks to
-run a workflow and explicitly asks to start, serve, show, or open the UI, the
-skill launches one integrated CLI envelope:
-
-```bash
-npx -y agent-loops workflow <script-or-name> \
-  --args '<json>' \
-  --run-id <id> \
-  --provider sdk \
-  --budget <small|standard|deep> \
-  --approved \
-  --background \
-  --status-server \
-  --json \
-  --no-input
+```text
+workflow_validate script_path=.codex/workflows/<name>.exs
+workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_status   run_id=<id>
+workflow_inspect  run_id=<id>
 ```
 
-It parses the `async_launched` JSON envelope and relays `runId`, `databasePath`,
-and `statusUrl`. After a live or background run starts without an explicit UI
-request, the skill must report the run id and ask whether the user wants a
-visual UI. Unless the current user request explicitly asked to serve or open the
-UI, the skill must wait for the user's yes/no answer before starting a server.
-When accepted for an already-running workflow, the skill launches the integrated
-status server with:
+Generated workflows that can mutate files should return closed plans or declare
+live write scope, exact file paths, and verification commands before the caller
+authorizes live execution.
 
-```bash
-npx -y agent-loops serve --run-id <id> --json
-```
-
-It then relays the JSON envelope URL and keeps the server process alive while
-the user needs the visual progress page.
-
-When a `--json` invocation fails, the last stderr line is a single-line JSON
-error object (`schema/cli-error.schema.json`); parse that instead of scraping
-prose diagnostics.
-
-## Acceptance Checks
-
-- Exactly one `SKILL.md` exists under `plugins/codex-loops/skills`.
-- `node apps/runtime/scripts/gen-help.mjs --check` exits 0: the
-  `gen:commands` blocks in the app README, this spec, the plugin README, and
-  the skill match the CLI `COMMANDS` table.
-- `node .plugin-eval/codex-loops/verifiers/verify-plugin-structure.js`
-  exits 0.
-- Plugin text explicitly says local background launch and status pages are
-  supported, while hosted workflow services remain unsupported in this package.
-- Plugin text explicitly says the skill asks before starting the visual status
-  UI, uses `workflow --background --status-server --json` when the current
-  request asks to launch with UI, and uses
-  `npx -y agent-loops serve --run-id <id> --json` for an existing run.
-- Plugin text distinguishes executable workflow scripts from reusable Codex
-  skills and includes the artifact clarification question.
-- Skill-saving requests are documented as `SKILL.md` authoring requests that do
-  not call Codex Loops execution or validation commands unless an executable
-  script is also requested.
-- `agent-loops status`, `inspect`, `list`, `validate`, and `resume` work against
-  the local SQLite run database.
-- The app ships exactly these schemas: `agent-result.schema.json`,
-  `cli-error.schema.json`, `journal-event.schema.json`,
-  `patch-plan.schema.json`, `workflow-command.schema.json`,
-  `workflow-draft.schema.json`, `workflow-snapshot.schema.json`,
-  `workload-plan.schema.json`.
-- App typecheck, tests, and build pass.
+When an MCP tool fails, preserve its typed scheduler error envelope.

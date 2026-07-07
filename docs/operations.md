@@ -1,86 +1,110 @@
 # Codex Loops Operations
 
-## Sources
-Sources:
-- `apps/runtime/README.md`
-- `plugins/codex-loops/skills/codex-loops/SKILL.md`
-- `plugins/codex-loops/SPEC.md`
-
-## Preflight
-Use `validate` to check script compatibility before execution:
+## Developer Setup
 
 ```sh
-agent-loops validate <script-or-name> --args '<json>' --json --no-input
+make setup
+make test
+make release
+make proof
 ```
 
-For generated workflows, verify that the workflow path, args, budget, intended
-write scope, and expected verification commands are known before running a live
-provider.
+`make setup` installs Hex/Rebar and fetches Elixir dependencies.
+`.tool-versions` pins the known-good local toolchain for `mise`/`asdf`.
 
-## Mock Test Gate
-Run a bounded mock test before live SDK execution:
+`make test` runs the scheduler/API/UI Elixir test suite. `make release` produces
+the distributable local scheduler artifact under `_build/prod/rel/agent_loops/`.
+
+For a repeatable local dogfood run, use:
 
 ```sh
-agent-loops test <script-or-name> --args '<json>' --provider mock --budget small --json --no-input
+make dogfood
 ```
 
-Inspect `snapshot.status`, `budgetPlan`, `runtimeContract`, phase node summaries,
-and failed node errors.
+It proves the packaged scheduler/MCP path, reinstalls `codex-loops@codex-loops`
+from the current checkout, verifies Codex sees the plugin, and prints the prompt
+to paste into a fresh thread for the actual agent-driven workflow run.
 
-## Live Execution
-Run live SDK execution only after the gate passes and approval exists:
+## Release Proof
 
 ```sh
-agent-loops workflow <script-or-name> --args '<json>' --provider sdk --budget small --approved --json --no-input
+make proof
 ```
 
-Use an explicit `--run-id <id>` when the run needs a stable durable identifier.
-
-## Background Runs
-`--background` initializes the journal, then launches a detached resume worker.
+This builds the Mix release and exercises the scheduler readiness path. The
+proof starts the packaged Phoenix scheduler release on `127.0.0.1:47125` by
+default with an isolated SQLite journal, then:
 
 ```sh
-agent-loops workflow <script-or-name> --args '<json>' --background --json --no-input
+GET  /api/health
+POST /api/workflows/validate
+POST /api/runs
+GET  /api/runs/<id>
+GET  /api/runs/<id>/events
+GET  /runs/<id>
 ```
 
-The launch result includes the workflow name, pid, run id, `databasePath`, and
-script path.
+Override proof binding and journal isolation when needed:
 
-## Status And Inspect
 ```sh
-agent-loops status --run-id <id> --event-limit 5 --json
-agent-loops inspect --run-id <id> --json
-agent-loops list --limit 20 --event-limit 5 --json
+CODEX_LOOPS_PROOF_HOST=127.0.0.1 \
+CODEX_LOOPS_PROOF_PORT=47126 \
+CODEX_LOOPS_PROOF_JOURNAL_PATH=/tmp/codex-loops-proof.sqlite \
+make proof
 ```
 
-Omit `--run-id` to read the latest run id from
-`~/.codex/workflows/runs_1.sqlite`.
+## Live Proof
 
-## Serve
 ```sh
-npx -y agent-loops serve --run-id <id> --json
+make proof-mcp-live
+make proof-live
 ```
 
-The Codex Loops plugin should not start this visual status UI implicitly after a
-run. It should report the run id, ask whether the user wants the UI, and only
-run `agent-loops serve --run-id <id> --json` after the user accepts.
-The JSON envelope includes the local URL. The server exposes `GET /status.json`,
-a local dashboard, and SSE updates derived from SQLite run events.
+`make proof-mcp-live` spends one live Codex provider turn through the packaged
+scheduler plus MCP lifecycle path, then asserts the run completed and recorded
+nonzero token usage in the scheduler projection. `make proof-live` aliases the
+same MCP proof.
 
-## Resume
-```sh
-agent-loops resume --run-id <id> --provider sdk --approved --json --no-input
+## Normal Workflow Run
+
+Agents should use the Codex plugin MCP tools. The MCP adapter starts or
+discovers the scheduler, health-checks it, and talks to the scheduler HTTP API.
+The Elixir/Phoenix scheduler owns the workflow workers, PubSub/LiveView, and
+SQLite journal.
+
+```text
+workflow_validate script_path=.codex/workflows/example.exs
+workflow_start    script_path=.codex/workflows/example.exs run_id=run_example provider=mock
+workflow_status   run_id=run_example
+workflow_inspect  run_id=run_example
 ```
 
-Resume folds the journal, reuses completed nodes, and re-runs failed or changed
-nodes.
+Run live only after the mock gate is clean:
+
+```text
+workflow_start  script_path=.codex/workflows/example.exs run_id=run_example_live provider=codex
+workflow_status run_id=run_example_live
+```
+
+## Status, Inspect, Open UI, Resume
+
+```text
+workflow_status  run_id=<id>
+workflow_inspect run_id=<id>
+workflow_open_ui run_id=<id>
+workflow_resume  run_id=<id> provider=codex
+```
 
 ## Failure Parsing
-For `--json` commands, parse the final stderr line as a JSON error object. Do not
-scrape earlier human diagnostics for automation.
 
-## Operational Artifacts
-Treat these as generated runtime artifacts rather than source docs:
+MCP tools return scheduler success envelopes as structured content. Scheduler
+typed errors remain typed and are returned as MCP errors.
+
+## Runtime Artifacts
+
+Treat these as generated runtime artifacts:
+
 - `~/.codex/workflows/runs_1.sqlite`
 - `~/.codex/workflows/runs_1.sqlite-wal`
 - `~/.codex/workflows/runs_1.sqlite-shm`
+- `_build/prod/rel/agent_loops/`

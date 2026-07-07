@@ -552,6 +552,46 @@ defmodule ProofMCPValidate do
       events == expected_events,
       "workflow_inspect should return MCP-friendly event projections"
     )
+
+    inspector = payload["data"]["inspector"]
+
+    assert!(inspector["run_id"] == run_id, "workflow_inspect inspector should preserve run id")
+    assert!(inspector["event_count"] == 5, "workflow_inspect inspector should count events")
+    assert!(inspector["failure"] == nil, "workflow_inspect inspector should omit failure")
+
+    assert!(
+      inspector["usage"] == %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+      "workflow_inspect inspector should project usage"
+    )
+
+    assert!(
+      Enum.map(inspector["phases"], & &1["name"]) == ["proof"],
+      "workflow_inspect inspector should project phases"
+    )
+
+    assert!(
+      inspector["agents"] == [
+        %{
+          "id" => "agent-2-i0",
+          "slug" => "reply-with-proof-ok-i0",
+          "address" => [2],
+          "iteration" => 0,
+          "prompt" => "Reply with proof-ok",
+          "outcome" => %{"echo" => "Reply with proof-ok"},
+          "result" => %{"echo" => "Reply with proof-ok"},
+          "usage" => %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+          "activity" => [],
+          "phase_id" => "phase-0",
+          "phase_name" => "proof"
+        }
+      ],
+      "workflow_inspect inspector should project agent details"
+    )
+
+    assert!(
+      inspector["rejected_attempts"] == [] and inspector["failed_rejected_attempts"] == [],
+      "workflow_inspect inspector should expose empty rejection lists"
+    )
   end
 
   defp assert_unknown_run_error!(response, tool_name, run_id) do

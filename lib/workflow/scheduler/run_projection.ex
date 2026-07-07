@@ -8,7 +8,7 @@ defmodule Workflow.Scheduler.RunProjection do
   """
 
   alias Workflow.Provider.Usage
-  alias Workflow.Status
+  alias Workflow.{RunInspector, Status}
 
   @enforce_keys [
     :run_id,
@@ -20,6 +20,7 @@ defmodule Workflow.Scheduler.RunProjection do
     :agent_count,
     :event_count,
     :usage,
+    :inspector,
     :result,
     :failure,
     :ui_path,
@@ -35,6 +36,7 @@ defmodule Workflow.Scheduler.RunProjection do
     :agent_count,
     :event_count,
     :usage,
+    :inspector,
     :result,
     :failure,
     :ui_path,
@@ -51,6 +53,7 @@ defmodule Workflow.Scheduler.RunProjection do
           agent_count: non_neg_integer(),
           event_count: non_neg_integer(),
           usage: Usage.t(),
+          inspector: map(),
           result: term(),
           failure: map() | nil,
           ui_path: String.t(),
@@ -71,6 +74,7 @@ defmodule Workflow.Scheduler.RunProjection do
       agent_count: length(status.agents),
       event_count: status.event_count,
       usage: status.usage,
+      inspector: inspector_from_status(status),
       result: status.result,
       failure: status.failure,
       ui_path: ui_path,
@@ -90,10 +94,77 @@ defmodule Workflow.Scheduler.RunProjection do
       agent_count: projection.agent_count,
       event_count: projection.event_count,
       usage: usage_map(projection.usage),
+      inspector: projection.inspector,
       result: jsonable(projection.result),
       failure: encode_failure(projection.failure),
       ui_path: projection.ui_path,
       ui_url: projection.ui_url
+    }
+  end
+
+  @spec inspector_from_status(Status.t()) :: map()
+  def inspector_from_status(%Status{} = status) do
+    inspector = RunInspector.from_status(status)
+
+    %{
+      run_id: inspector.run_id,
+      phases: Enum.map(inspector.phases, &inspector_phase/1),
+      agents: Enum.map(inspector.agents, &inspector_agent/1),
+      rejected_attempts: Enum.map(inspector.rejected_attempts, &inspector_rejection/1),
+      failed_rejected_attempts:
+        Enum.map(inspector.failed_rejected_attempts, &inspector_rejection/1),
+      failure: encode_failure(status.failure),
+      usage: usage_map(status.usage),
+      event_count: status.event_count
+    }
+  end
+
+  defp inspector_phase(phase) do
+    %{
+      id: phase.id,
+      name: phase.name,
+      address: phase.address,
+      agents: Enum.map(phase.agents, &inspector_agent/1)
+    }
+  end
+
+  defp inspector_agent(agent) do
+    %{
+      id: agent.id,
+      slug: agent.slug,
+      address: agent.address,
+      iteration: agent.iteration,
+      prompt: text(agent.prompt),
+      outcome: jsonable(agent.outcome),
+      result: jsonable(agent.result),
+      usage: usage_map(agent.usage),
+      activity: Enum.map(agent.activity, &inspector_activity/1),
+      phase_id: agent.phase_id,
+      phase_name: agent.phase_name
+    }
+  end
+
+  defp inspector_rejection(rejection) do
+    %{
+      id: rejection.id,
+      address: rejection.address,
+      iteration: rejection.iteration,
+      attempt: rejection.attempt,
+      prompt: text(rejection.prompt),
+      output: jsonable(rejection.output),
+      reason: inspect(rejection.reason),
+      activity: Enum.map(rejection.activity, &inspector_activity/1),
+      phase_id: rejection.phase_id,
+      phase_name: rejection.phase_name
+    }
+  end
+
+  defp inspector_activity(activity) do
+    %{
+      kind: Map.get(activity, :kind),
+      label: Map.get(activity, :label),
+      status: Map.get(activity, :status),
+      summary: Map.get(activity, :summary)
     }
   end
 
@@ -104,6 +175,8 @@ defmodule Workflow.Scheduler.RunProjection do
       total_tokens: usage.total_tokens
     }
   end
+
+  defp usage_map(_usage), do: usage_map(%Usage{})
 
   defp encode_failure(nil), do: nil
 
@@ -121,4 +194,8 @@ defmodule Workflow.Scheduler.RunProjection do
       {:error, _reason} -> inspect(term)
     end
   end
+
+  defp text(value) when is_binary(value), do: value
+  defp text(value) when is_atom(value), do: Atom.to_string(value)
+  defp text(value), do: inspect(value)
 end

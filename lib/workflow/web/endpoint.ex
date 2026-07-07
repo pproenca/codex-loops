@@ -14,9 +14,8 @@ defmodule Workflow.Web.Endpoint do
     same_site: "Lax"
   ]
 
-  socket "/live", Phoenix.LiveView.Socket,
-    websocket: [connect_info: [session: @session_options]]
+  socket("/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session_options]])
 
-  plug Plug.Session, @session_options
-  plug Workflow.Web.Router
+  plug(Plug.Session, @session_options)
+  plug(Workflow.Web.Router)
 end

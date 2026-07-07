@@ -94,9 +94,10 @@ defmodule Workflow.Compiler do
   # provably terminates on its own budget/dryness bound.
   @body_combinators [:agent, :log, :phase, :collect]
 
-  # Options a schema-backed `agent` accepts, and the default retry budget when
-  # `retries:` is omitted (total attempts = retries + 1).
-  @agent_option_keys [:schema, :retries]
+  # Options an `agent` accepts, and the default retry budget when `retries:` is
+  # omitted (total attempts = retries + 1). `label:` is display metadata only; it
+  # stays inert and never changes execution or idempotency.
+  @agent_option_keys [:schema, :retries, :label]
   @default_retries 2
 
   # A structural safety bound so every loop terminates even if its budget/dryness
@@ -261,8 +262,10 @@ defmodule Workflow.Compiler do
     with {:ok, prompt} <- prompt_text(prompt, form, env, "agent prompt"),
          {:ok, kw} <- agent_options(opts, form, env),
          {:ok, schema} <- agent_schema(kw, form, env),
-         {:ok, retries} <- agent_retries(kw, form, env) do
-      {:ok, %Agent{address: address, prompt: prompt, schema: schema, retries: retries}}
+         {:ok, retries} <- agent_retries(kw, form, env),
+         {:ok, label} <- agent_label(kw, form, env) do
+      {:ok,
+       %Agent{address: address, prompt: prompt, label: label, schema: schema, retries: retries}}
     end
   end
 
@@ -276,11 +279,13 @@ defmodule Workflow.Compiler do
          {:ok, bindings} <- emit_bindings(template, binding_env, form, env),
          {:ok, kw} <- agent_options(opts, form, env),
          {:ok, schema} <- agent_schema(kw, form, env),
-         {:ok, retries} <- agent_retries(kw, form, env) do
+         {:ok, retries} <- agent_retries(kw, form, env),
+         {:ok, label} <- agent_label(kw, form, env) do
       {:ok,
        %Agent{
          address: address,
          prompt: template,
+         label: label,
          bindings: bindings,
          schema: schema,
          retries: retries
@@ -556,10 +561,14 @@ defmodule Workflow.Compiler do
         {:error, schema_finding(form, env)}
 
       :error ->
-        {:error,
-         Finding.at(env, form, "`agent` with options requires a `schema:`",
-           hint: "schema-backed agents fail closed; give schema: %{...} or a schema module"
-         )}
+        if Keyword.has_key?(kw, :retries) do
+          {:error,
+           Finding.at(env, form, "`agent` with `retries:` requires a `schema:`",
+             hint: "schema-backed agents fail closed; give schema: %{...} or a schema module"
+           )}
+        else
+          {:ok, nil}
+        end
     end
   end
 
@@ -600,6 +609,21 @@ defmodule Workflow.Compiler do
 
       {:ok, _} ->
         {:error, Finding.at(env, form, "`agent` retries must be a non-negative integer")}
+    end
+  end
+
+  defp agent_label(kw, form, env) do
+    case Keyword.fetch(kw, :label) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, label} when is_binary(label) ->
+        with {:ok, label} <- prompt_text(label, form, env, "agent label") do
+          {:ok, label}
+        end
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`agent` label must be a string literal")}
     end
   end
 

@@ -32,6 +32,27 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
              "Finalize the SPEC.md §10 insertion for HUMAN REVIEW — do NOT commit anything"
   end
 
+  test "migrated workflow defines stable UI labels for every agent" do
+    assert {:ok, %Tree{} = tree} = Script.load_tree(@script_path)
+
+    assert agent_labels(tree) == [
+             "read:spec-structure",
+             "read:dataflow",
+             "draft:spec",
+             "review:spec-completeness",
+             "review:implementation-fidelity",
+             "review:invariants",
+             "review:teachability",
+             "review:structural-lint",
+             "review:non-destructiveness",
+             "gate:consensus",
+             "revise:open-defects",
+             "review:cold-read",
+             "revise:cold-read",
+             "verify:final"
+           ]
+  end
+
   test "convergence loop stops when the panel reaches consensus" do
     assert {:ok, %Tree{nodes: nodes}} = Script.load_tree(@script_path)
 
@@ -45,6 +66,22 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
 
     prompts = body |> agent_prompts() |> Enum.join("\n---PROMPT---\n")
     assert prompts =~ "CONSENSUS GATE"
+
+    assert %Agent{schema: schema, retries: 0} =
+             Enum.find(body, &match?(%Agent{label: "gate:consensus"}, &1))
+
+    assert schema == %{
+             "type" => "array",
+             "items" => %{
+               "type" => "object",
+               "properties" => %{
+                 "id" => %{"type" => "string", "const" => "unanimous"},
+                 "verdict" => %{"type" => "string", "const" => "pass"}
+               },
+               "required" => ["id", "verdict"],
+               "additionalProperties" => false
+             }
+           }
   end
 
   defp phase_names(nodes) do
@@ -85,4 +122,23 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
+
+  defp agent_labels(%Tree{nodes: nodes}), do: agent_labels(nodes)
+
+  defp agent_labels(nodes) when is_list(nodes),
+    do: nodes |> Enum.flat_map(&agent_labels/1)
+
+  defp agent_labels(%Agent{label: label}), do: [label]
+  defp agent_labels(%Parallel{branches: branches}), do: agent_labels(branches)
+
+  defp agent_labels(%Pipeline{lanes: lanes}) do
+    lanes
+    |> List.flatten()
+    |> agent_labels()
+  end
+
+  defp agent_labels(%FanOut{body: body}), do: agent_labels(body)
+  defp agent_labels(%UntilDry{body: body}), do: agent_labels(body)
+  defp agent_labels(%WhileBudget{body: body}), do: agent_labels(body)
+  defp agent_labels(_node), do: []
 end

@@ -258,11 +258,14 @@ AgentOpts : `,` KeywordList
 ```
 
 The optional `KeywordList` is a literal Elixir keyword list drawn only from the keys
-`schema:` and `retries:`. When present, `schema:` is REQUIRED. `schema:` is either a
+`schema:`, `retries:`, and `label:`. `schema:` is either a
 literal JSON-schema map or a **schema-module alias** — a module built with
 `Workflow.Schema.DSL` (§4.5) that the compiler lifts to an inert map via
 `module.__schema__(:json)`. `retries:` is a non-negative integer literal, default `2`
-(total attempts = `retries + 1`).
+(total attempts = `retries + 1`), and requires `schema:` when present. `label:` is an
+optional string literal used only as inert display metadata; it does not affect addressing,
+idempotency, prompts, provider calls, validation, control flow, or results, and it may be
+used with or without `schema:`.
 
 **Inline schema maps MUST use string keys (normative).** `Schema.Validate` dispatches on
 the **string** key `schema["type"]` (§6.4.2), so a literal schema map MUST be written with
@@ -476,7 +479,7 @@ Each node's enforced keys and defaults (from `lib/workflow/node.ex`). Every node
 |---|---|---|---|
 | `Phase` | `[:address, :name]` | — | `name :: String.t()` |
 | `Log` | `[:address, :message]` | — | `message :: String.t()` |
-| `Agent` | `[:address, :prompt]` | `schema: nil, retries: 2` | `prompt :: String.t()`; `schema :: map() \| nil`; `retries :: non_neg_integer()` |
+| `Agent` | `[:address, :prompt]` | `label: nil, schema: nil, retries: 2` | `prompt :: String.t()`; `label :: String.t() \| nil`; `schema :: map() \| nil`; `retries :: non_neg_integer()` |
 | `Return` | `[:address, :value]` | — | `value :: term()` |
 | `Parallel` | `[:address, :branches]` | `max_concurrency: nil` | `branches :: [Agent.t()]`; `max_concurrency :: pos_integer() \| nil` |
 | `Pipeline` | `[:address, :items, :lanes]` | `max_concurrency: nil` | `items :: [term()]`; `lanes :: [[Agent.t()]]` |
@@ -782,14 +785,16 @@ the AST; each carries the smallest violating input.
 agent(some_var)              # `agent` was called with invalid arguments
 ```
 
-**Rule 5.3.2 — Agent options are a `schema:`/`retries:` keyword literal.** A two-argument
-`agent` requires a literal keyword list whose keys are all in `[:schema, :retries]`.
+**Rule 5.3.2 — Agent options are a `schema:`/`retries:`/`label:` keyword literal.** A
+two-argument `agent` requires a literal keyword list whose keys are all in
+`[:schema, :retries, :label]`.
 
 ```counter-example
 agent("go", schema: %{"type" => "object"}, bogus: 1)   # invalid arguments
 ```
 
-**Rule 5.3.3 — Options require a schema.** A two-argument `agent` MUST supply `schema:`.
+**Rule 5.3.3 — Retries require a schema.** A two-argument `agent` MAY supply only
+`label:`. If it supplies `retries:`, it MUST also supply `schema:`.
 
 ```counter-example
 agent("go", retries: 2)      # `agent` with options requires a `schema:`
@@ -813,14 +818,22 @@ agent("go", schema: "not a map")   # `agent` schema must be a literal map
 agent("go", schema: %{"type" => "object"}, retries: -1)   # must be a non-negative integer
 ```
 
-**Rule 5.3.6 — Return value is a literal.** `return(value)` requires
+**Rule 5.3.6 — Label is inert display metadata.** `label:` MUST be a string literal when
+present. It is copied to the `%Agent{label: …}` field and to prompt-bearing agent event
+payloads (§7.2), and has no semantic effect.
+
+```counter-example
+agent("go", label: :read_docs)   # `agent` label must be a string literal
+```
+
+**Rule 5.3.7 — Return value is a literal.** `return(value)` requires
 `Macro.quoted_literal?(value)`.
 
 ```counter-example
 return(compute())            # `return` expects a literal value
 ```
 
-**Rule 5.3.7 — Synthesize inputs/prompt are literals.** `synthesize(inputs, prompt)`
+**Rule 5.3.8 — Synthesize inputs/prompt are literals.** `synthesize(inputs, prompt)`
 requires `Macro.quoted_literal?(inputs)` and `is_binary(prompt)`.
 
 ```counter-example
@@ -1088,6 +1101,7 @@ Examples (all compile):
 
 - `agent("x", schema: A, schema: B)` → `%Agent{}` with schema `A`; `B` is ignored.
 - `agent("x", schema: %{…}, retries: 1, retries: 2)` → `retries: 1`.
+- `agent("x", label: "first", label: "second")` → `label: "first"`.
 - `verify("f", voters: 1, voters: 3)` → `{:voters, 1}`.
 - `judge(["a"], by: [:x], by: [:y], pick: :max_score)` → `by: [:x]`.
 - `while_budget reserve: 4, reserve: 8 do agent("go") end` → `reserve: 4`.
@@ -1333,30 +1347,44 @@ run occupies contiguous `seq` `0..4` (§7.2). `Status.of` is the pure read-model
 (the `Workflow.Status.of` defined in §7.3). A fresh `run_started` is committed only when
 `prior` is empty; a resume appends no new `run_started`.
 
-**The `Commit` primitive and the single `seq` cursor (normative).** `Journal.LastSeq(run_id)
-+ 1` is consulted **exactly once**, here in `RunTree`, to **seed** the `ctx.seq` cursor; it is
-**never** re-queried thereafter. From that point on there is exactly **one** monotonic `seq`
-cursor, carried as `ctx.seq` and threaded through the entire walk. Every commit — simple
-(`run_started`, `run_completed`, `phase_entered`, `log_emitted`, `agent_committed`,
-`agent_attempt_rejected`, `agent_failed`, `accumulate`, `iteration_started`, `loop_decision`,
-`loop_completed`) **and** region marker/lane commit (via `CommitMarker` §6.3, `CommitAll`
-§6.9) — assigns the event's `seq` from the current cursor and advances the cursor by one:
+**The `Commit` primitive, traversal cursor, and serialized append boundary (normative).**
+`Journal.LastSeq(run_id) + 1` is consulted in `RunTree` to seed the writer's `ctx.seq`
+cursor. That cursor is the writer's semantic traversal cursor: it is threaded through the
+walk, preserves source-order decisions, and lets positional/idempotent helpers know where the
+next writer-owned commit is expected to land if no progress telemetry interleaves.
+
+The journal append boundary is the authoritative physical `seq` allocator. Every event that
+is actually committed during a live run — simple commits (`run_started`, `run_completed`,
+`phase_entered`, `log_emitted`, `agent_committed`, `agent_attempt_rejected`, `agent_failed`,
+`accumulate`, `iteration_started`, `loop_decision`, `loop_completed`), region marker/lane
+commits (via `CommitMarker` §6.3, `CommitAll` §6.9), and `agent_activity` progress telemetry
+— is appended through the serialized journal allocator. The allocator stamps the event with
+the next available `seq` at append time, so progress telemetry emitted while the writer is
+blocked inside a provider turn or waiting for concurrent lanes can interleave without
+colliding with later settled events:
 
 ```
 Commit(event, ctx):
-  - Stamp {event} with seq = ctx.seq (and run_id); append it to the journal.
-  - Return {ctx with seq = ctx.seq + 1}.       ; matches the reference commit/3, which returns seq + 1
+  - Append {event} through Journal.AppendNext(run_id, event), which stamps run_id and the
+    next available seq inside the serialized journal process.
+  - Return {ctx with seq = max(ctx.seq, stamped_event.seq + 1)}.
 ```
 
-Wherever a §6 algorithm says "Commit `Event.…`", the operation is `Commit`, and the returned,
-advanced `ctx.seq` MUST be threaded into the `ctx` that algorithm returns. `CommitMarker` and
-`CommitAll` are the same discipline expressed with an explicit `seq` argument/return instead of
-the whole `ctx`: a caller holding the cursor as `ctx.seq` passes `ctx.seq` in and writes the
-returned `seq` back into `ctx.seq`. Consequently the produced `seq` values are **contiguous**
-across the whole run (§7.2), and a region that follows an `agent(...)` turn begins at the exact
-cursor that turn's commits left behind. A conforming implementation MUST NOT re-derive an
-event's `seq` from `Journal.LastSeq` mid-run, nor auto-stamp seqs independently of this single
-threaded cursor — doing so would collide or skip and break the pinned contiguous ordering.
+Wherever a §6 algorithm says "Commit `Event.…`", the operation is `Commit`, and the returned
+advanced cursor MUST be threaded into the `ctx` that algorithm returns. `CommitMarker` and
+`CommitAll` are the same discipline expressed with an explicit lower-bound cursor
+argument/return instead of the whole `ctx`: a caller holding the cursor as `ctx.seq` passes
+`ctx.seq` in and writes the returned cursor back into `ctx.seq`. Consequently the produced
+physical `seq` values are **contiguous** across the whole run (§7.2), even when progress
+telemetry lands between a provider call starting and its eventual settled event.
+
+This allocation rule does not change workflow decisions: `agent_activity` is progress-only
+read-model data, while the writer still controls semantic traversal/order and positional
+marker/idempotency. To make crash/replay safe, `agent_activity` is idempotent by
+`(address, iteration, attempt, activity_index)`; appending the same key again returns the
+already-journaled event instead of writing a duplicate. Distinct repeated activity entries
+MUST use distinct `activity_index` values and therefore remain visible even if their
+`kind`/`label`/`summary`/`status` fields are byte-identical.
 
 **Resume recompiles the tree (no identity check).** The inert `%Tree{}` is **not** carried
 across process death; a resume is handed a tree **recompiled from the (mutable) workflow
@@ -1481,7 +1509,8 @@ Every positional marker in §6.9–§6.10 — including the region **start** mar
 CommitMarker(type, node, prior, seq):
   - If an event of {type} with payload.address == node.address is in {prior}:
     - Return {seq}.                          ; already journaled — reuse verbatim, commit nothing
-  - Commit the {type} event for {node} at {seq}; Return {seq} + 1.
+  - Commit the {type} event for {node} through the serialized append boundary;
+    Return max(seq, stamped_event.seq + 1).
 ```
 
 This is why a region resumed after a mid-region crash (§6.9) reproduces **exactly** the
@@ -1539,15 +1568,15 @@ ResolveIdempotency(events, node_path, iteration):
 ```
 CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Let {key} be IdempotencyKey(run_id, node.address, iteration, attempt).
-  - Let {output, usage} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
+  - Let {output, usage, activity} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
   - If {node.schema} is nil:                                 ; schemaless
-    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, output, usage), ctx).
+    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, output, usage, activity), ctx).
     - Return {:cont, ctx with last_result = output}.
   - Let {v} be Schema.Validate(node.schema, output).         ; schema-bound
   - If {v} is {:ok, validated}:
-    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, validated, usage), ctx).
+    - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, validated, usage, activity), ctx).
     - Return {:cont, ctx with last_result = validated}.
-  - Let {ctx} be Commit(Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage), ctx).
+  - Let {ctx} be Commit(Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity), ctx).
   - If {attempt} < node.retries:
     - Return CommitAttempt(node, run_id, provider, iteration, attempt + 1, ctx).  ; recurse with the advanced cursor
   - Let {ctx} be Commit(Event.agent_failed(node, iteration, attempt + 1, reason), ctx).
@@ -1574,16 +1603,32 @@ CallProvider({module, opts}, prompt, schema, key):
 - **Inputs.** `prompt :: String.t()` (this node's literal prompt — never a splice of any
   other node's output), `schema :: map() | nil` (the node's JSON-schema map, or `nil` for a
   schemaless turn), `key :: IdempotencyKey` (§6.5), and the backend-specific `opts`.
-- **Success return.** A conforming backend MUST return exactly `{:ok, result, usage}` where
-  `result` is the decoded provider output (`term()`; for a schema-bound turn a decoded
-  JSON value — a map, list, or scalar) and `usage` is a `%Usage{input_tokens,
-  output_tokens, total_tokens}` of non-negative integers. The runner **hard-matches**
-  `{:ok, output, usage}`: `CallProvider` returning any other shape (an `{:error, …}` tuple,
-  a network failure, a raised exception) is **not** a schema-validation failure and is
-  **not** retried. It crashes the live writer, which the caller observes via its monitor as
-  `{:error, {:run_crashed, reason}}` (§6.1, §7.4) — mapped to exit 1 (or exit 130 when
-  `reason` is `:killed`) per §7.5. Fail-closed retry (§6.4) applies **only** to a successful call
-  whose `output` fails `Schema.Validate`; a provider-level failure is a crash, not a retry.
+- **Success return.** A conforming backend MUST return either `{:ok, result, usage}` or
+  `{:ok, result, usage, activity}`. `result` is the decoded provider output (`term()`; for a
+  schema-bound turn a decoded JSON value — a map, list, or scalar), `usage` is a
+  `%Usage{input_tokens, output_tokens, total_tokens}` of non-negative integers, and
+  `activity` is an ordered list of maps describing provider progress (§7.2). The three-tuple
+  form is normalized to the four-tuple form with `activity == []`. The runner
+  **hard-matches** one of these success shapes: `CallProvider` returning any other shape (an
+  `{:error, …}` tuple, a network failure, a raised exception) is **not** a
+  schema-validation failure and is **not** retried. It crashes the live writer, which the
+  caller observes via its monitor as `{:error, {:run_crashed, reason}}` (§6.1, §7.4) —
+  mapped to exit 1 (or exit 130 when `reason` is `:killed`) per §7.5. Fail-closed retry
+  (§6.4) applies **only** to a successful call whose `output` fails `Schema.Validate`; a
+  provider-level failure is a crash, not a retry.
+- **Activity sink.** The runner MAY add `activity_sink: (map() -> :ok)` to `opts`. A
+  backend that receives it MAY call it for non-terminal progress while the turn is running.
+  The runner journals each sink call as `agent_activity` with the next local
+  `activity_index`; the backend's terminal `activity` list is reconciled to those indices
+  before `agent_committed` / `agent_attempt_rejected` is written. The activity sink is
+  progress telemetry only: it does not change validation, retry, idempotency keys, or
+  workflow results.
+- **Codex `--output-schema` strictness.** The Codex provider passes a schema-backed turn's
+  schema to the CLI with `--output-schema`. Before writing that temporary schema file, it
+  normalizes every object schema recursively to force `"additionalProperties" => false`,
+  overriding any author-supplied value. This provider-port normalization is for Codex/OpenAI
+  structured-output strictness; it does not mutate `%Agent{schema}` in the inert tree, and
+  the writer still validates the returned value against the original schema map.
 - **Turn independence.** Because `CallProvider` receives only `(prompt, schema, key,
   opts)`, no conversation state, thread, or prior result is carried between turns. Every
   agent turn is independent; all context an agent needs MUST be present in its own literal
@@ -1596,7 +1641,7 @@ CallProvider({module, opts}, prompt, schema, key):
 
 | callback | signature | required? | when called |
 |---|---|---|---|
-| `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> {:ok, result, usage}` | **REQUIRED** | once per paid attempt (§6.4) |
+| `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> {:ok, result, usage} \| {:ok, result, usage, activity}` | **REQUIRED** | once per paid attempt (§6.4) |
 | `c:validate_config/1` | `validate_config(opts) -> :ok \| {:error, reason}` | OPTIONAL | once, **pre-run**, during `ResolveProvider` |
 
 **Provider resolution (pre-run gate, exit 4).** Before the run starts — before
@@ -2043,7 +2088,7 @@ CommitLanes(results, run_id, seq):
   - Let {seq'} be {seq} and {failure} be nil.
   - For each {lane} in {results}, in input order:
     - If {lane} is {:ok, events} or {:ok, events, _result}:
-      - Set {seq'} to CommitAll(run_id, seq', events).   ; commit this lane's events at seq'
+      - Set {seq'} to CommitAll(run_id, seq', events).   ; commit this lane's events from seq'
     - If {lane} is {:failed, events, reason}:
       - Set {seq'} to CommitAll(run_id, seq', events).    ; failed lane's events STILL commit
       - Set {failure} to ({failure} or {reason}).         ; keep the FIRST failing reason
@@ -2065,8 +2110,9 @@ CommitLanesWithResults(results, run_id, seq):
   - Return {:halt, seq', failure}.
 
 CommitAll(run_id, seq, events):
-  - Fold {events} in order, committing each at the running {seq} and advancing it by one;
-    Return the resulting next {seq}.
+  - Fold {events} in order, committing each through the serialized append boundary and
+    advancing the lower-bound cursor to max(seq, stamped_event.seq + 1);
+    Return the resulting next lower-bound {seq}.
 ```
 
 Return contracts a conforming implementation MUST honor:
@@ -2344,8 +2390,9 @@ types (the log is versioned and additive).
 | `:run_started` | `tree_name, tree_version, node_count, budget, script_path` (no address) |
 | `:phase_entered` | `address, name` |
 | `:log_emitted` | `address, message` |
-| `:agent_committed` | `address, iteration, idempotency_key, prompt, result, usage` |
-| `:agent_attempt_rejected` | `address, iteration, attempt, prompt, output, reason, usage` |
+| `:agent_committed` | `address, iteration, idempotency_key, label, prompt, result, usage, activity` |
+| `:agent_activity` | `address, iteration, attempt, activity_index, label, prompt, entry` |
+| `:agent_attempt_rejected` | `address, iteration, attempt, label, prompt, output, reason, usage, activity` |
 | `:agent_failed` | `address, iteration, attempts, reason` (last event for a top-level fail; inside a concurrent region later lane events may follow it in seq order — the run's halt reason is the **first** `agent_failed` (§6.1), while the Status fold's `failure` is the **last** `agent_failed` in seq order (§7.3)) |
 | `:parallel_started` / `:parallel_completed` | `address, branch_count` / `address` |
 | `:pipeline_started` / `:pipeline_completed` | `address, items, item_count, stage_count` / `address` |
@@ -2387,6 +2434,19 @@ Payload-value pins (each is observable output, so it is normative):
   §7.3 `agents` projection both carry this map as-is. Because it is observable output, two
   conforming implementations journal byte-identical `idempotency_key` maps for the same
   effect.
+- **`agent_committed.label` / `agent_activity.label` / `agent_attempt_rejected.label`** are
+  the `%Agent{label}` string or `nil`. A label is display metadata only (§3.2, Rule 5.3.6):
+  it MUST NOT affect prompts, schemas, keys, validation, retry, control flow, or results.
+- **`agent_activity.activity_index`** is a non-negative integer local to
+  `(address, iteration, attempt)` when emitted by the runner's activity sink. The tuple
+  `(address, iteration, attempt, activity_index)` is replay-idempotent: a duplicate append
+  returns the original event and MUST NOT create a second event. Distinct repeated entries
+  use distinct indices and are preserved even when `entry.kind`, `entry.label`,
+  `entry.summary`, and `entry.status` are identical.
+- **`agent_committed.activity` / `agent_attempt_rejected.activity`** are ordered lists of
+  activity entry maps for the completed attempt. Entries MAY carry `activity_index` when the
+  runner reconciles them with streamed `agent_activity` events; read-model folds use that
+  index to avoid counting the same streamed/final activity twice, never value-only dedupe.
 
 `run_completed` is the terminal success event; on failure the terminal event is
 `agent_failed` and **no** `run_completed` is written. Control-flow outcomes
@@ -2421,12 +2481,18 @@ appended in `seq` order** (one entry per matching event, in the order the fold v
   payload's `message` binary (§7.2), **not** a map. On each `log_emitted` the fold appends
   `payload.message`. (Because a body `log` commits at most once per address, §6.3, a loop
   emits one entry, not one per iteration.)
-- **`agents`** is an ordered list appending, on each `agent_committed`, the map
-  `%{address, prompt, result, usage, idempotency_key}` (the projected `agent_committed`
-  payload). `agentCount` in the envelope (§7.5) is exactly `length(agents)`.
+- **`agents`** is an ordered list of agent projections. `agent_activity` upserts a
+  `:running` projection so long-running turns are visible before they commit. On
+  `agent_committed`, the fold upserts the same `(address, iteration)` projection with
+  `status: :completed` and the projected payload
+  `%{address, iteration, label, prompt, result, usage, idempotency_key, activity}`. On
+  `agent_failed`, the fold upserts a `status: :failed` projection using the latest matching
+  rejection for `label`, `prompt`, `activity`, and phase placement, so an exhausted
+  rejected-only agent remains selectable in read surfaces. `agentCount` in the envelope
+  (§7.5) is exactly `length(agents)`.
   *(Proposed §10 — dataflow: a proposed extension pins the projected `prompt` — and the `agent_committed.prompt` / `agent_attempt_rejected.prompt` payload keys (§7.2) — to the rendered `String.t()`, never an inert `%Template{}`; see §10.)*
 - **`rejected`** is an ordered list appending, on each `agent_attempt_rejected`, the map
-  `%{address, attempt, reason}`.
+  `%{address, iteration, attempt, label, prompt, output, reason, activity}`.
 - **`verifications`** / **`judgments`** append, on each `verify_settled` / `judge_settled`,
   the map `%{address, confirmations, total, threshold, survived}` /
   `%{address, scores, pick, winner}` respectively.
@@ -2981,7 +3047,8 @@ never by a self-expanding sigil macro.
 > **Note — no `sigil_P` macro exists.** `~P` is surface syntax only. No `defmacro sigil_P` is
 > defined or imported; `parse/2` recognizes the raw AST term
 > `{:sigil_P, meta, [{:<<>>, _, [raw]}, mods]}` in an admissible prompt position and lowers it
-> with the plain function `Template.lower/3`, keeping all template validation inside `parse/2`.
+> with the plain function `Workflow.Template.parse/2`, keeping all template validation inside
+> `parse/2`.
 
 **10.4.1 Surface (lexical) grammar.** A template is written with the `~P` sigil (**P** for
 *prompt*), an **uppercase** sigil so its content is a **single raw literal binary** with **no
@@ -2997,8 +3064,9 @@ Segment ::
   - Tag
   - TextRun
 TextRun :: TextChar+
-TextChar :: SourceCharacter [lookahead != EExTagOpen]
+TextChar :: SourceCharacter [lookahead != EExTagOpen and != InterpolationOpen]
 EExTagOpen :: `<` `%`
+InterpolationOpen :: `#` `{`          ; rejected by Rule T.9
 Tag ::
   - AssignHole                 ; the ONLY admissible tag (renders); all others rejected in 10.4.4
   - StatementTag               ; `<% … %>` (no `=`) — rejected (Rule T.2)
@@ -3009,7 +3077,7 @@ StatementTag :: `<%` [lookahead != `=` and != `#` and != `%`] TagBody `%>`
 CommentTag :: `<%#` TagBody `%>`
 LiteralEscapeTag :: `<%%` TagBody `%>`
 TagBody :: (SourceCharacter but not the sequence `%>`)*
-AssignName :: Letter (Letter | Digit | `_`)*   ; recognizer ~r/\A@([A-Za-z][A-Za-z0-9_]*)\z/
+AssignName :: (Letter | `_`) (Letter | Digit | `_`)*   ; recognizer ~r/\A@([A-Za-z_][A-Za-z0-9_]*)\z/
 TemplateWS :: ' ' | '\t' | '\n' | '\r'          ; space, tab, line terminators (literal characters)
 ```
 
@@ -3021,19 +3089,23 @@ template use a heredoc `~P"""…"""` or a literal line break. **Disambiguation (
 wherever `<%` (`EExTagOpen`) begins it MUST be lexed as the start of a `Tag`, never as text
 (maximal munch), so no `<%…` sequence is ever derivable as template text; an `EExTagOpen` not
 closed by `%>` before end-of-template is a compile error (Rule T.6), not a fallback to text.
+The implemented core also rejects any raw `#{` sequence before tag scanning (Rule T.9); even
+though uppercase sigils would otherwise treat it as literal text, the prompt-template surface keeps
+all dynamic holes in the single `<%= @name %>` vocabulary.
 
 **10.4.2 The inert `%Template{}` struct (semantic model).**
 
 ```
 %Workflow.Template{
-  segments :: [TemplateSegment],   ; ordered; the template lowered to data
-  assigns  :: [atom()]     ; ordered set (first-appearance) of distinct assign names referenced
+  segments :: [String.t()],   ; alternating literal text runs; length(assigns) + 1
+  assigns  :: [String.t()]    ; referenced assign names, in source order
 }
-TemplateSegment :: {:text, String.t()} | {:assign, atom()}
 ```
 
-- Every `{:text, …}` is a **binary** (a slice of `raw`), never a charlist, so §10.4.5's render is
-  total (`binary <> binary`). `assigns` is derived `for {:assign, a} <- segments, uniq` and cached.
+- Every `segments` entry is a **binary** (a slice of `raw`), never a charlist. For `n` holes,
+  `segments` contains `n + 1` entries: the literal text before the first hole, the text between
+  holes, and the final tail. Empty text runs are retained. `assigns` stores the scanned assign
+  names as strings in the same order as the holes.
 - An `@name` inside a template is **template syntax, not Elixir** — a scanned run of characters,
   never a variable or module-attribute AST node; macro hygiene does not apply. The struct holds
   **zero closures** and is `Macro.escape`-able into a compile-time constant (Principle 7).
@@ -3041,48 +3113,42 @@ TemplateSegment :: {:text, String.t()} | {:assign, atom()}
   field, exactly like `%Workflow.Node.BudgetSlices{}` (§4.2). It is rendered *within* the
   execution of the node that holds it (an `agent`, §10.6, or `emit`, §10.7), under that node's key.
 
-**10.4.3 Compile-time lowering (a hand-rolled binary scanner).** `Template.lower/3` is a plain
+**10.4.3 Compile-time lowering (a hand-rolled binary scanner).** `Workflow.Template.parse/2` is a plain
 compiler function — a direct binary scanner over `raw` — called by `parse/2` the moment it
 matches a `{:sigil_P, meta, [{:<<>>, _, [raw]}, mods]}` node in an admissible prompt position; it
-first checks `mods == []` (Rule T.9), then lowers `raw`. It calls **no** `EEx.tokenize`, **no**
-`EEx.Engine`, and **never** `Code.string_to_quoted` on a hole body.
+does not assign semantics to `mods`; current modifiers are accepted as a no-op and MUST NOT affect
+the lowered template. It calls **no** `EEx.tokenize`, **no** `EEx.Engine`, and **never**
+`Code.string_to_quoted` on a hole body.
 
 ```
-Template.lower(raw, meta, env):        ; a plain function CALLED FROM parse/2 — no macro expansion
-  - Return Scan(raw, "", empty List, meta, env).
+Template.parse(raw, env):              ; a plain function CALLED FROM parse/2 — no macro expansion
+  - If raw contains the two-byte sequence `#{`: Return {:error, Finding at the sigil} (Rule T.9).
+  - Return Scan(raw, empty List, empty List, env).
 
-Scan(rest, pending, segments, meta, env):
-  - If rest is the empty binary "":
-    - Let segments' be FlushText(pending, segments).
-    - Let assigns be the distinct name from every {:assign, name} in segments', first-appearance order.
-    - Return {:ok, %Template{segments: segments', assigns: assigns}}.
-  - If rest begins with the two-byte prefix `<%` (EExTagOpen):
-    - Return ScanTag(rest, FlushText(pending, segments), meta, env).
-  - Otherwise (rest begins with one SourceCharacter c):
-    - Return Scan(the suffix of rest after c, pending <> c, segments, meta, env).
+Scan(source, segments, assigns, env):
+  - If source contains no `<%`:
+    - Return {:ok, %Template{segments: reverse([source | segments]), assigns: reverse(assigns)}}.
+  - Let literal be the bytes before the first `<%`.
+  - Let rest be the bytes after that opener.
+  - Return ScanTag(literal, rest, segments, assigns, env).
 
-FlushText(pending, segments):
-  - If pending is "": Return segments.
-  - Return segments with {:text, pending} appended.
-
-ScanTag(rest, segments, meta, env):    ; rest begins with `<%`
-  - If rest begins with `<%%` (LiteralEscapeTag): Return {:error, Finding at meta} (Rule T.8).
-  - If rest begins with `<%#` (CommentTag): Return {:error, Finding at meta} (Rule T.7).
-  - If rest contains no `%>`: Return {:error, Finding at meta: unterminated tag} (Rule T.6).
-  - Let after be the suffix of rest after the first `%>`.
-  - If rest begins with `<%=` (a value hole):
-    - Let body be the bytes strictly between the 3-byte opener `<%=` and the first `%>`.
+ScanTag(literal, rest, segments, assigns, env):    ; rest is the suffix after `<%`
+  - If rest begins with `=`:
+    - If the suffix after `=` contains no `%>`: Return {:error, Finding: missing `%>`} (Rule T.6).
+    - Let body be the bytes strictly between `=` and the first `%>`.
     - Let trimmed be body with leading/trailing TemplateWS removed.
-    - If trimmed matches ~r/\A@([A-Za-z][A-Za-z0-9_]*)\z/ capturing name:
-      - Return Scan(after, "", segments with {:assign, String.to_atom(name)} appended, meta, env).
-    - Otherwise: Raise CompileError at meta via the FORBIDDEN-FORM path (Rules T.1, T.3).
-  - Otherwise (a StatementTag): Raise CompileError at meta (forbidden-form path) (Rule T.2).
+    - If trimmed matches ~r/\A@([A-Za-z_][A-Za-z0-9_]*)\z/ capturing name:
+      - Let remaining be the bytes after the first `%>`.
+      - Return Scan(remaining, [literal | segments], [name | assigns], env).
+    - Otherwise: Return {:error, Finding: only `<%= @name %>` holes are allowed} (Rules T.1, T.3).
+  - Otherwise:
+    - Return {:error, Finding: only `<%= @name %>` holes are allowed} (Rules T.2, T.7, T.8).
 ```
 
 Every branch recurses on a strictly shorter suffix, returns, or raises — there is no
 fall-through. "No embedded Elixir" is a **structural** guarantee of the recognizer, not a
-validation applied after admitting a superset. (`String.to_atom/1` is safe: `name` comes from a
-compile-time literal authored in the workflow source, bounded and author-controlled.)
+validation applied after admitting a superset. Assign names are stored as strings; binding
+resolution compares them to `Atom.to_string(binding_name)`, so no template assign atom is created.
 
 **10.4.4 Validation rules (each with the smallest counter-example).** Template-*shape* rules are
 enforced by the scanner as `parse/2` lowers the node; forbidden **expression** forms take the
@@ -3106,18 +3172,29 @@ forbidden-form `raise` path, a rejected **tag shape** with no embedded expressio
   silently dropped).
 - **Rule T.8 — no literal-escape tags.** `~P"escaped <%% not-a-tag %>"` is rejected; a literal
   `<%` is intentionally inexpressible.
-- **Rule T.9 — a `~P` sigil MUST carry empty modifiers.** `~P"<%= @x %>"x` (`mods = ~c"x"`) is a
-  `Finding` at the sigil's `meta`.
+- **Rule T.9 — no raw interpolation marker.** `~P"literal #{x}"` is rejected by the implemented
+  scanner even though uppercase sigils do not interpolate it; write literal braces as text that
+  does not form the `#{` sequence, or use `<%= @x %>` for a real dataflow hole.
 
 **10.4.5 Render.** Rendering reuses §4.4's `RenderText` unchanged.
 
 ```
 RenderTemplate(template, run_id, bindings, lane):
-  - Let out be "".
-  - For each segment in template.segments:
-    - {:text, text} -> Let out be out <> text.
-    - {:assign, name} -> Let out be out <> RenderText(ResolveAssign(name, bindings, run_id, lane)).
-  - Return out.
+  - Let parts be TemplateParts(template, bindings, lane).
+  - Return RenderText.of(run_id, parts).
+
+TemplateParts(template, bindings, lane):
+  - Let parts be the List [{:text, first(template.segments)}].
+  - For each pair {name, text} from zip(template.assigns, tail(template.segments)), in order:
+    - Let ref be the binding whose atom key string equals name.
+    - Append ResolvePart(ref, lane) to parts.
+    - Append {:text, text} to parts.
+  - Return parts.
+
+ResolvePart(ref, lane):
+  - If ref is {:node, address}: Return {:bound_value, ref}.
+  - If ref is {:map, address}: Return {:bound_list, ref}.      ; deferred map/gather support
+  - If ref is {:element, over}: Resolve per the deferred map lane rules in §10.11.
 
 RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.Compiler.to_text/1)
   - If term is a binary: Return term unchanged.
@@ -3142,17 +3219,18 @@ RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.C
 
 **10.4.6 Conformance (template layer).**
 
-- **DF-T1.** A `~P` template MUST be lowered by `parse/2` (via `Template.lower/3`) at compile time
-  to an inert `%Template{}` whose `{:text, …}` segments are all binaries; it MUST NOT compile to a
+- **DF-T1.** A `~P` template MUST be lowered by `parse/2` (via `Workflow.Template.parse/2`) at compile time
+  to an inert `%Template{}` whose `segments` entries are all binaries; it MUST NOT compile to a
   closure or quoted expression, and the scanner MUST NOT call `EEx.tokenize`, `EEx.Engine`, or
-  `Code.string_to_quoted` on a hole body. A `~P` sigil MUST carry empty `mods` (Rule T.9).
+  `Code.string_to_quoted` on a hole body. The implemented core rejects raw `#{` (Rule T.9) and
+  treats sigil modifiers as no-op surface metadata.
 - **DF-T2.** The scanner MUST admit only `<%= @name %>` holes and literal text and MUST accept and
-  reject **exactly** the §10.4.1 language — every other `<%…` opener a caller-located compile
-  error at the sigil's `meta`.
+  reject **exactly** the §10.4.1 language — every other `<%…` opener and every raw `#{` opener is
+  a caller-located compile error at the sigil's `meta`.
 - **DF-T3.** `RenderTemplate` MUST render assign values through §4.4's `RenderText` unchanged, so a
   template and the corresponding `verify`/`judge` splice render an identical binary identically.
-- **DF-T4.** `template.assigns` MUST be the distinct referenced assign names in first-appearance
-  order, usable for name-resolution and binding resolution without re-scanning `segments`.
+- **DF-T4.** `template.assigns` MUST list referenced assign names in source order as strings,
+  usable for name-resolution and binding resolution without re-scanning `segments`.
 
 ### 10.5 `let` — name a journaled output — Verdict: ADOPT
 
@@ -3165,7 +3243,7 @@ the producer's own `agent_committed` is the binding's sole record.
 ```
 LetStmt : `let` BindingRefAtom `=` Producer
 BindingRefAtom :: `:` AtomName   ; LEXICAL — one atom-literal token `:name`, no whitespace
-AtomName :: Letter (Letter | Digit | `_`)*   ; the §10.4.1 AssignName char class; NO trailing ?/!
+AtomName :: (`a`–`z` | `_`) (Letter | Digit | `_`)*   ; implemented binding-name recognizer; NO trailing ?/!
 Producer :
   - AgentStmt                 ; binds the agent's journaled result ({:node, addr})
   - SynthesizeStmt            ; synthesize's output is an ordinary agent output
@@ -3203,8 +3281,11 @@ deferred `map` binding would record `name → {:map, [i]}`.
 - **Rule L.2 — producer is a bindable node.** `let :v = verify("claim", voters: 3)` (a panel is
   not bindable — its outcome is a fold) and `let :v = log("hi")` (`log` commits no result) are
   rejected.
-- **Rule L.3 — binding names are unique per scope.** Two `let :d` in the same scope collide at the
-  second, mirroring phase-name uniqueness (§5.10.1).
+- **Duplicate binding names — accepted, latest binding wins for subsequent consumers.** The
+  implemented core does **not** reject a second `let :d`; `BindingEnv` is updated with the later
+  address. A consumer between the two bindings resolves `@d` to the first producer; a consumer
+  after the second resolves `@d` to the second. A conforming implementation MAY warn, but MUST NOT
+  make duplicate binding names a runtime ambiguity.
 - **Rule L.4 — `let` is top-level-only (Tier-1 restriction).** A `let` inside a loop body or a
   `map` body is rejected; bindings resolve at `iteration = 0`.
 - **Rule L.5 — a block-bearing producer MUST be parenthesized** (the two-arg `{:let, _, [_, [do:
@@ -3243,8 +3324,10 @@ record (a `let_bound{…}` marker would be pure redundancy; omitted per Principl
 - **DF-L2.** A bound value MUST be resolvable **only** by a pure fold over the journal via
   `ResolveRef` (`{:node} → BoundValue`, `{:map} → BoundList`); an implementation MUST NOT cache the
   value in process state.
-- **DF-L3.** Binding names MUST be unique per lexical scope and top-level only in Tier 1; a bound
-  reference MUST resolve at `iteration = 0`.
+- **DF-L3.** Binding names are top-level only in Tier 1; a bound reference MUST resolve at
+  `iteration = 0`. If a name is rebound, subsequent consumers MUST resolve to the latest
+  lexically-preceding binding, while earlier consumers keep the address captured when they were
+  parsed.
 - **DF-L4.** `parse/2` MUST recognize `let` as the uniform one-arg `{:let, _, [{:=, _, [name,
   producer]}]}` shape, MUST require `name` to be an atom literal, MUST dispatch `producer` through
   the ordinary node path, and MUST reject the two-arg block-bearing shape (Rule L.5) rather than
@@ -3312,25 +3395,21 @@ let :x = agent("draft")
 parallel([agent(~P"Improve <%= @x %>")])     # family 2 — template prompt in a `parallel` branch — REJECTED
 ```
 
-**10.6.4 Execution algorithm.** `RunAgent`/`CommitAttempt` (§6.4) — and, for a `map` lane,
-`BuildAgent` (§6.9) — gain a **trailing `lane` argument** and are otherwise unchanged except that
-the prompt handed to `CallProvider` is rendered when it is a template:
+**10.6.4 Execution algorithm.** In the implemented core, `RunAgent`/`CommitAttempt` (§6.4) keep
+their base arity. Before the provider call, the runner materializes any template prompt to a
+binary; the prompt handed to `CallProvider` is therefore always a `String.t()`:
 
 ```
-EffectivePrompt(node, run_id, lane):
+EffectivePrompt(node, run_id):
   - If node.prompt is a binary: Return node.prompt.                  ; literal — unchanged
-  - Return RenderTemplate(node.prompt, run_id, node.bindings, lane). ; §10.4.5; lane nil at top level, %{index: e} in a map lane
+  - Return RenderTemplate(node.prompt, run_id, node.bindings, nil).  ; §10.4.5; implemented core has no map lane
 ```
 
-The `lane` is **threaded in from the caller**: it is `nil` for a top-level agent (the case §10.8's
-flagship `let :x = agent(~P…)` uses) and `%{index: e}` — `e` the 0-based lane index — only when a
-`map` lane runner drives the agent (§10.9.2). A top-level agent therefore evaluates
-`CallProvider(provider, EffectivePrompt(node, run_id, nil), node.schema, key)`; a map-lane agent
-evaluates `EffectivePrompt(node, run_id, %{index: e})` so its `{:element, over}` binding resolves
-against `lane.index` (§10.11). **This is an explicit extension of the §6.4/§6.9 signatures with a
-trailing `lane` parameter** (its base callers pass `nil`; only the §10.9.2 map lane runner passes
-`%{index: e}`) — without it `EffectivePrompt`/`RenderTemplate` are undefined for a
-`{:element, over}` binding, so a map lane referencing `@element` would have no index to index by.
+A top-level agent evaluates `CallProvider(provider, EffectivePrompt(node, run_id), node.schema,
+key)`. The deferred `map` proposal (§10.9.2) is the only place that would require a lane index; when
+promoted, it would widen `EffectivePrompt`/`BuildAgent` with a trailing `lane` argument so a
+`{:element, over}` binding can resolve against `%{index: e}` (§10.11). Until `map` is promoted,
+there is no `lane` value in the implemented runtime.
 The materialized string is journaled verbatim **at commit** (never re-rendered on replay, DF-P3).
 Because producers commit before the consumer runs (Rule T.5), every attempt renders from the same
 journaled terms, so a rejected attempt and the eventual commit journal a byte-identical prompt for
@@ -3669,8 +3748,11 @@ reduce(:n, over: :items, with: :count)   # an in-language reducer — REJECTED (
 **Binding resolution (shared by every idiom).** `BindingRef` is `{:node, address}` | `{:map,
 address}` | `{:element, over_ref}`. `BindingEnv` is a compile-time ordered map `name(atom) →
 BindingRef` threaded through parsing so only lexically-preceding bindings are in scope (Rule T.5);
-there is **no** runtime name→value map. At runtime a reference is resolved by the pure journal fold
-`ResolveAssign → ResolveRef`, defined for **all three** `BindingRef` shapes:
+there is **no** runtime name→value map. The implemented core emits only `{:node, address}` refs;
+`{:map, address}` is support for the deferred `map` producer's ordered result list, and
+`{:element, over_ref}` belongs only to the deferred `map` lane scope. At runtime a reference is
+resolved by the pure journal fold `ResolveAssign → ResolveRef`, defined for **all three**
+`BindingRef` shapes:
 
 ```
 ResolveAssign(name, bindings, run_id, lane):   ; bindings :: %{atom() => BindingRef} (the node's field)
@@ -3703,10 +3785,11 @@ additional in-scope `binding_env` — a trailing-argument extension, not an over
 are actively rejected), and the element-extended env at the `map` lane.
 
 **Journal events.** The dataflow **core** (Template + `let` + injection + `emit`) adds **zero** new
-event types: `let` and `gather` ride `agent_committed`; injection rides `agent_committed.prompt` /
-`agent_attempt_rejected.prompt`; `emit` rides `run_completed.value`. Only the **deferred** `map`
-adds two events (`map_started`, `map_completed`, §10.9.2). This preserves §7.1's "journal is the
-single source of truth": every bound value is a fold over an event the producer already commits.
+event types: `let` rides the producer's existing `agent_committed`; injection rides
+`agent_committed.prompt` / `agent_attempt_rejected.prompt`; `emit` rides `run_completed.value`.
+Deferred `gather` would also ride one ordinary `agent_committed`. Only the **deferred** `map` adds
+two events (`map_started`, `map_completed`, §10.9.2). This preserves §7.1's "journal is the single
+source of truth": every bound value is a fold over an event the producer already commits.
 
 **Result shape & exit codes.** Unchanged from §7. A template that fails name resolution (Rules
 T.4/T.5) or violates a template-shape rule (Rules T.1–T.3, T.6–T.9) is a **compile-time** error
@@ -3715,12 +3798,13 @@ schema-bound injected `agent` still fails closed on malformed structured output 
 exit 8) exactly as §6.4.2; the rendered prompt changes what the agent is asked, not the error
 model.
 
-**Error model (pinned).** §10 introduces **no new** runtime error channel. `let`, `gather`, and an
-injected `agent` inherit §6.1's abort/propagate model verbatim (a producer failure aborts the run;
-its consumer never runs, so a bound value is unreachable only when the run has already halted). The
-one new **runtime** failure `map` can raise — `MapOverNotAList` when `over:` resolves to a non-list
-(§10.9.2) — is a crash of the live writer (exit 1), never a silent coercion, consistent with
-Principle 4 (fail closed).
+**Error model (pinned).** §10 introduces **no new** runtime error channel for the implemented
+core. `let` and an injected `agent` inherit §6.1's abort/propagate model verbatim (a producer
+failure aborts the run; its consumer never runs, so a bound value is unreachable only when the run
+has already halted). Deferred `gather` would inherit the same model. The one new **runtime** failure
+deferred `map` can raise — `MapOverNotAList` when `over:` resolves to a non-list (§10.9.2) — is a
+crash of the live writer (exit 1), never a silent coercion, consistent with Principle 4 (fail
+closed).
 
 ### 10.12 Conformance rollup
 
@@ -3782,6 +3866,7 @@ Put the `return`/`emit` you want as the result **last**.
 | `log("msg")` | literal string | emits a static log line |
 | `agent("prompt")` | literal string | one agent turn (schemaless) |
 | `agent("prompt", schema: …, retries: n)` | schema required with opts | fail-closed structured turn |
+| `agent("prompt", label: "read:docs")` | label with or without schema | display label only; no semantic effect |
 | `let :name = agent(…)` | top-level producer | binds the producer's journaled result for later `~P` rendering |
 | `let :name = synthesize(…)` | top-level producer | binds a synthesized result for later `~P` rendering |
 | `agent(~P"… <%= @name %> …")` | top-level only | renders previous `let` bindings into a prompt |
@@ -3820,6 +3905,7 @@ body `log`; read the per-pass events instead — `iteration_started`, `loop_deci
 | Template in a nested position `parallel([agent(~P"Improve <%= @draft %>")])` | template prompts are only allowed on top-level agents | Move the template agent to top level and bind its result with `let`, or keep nested agents literal-only. |
 | Calling a helper `agent(build_prompt())` | external module call raises | Inline the literal prompt. |
 | `agent("go", retries: 1)` with no schema | requires a `schema:` | Add `schema: %{…}` or drop the options. |
+| `agent("go", label: :bad)` | label must be a string literal | Use a display string such as `label: "read:docs"`. |
 | `agent("go", schema: %{type: "object"})` (atom keys) | *compiles*, but validation silently no-ops (accepts all output — `schema["type"]` is `nil`, §6.4.2) | Use **string** keys: `schema: %{"type" => "object", "properties" => %{…}, "required" => […]}`. |
 | `return`/`emit` missing | workflow must terminate with `return` or `emit` | Add final `return(:ok)` (or any literal) or final `emit(~P"…")`. |
 | `collect` at top level | must appear inside a loop body | Put it inside `while_budget`/`until_dry`. |

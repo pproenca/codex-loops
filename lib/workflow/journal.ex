@@ -32,6 +32,19 @@ defmodule Workflow.Journal do
     GenServer.call(__MODULE__, {:append, run_id, seq, event})
   end
 
+  @doc """
+  Append an event at the next available sequence number for `run_id`.
+
+  Used by live progress events that may arrive from concurrent provider turns while
+  the single writer is waiting at a fan-out barrier. SQLite serialization in this
+  process keeps `{run_id, seq}` monotonic without asking worker tasks to coordinate
+  a cursor.
+  """
+  @spec append_next(String.t(), Workflow.Event.t()) :: {:ok, Workflow.Event.t()}
+  def append_next(run_id, %Workflow.Event{} = event) do
+    GenServer.call(__MODULE__, {:append_next, run_id, event})
+  end
+
   @doc "Fold source: every event for `run_id` in commit (`seq`) order."
   @spec fold(String.t()) :: [Workflow.Event.t()]
   def fold(run_id), do: GenServer.call(__MODULE__, {:fold, run_id})
@@ -87,6 +100,22 @@ defmodule Workflow.Journal do
     {:reply, :ok, state}
   end
 
+  def handle_call({:append_next, run_id, %Workflow.Event{} = event}, _from, %{db: db} = state) do
+    event =
+      case idempotent_activity_event(db, run_id, event) do
+        nil ->
+          seq = last_seq(db, run_id) + 1
+          event = %{event | run_id: run_id, seq: seq}
+          :ok = insert_event(db, run_id, seq, event)
+          event
+
+        existing ->
+          existing
+      end
+
+    {:reply, {:ok, event}, state}
+  end
+
   def handle_call({:fold, run_id}, _from, %{db: db} = state) do
     events =
       query(db, "SELECT event_blob FROM events WHERE run_id = ? ORDER BY seq ASC", [run_id])
@@ -96,13 +125,7 @@ defmodule Workflow.Journal do
   end
 
   def handle_call({:last_seq, run_id}, _from, %{db: db} = state) do
-    seq =
-      case query(db, "SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1", [run_id]) do
-        [[seq]] -> seq
-        [] -> -1
-      end
-
-    {:reply, seq, state}
+    {:reply, last_seq(db, run_id), state}
   end
 
   def handle_call({:register_run, run_id}, _from, %{db: db} = state) do
@@ -156,6 +179,56 @@ defmodule Workflow.Journal do
       PRIMARY KEY (run_id, seq)
     );
     """)
+  end
+
+  defp insert_event(db, run_id, seq, %Workflow.Event{} = event) do
+    sql = """
+    INSERT INTO events (run_id, seq, schema, type, event_blob)
+    VALUES (?, ?, ?, ?, ?)
+    """
+
+    exec(db, sql, [
+      run_id,
+      seq,
+      event.schema,
+      Atom.to_string(event.type),
+      {:blob, :erlang.term_to_binary(event)}
+    ])
+  end
+
+  defp idempotent_activity_event(
+         db,
+         run_id,
+         %Workflow.Event{
+           type: :agent_activity,
+           payload: %{
+             address: address,
+             iteration: iteration,
+             attempt: attempt,
+             activity_index: index
+           }
+         }
+       )
+       when not is_nil(index) do
+    db
+    |> query("SELECT event_blob FROM events WHERE run_id = ? AND type = ? ORDER BY seq ASC", [
+      run_id,
+      "agent_activity"
+    ])
+    |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob) end)
+    |> Enum.find(fn %Workflow.Event{payload: payload} ->
+      payload.address == address and payload.iteration == iteration and
+        payload.attempt == attempt and Map.get(payload, :activity_index) == index
+    end)
+  end
+
+  defp idempotent_activity_event(_db, _run_id, _event), do: nil
+
+  defp last_seq(db, run_id) do
+    case query(db, "SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1", [run_id]) do
+      [[seq]] -> seq
+      [] -> -1
+    end
   end
 
   defp exec(db, sql, params) do

@@ -72,12 +72,40 @@ defmodule Workflow.Event do
         address: node.address,
         iteration: iteration,
         idempotency_key: key,
+        label: node.label,
         prompt: node.prompt,
         result: result,
         usage: usage,
         activity: activity
       }
     }
+  end
+
+  @doc """
+  A non-terminal activity item observed while an agent turn is still running.
+
+  This is progress telemetry, not the authoritative result of the paid turn. The
+  final outcome remains `agent_committed` or `agent_attempt_rejected`; this event
+  only lets journal-backed read surfaces show long-running provider streams before
+  the turn exits.
+  """
+  def agent_activity(%Workflow.Node.Agent{} = node, iteration, attempt, activity_index, entry) do
+    %__MODULE__{
+      type: :agent_activity,
+      payload: %{
+        address: node.address,
+        iteration: iteration,
+        attempt: attempt,
+        activity_index: activity_index,
+        label: node.label,
+        prompt: node.prompt,
+        entry: entry
+      }
+    }
+  end
+
+  def agent_activity(%Workflow.Node.Agent{} = node, iteration, attempt, entry) do
+    agent_activity(node, iteration, attempt, nil, entry)
   end
 
   @doc """
@@ -100,6 +128,7 @@ defmodule Workflow.Event do
         address: node.address,
         iteration: iteration,
         attempt: attempt,
+        label: node.label,
         prompt: node.prompt,
         output: output,
         reason: reason,

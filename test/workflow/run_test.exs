@@ -31,6 +31,24 @@ defmodule Workflow.RunTest do
     end
   end
 
+  defmodule StreamingActivityProvider do
+    @behaviour Workflow.Provider
+
+    @impl true
+    def run_agent(prompt, _schema, _key, opts) do
+      entry = %{
+        kind: "tool",
+        label: "Shell",
+        summary: "mix test test/workflow/run_test.exs",
+        status: "completed"
+      }
+
+      Keyword.fetch!(opts, :activity_sink).(entry)
+
+      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 2, output_tokens: 3, total_tokens: 5}, []}
+    end
+  end
+
   defmodule DemoWorkflow do
     use Workflow
 
@@ -88,7 +106,7 @@ defmodule Workflow.RunTest do
 
     agent = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
 
-    assert agent.payload.activity == [
+    assert Enum.map(agent.payload.activity, &Map.delete(&1, :activity_index)) == [
              %{
                kind: "tool",
                label: "Shell",
@@ -99,6 +117,124 @@ defmodule Workflow.RunTest do
 
     [folded_agent] = Status.of(id).agents
     assert folded_agent.activity == agent.payload.activity
+  end
+
+  test "streamed activity before a settled event uses the serialized append allocator" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(DemoWorkflow, run_id: id, provider: {StreamingActivityProvider, []})
+
+    events = Journal.fold(id)
+
+    assert Enum.map(events, & &1.type) == [
+             :run_started,
+             :phase_entered,
+             :log_emitted,
+             :agent_activity,
+             :agent_committed,
+             :run_completed
+           ]
+
+    assert Enum.map(events, & &1.seq) == Enum.to_list(0..5)
+  end
+
+  test "activity replay is idempotent by activity index and preserves repeated entries" do
+    id = run_id()
+    node = %Workflow.Node.Agent{address: [0], prompt: "inspect"}
+    entry = %{kind: "tool", label: "Shell", summary: "mix test", status: "completed"}
+
+    :ok =
+      Journal.append(id, 0, %{
+        Event.run_started(%Workflow.Tree{name: "t", nodes: []})
+        | run_id: id,
+          seq: 0
+      })
+
+    assert {:ok, first} = Journal.append_next(id, Event.agent_activity(node, 0, 0, 0, entry))
+    assert {:ok, replayed} = Journal.append_next(id, Event.agent_activity(node, 0, 0, 0, entry))
+    assert {:ok, second} = Journal.append_next(id, Event.agent_activity(node, 0, 0, 1, entry))
+
+    assert first.seq == replayed.seq
+    assert second.seq == first.seq + 1
+
+    status = Status.of(id)
+    assert [%{activity: [first_entry, second_entry]}] = status.agents
+    assert Map.drop(first_entry, [:activity_index]) == entry
+    assert Map.drop(second_entry, [:activity_index]) == entry
+    assert first_entry.activity_index == 0
+    assert second_entry.activity_index == 1
+  end
+
+  test "status attributes interleaved retry activity to the matching attempt" do
+    node = %Workflow.Node.Agent{address: [0], prompt: "classify"}
+    usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+
+    attempt_0_activity = %{
+      kind: "tool",
+      label: "Validator",
+      summary: "attempt 0 validation",
+      status: "rejected"
+    }
+
+    attempt_1_activity = %{
+      kind: "tool",
+      label: "Shell",
+      summary: "attempt 1 retry",
+      status: "running"
+    }
+
+    events = [
+      Event.agent_activity(node, 0, 1, 0, attempt_1_activity),
+      Event.agent_attempt_rejected(
+        node,
+        0,
+        0,
+        %{"bad" => true},
+        {:missing_required, "label"},
+        usage,
+        [attempt_0_activity]
+      )
+    ]
+
+    status = Status.fold(events, "r")
+
+    assert [
+             %{
+               attempt: 0,
+               activity: [rejected_activity]
+             }
+           ] = status.rejected
+
+    assert Map.drop(rejected_activity, [:activity_index]) == attempt_0_activity
+
+    assert [
+             %{
+               attempt: 1,
+               status: :running,
+               activity: [in_flight_activity]
+             }
+           ] = status.agents
+
+    assert Map.drop(in_flight_activity, [:activity_index]) == attempt_1_activity
+  end
+
+  test "agent events journal workflow-authored labels into the folded read model" do
+    node = %Workflow.Node.Agent{address: [0], prompt: "inspect docs", label: "read:docs"}
+
+    committed =
+      Event.agent_committed(
+        node,
+        0,
+        %IdempotencyKey{run_id: "r", node_path: [0], iteration: 0},
+        %{"label" => "ok"},
+        %Usage{total_tokens: 1}
+      )
+
+    status = Status.fold([committed], "r")
+
+    assert committed.payload.label == "read:docs"
+    assert [%{label: "read:docs"}] = status.agents
   end
 
   test "legacy committed and rejected agent events fold with empty activity" do
@@ -125,7 +261,7 @@ defmodule Workflow.RunTest do
 
     status = Status.fold([committed, rejected], "r")
 
-    assert [%{activity: []}] = status.agents
+    assert status.agents == []
     assert [%{activity: []}] = status.rejected
   end
 

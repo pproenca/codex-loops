@@ -13,6 +13,24 @@ defmodule Workflow.Node do
   @type binding_ref :: {:node, address()} | {:map, address()}
 end
 
+defmodule Workflow.Node.Emit do
+  @moduledoc """
+  Completes the run by rendering a `~P` template over journal-bound values.
+
+  Rendering is pure and closure-free: `template` is inert data, `bindings` map
+  compile-time names to stable journal references, and execution reuses
+  `Workflow.RenderText` without introducing a paid effect or new event type.
+  """
+  @enforce_keys [:address, :template, :bindings]
+  defstruct [:address, :template, :bindings]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          template: Workflow.Template.t(),
+          bindings: %{atom() => Workflow.Node.binding_ref()}
+        }
+end
+
 defmodule Workflow.Node.Phase do
   @moduledoc "Marks entry into a named phase. Pure structural marker; no effects."
   @enforce_keys [:address, :name]

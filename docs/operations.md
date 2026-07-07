@@ -47,44 +47,59 @@ make proof
 ## Live Proof
 
 ```sh
+make proof-mcp-live
 make proof-live
 make proof-release-live
 ```
 
-`make proof-live` aliases the MCP live proof. It spends one live Codex provider
-turn through the packaged scheduler plus MCP lifecycle path, then asserts the
-run completed and recorded nonzero token usage in the scheduler projection.
+`make proof-mcp-live` spends one live Codex provider turn through the packaged
+scheduler plus MCP lifecycle path, then asserts the run completed and recorded
+nonzero token usage in the scheduler projection. `make proof-live` aliases the
+same MCP proof.
 
 `make proof-release-live` keeps the legacy direct packaged-release command path
 covered for compatibility.
 
 ## Normal Workflow Run
 
-```sh
-agent-loops validate .codex/workflows/example.exs --json
-agent-loops test .codex/workflows/example.exs --run-id run_example --json
-agent-loops run .codex/workflows/example.exs --run-id run_example_live --provider codex --json
+Agents should use the Codex plugin MCP tools. The MCP adapter starts or
+discovers the scheduler, health-checks it, and talks to the scheduler HTTP API.
+The Elixir/Phoenix scheduler owns the workflow workers, PubSub/LiveView, and
+SQLite journal.
+
+```text
+workflow_validate script_path=.codex/workflows/example.exs
+workflow_start    script_path=.codex/workflows/example.exs run_id=run_example provider=mock
+workflow_status   run_id=run_example
+workflow_inspect  run_id=run_example
 ```
 
-Use `--provider mock` for offline `run`/`workflow` checks. `test` is always
-mock-backed.
+Run live only after the mock gate is clean:
 
-## Status, Inspect, List, Resume
-
-```sh
-agent-loops status --run-id <id> --event-limit 5 --json
-agent-loops inspect --run-id <id> --json
-agent-loops list --limit 20 --json
-agent-loops resume --run-id <id> --provider codex --json
+```text
+workflow_start  script_path=.codex/workflows/example.exs run_id=run_example_live provider=codex
+workflow_status run_id=run_example_live
 ```
 
-Omit `--run-id` to select the latest known run from SQLite.
+## Status, Inspect, Open UI, Resume
+
+```text
+workflow_status  run_id=<id>
+workflow_inspect run_id=<id>
+workflow_open_ui run_id=<id>
+workflow_resume  run_id=<id> provider=codex
+```
+
+Use the compatible `agent-loops` command only for terminal diagnostics, legacy
+scripts, or release-wrapper proofing.
 
 ## Failure Parsing
 
-For `--json` commands, parse stdout as the command payload on success. On
-failure, parse the last stderr line as the JSON error object. Backend warnings
-may appear earlier on stderr.
+MCP tools return scheduler success envelopes as structured content. Scheduler
+typed errors remain typed and are returned as MCP errors. For legacy `--json`
+terminal commands, parse stdout as the command payload on success; on failure,
+parse the last stderr line as the JSON error object. Backend warnings may
+appear earlier on stderr.
 
 ## Runtime Artifacts
 

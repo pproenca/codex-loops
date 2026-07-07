@@ -107,10 +107,13 @@ end
 Write repo-local workflows under `.codex/workflows/<name>.exs`, validate them,
 then mock-test before live execution:
 
-```bash
-agent-loops validate .codex/workflows/<name>.exs --json
-agent-loops test .codex/workflows/<name>.exs --run-id <id> --json
-agent-loops run .codex/workflows/<name>.exs --run-id <id-live> --provider codex --json
+```text
+workflow_validate script_path=.codex/workflows/<name>.exs
+workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_status   run_id=<id>
+workflow_inspect  run_id=<id>
+workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
+workflow_status   run_id=<id-live>
 ```
 
 Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite` unless

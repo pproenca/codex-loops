@@ -1,4 +1,9 @@
-# Codex Loops Schemas
+# Codex Loops Legacy Schemas
+
+These schema files are compatibility artifacts from the pre-scheduler runtime
+and legacy CLI wrapper. They are useful when maintaining old integrations, but
+they are not the current product command surface. The current Codex-facing
+surface is the MCP adapter plus the Elixir/Phoenix scheduler API.
 
 ## Sources
 Sources:
@@ -22,7 +27,7 @@ Sources:
 - `workflow-snapshot.schema.json`
 - `workload-plan.schema.json`
 
-## CLI Results
+## Compatibility Result Schemas
 - `agent-result.schema.json` describes agent turn results: text or structured
   value, thread id, token and tool counts, duration, work item count, mutation
   scope, and optional compatibility warning.
@@ -42,9 +47,10 @@ Sources:
 - `workflow-command.schema.json` describes reusable command metadata, including
   command path, workflow reference, supported modes, default mode or budget,
   preflight, read/write posture, and relay metadata.
-- `workflow-draft.schema.json` describes `draft --json` output with script path,
-  workflow name, validation, next steps, optional args, budget, command path,
-  workload plan, and write scope.
+- `workflow-draft.schema.json` describes historical `draft --json` output with
+  script path, workflow name, validation, next steps, optional args, budget,
+  command path, workload plan, and write scope. Draft scaffolding is not shipped
+  in the scheduler/plugin product surface.
 
 ## Patch And Workload Plans
 - `patch-plan.schema.json` describes a plan-first mutation contract with required

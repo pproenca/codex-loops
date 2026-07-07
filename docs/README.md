@@ -1,17 +1,22 @@
 # Codex Loops
 
-Codex Loops is the local, path-first workflow runner for Codex. The current
-runtime is Elixir-based: workflow scripts are `.exs` files, run state is an
-append-only SQLite journal, and the distributable scheduler artifact is the
-`agent_loops` Mix release with a compatible `agent-loops` CLI wrapper.
+Codex Loops is the local, path-first workflow scheduler for Codex. The current
+product architecture is a Codex plugin with an Elixir MCP adapter plus a
+packaged Elixir/Phoenix scheduler. MCP manages local lifecycle and tool calls;
+Elixir owns runtime supervision, workflow workers, Phoenix PubSub/LiveView, and
+the SQLite journal.
+
+The distributable scheduler artifact is the `agent_loops` Mix release. Its
+`agent-loops` command remains as a compatibility/developer wrapper, not the
+primary integration surface.
 
 ## Canonical Subdocs
 
-- `docs/cli.md`: command surface, JSON output, exit codes, release proofs.
+- `docs/cli.md`: compatibility command surface, JSON output, exit codes, release proofs.
 - `docs/runtime.md`: architecture, journal model, packaging, providers.
 - `docs/workflow-authoring.md`: `.exs` workflow authoring and testing gate.
 - `docs/operations.md`: setup, build, release, proof, live proof.
-- `docs/schemas.md`: legacy schema notes.
+- `docs/schemas.md`: legacy schema artifact notes, not product command surface.
 
 ## Quick Start
 
@@ -20,7 +25,9 @@ make setup
 make test
 make release
 make proof
-_build/prod/rel/agent_loops/bin/agent_loops
+make proof-mcp
+make proof-mcp-live
+test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
 ## Supported Scope
@@ -30,11 +37,12 @@ Supported:
 - explicit path-first Elixir workflow scripts;
 - offline mock tests;
 - live Codex provider runs via `codex exec --json`;
-- SQLite-backed `status`, `inspect`, `list`, and `resume`;
+- SQLite-backed scheduler projections for status, inspect, and resume;
+- Codex-facing MCP tools for validate/start/status/inspect/resume/open UI;
 - scheduler API and run LiveView;
 - self-contained Mix release packaging.
 
-Not currently shipped in the Elixir CLI:
+Not currently shipped in the scheduler/plugin product:
 
 - workflow draft scaffolding;
 - background launch;

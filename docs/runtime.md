@@ -8,10 +8,16 @@ invokes the selected provider, commits ordered events to SQLite, and exits.
 Read surfaces are projections over the journal.
 
 ```text
-CLI argv -> workflow compile gate -> supervised run writer
-         -> provider turn or mock turn -> append-only SQLite journal
-         -> scheduler API / LiveView / CLI projections
+Codex MCP tool -> scheduler HTTP API -> supervised run writer
+               -> provider turn or mock turn -> append-only SQLite journal
+               -> scheduler API / Phoenix LiveView projections
 ```
+
+MCP owns adapter concerns: discovering or starting the local scheduler release,
+health-checking it, translating MCP tool calls into scheduler HTTP requests, and
+returning MCP-friendly envelopes. Elixir owns runtime supervision: the OTP
+application, `DynamicSupervisor`, `Registry`, run writers, journal owner,
+Phoenix PubSub, and Phoenix LiveView.
 
 ## Packaging
 
@@ -25,9 +31,11 @@ make release
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
-The release includes a small `bin/agent-loops` wrapper over the generated
-`bin/agent_loops` release script. The wrapper forwards the original argv through
-`Workflow.ReleaseCLI` and then calls the normal `Workflow.CLI.exec/1` seam.
+The release includes the generated `bin/agent_loops` script used by the MCP
+adapter. It also includes a small `bin/agent-loops` wrapper over the generated
+script for developer diagnostics and legacy scripts. The wrapper forwards the
+original argv through `Workflow.ReleaseCLI` and calls `Workflow.CLI.exec/1`; it
+is not the product integration surface.
 
 Run the scheduler server from the release by enabling the endpoint at runtime:
 
@@ -48,6 +56,12 @@ packaged scheduler, checks `/api/health`, validates a workflow through
 `/api/workflows/validate`, starts a mock run through `/api/runs`, reads status
 and events through `/api/runs/<id>` and `/api/runs/<id>/events`, and verifies
 the `/runs/<id>` LiveView route is reachable.
+
+`make proof-mcp` proves the Codex-facing product path from a copied plugin
+package: MCP starts/discovers the packaged scheduler, validates a workflow,
+starts a mock run, reads status/events, resumes, returns the UI URL, and shuts
+down its owned scheduler. `make proof-mcp-live` repeats the MCP path with
+`provider: "codex"` and asserts nonzero token usage from scheduler status.
 
 ## Journal Model
 
@@ -78,8 +92,9 @@ The application supervises:
 
 ## Scope
 
-Supported: local workflow scripts, mock tests, live Codex runs, SQLite-backed
-status/inspect/list/resume, scheduler API/UI reads, and release packaging.
+Supported: local workflow scripts, MCP lifecycle/tool calls, mock tests, live
+Codex runs, SQLite-backed scheduler projections, scheduler API/UI reads, and
+release packaging.
 
-Not currently shipped in the Elixir CLI: draft scaffolding, background launch,
-serve/status UI commands, hosted workflow services, and per-agent skip controls.
+Not currently shipped: draft scaffolding, hosted workflow services, and
+per-agent skip controls. The compatible Elixir CLI remains developer-only.

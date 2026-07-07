@@ -1,7 +1,9 @@
-# Codex Loops CLI
+# Codex Loops Compatibility CLI
 
-The Elixir release exposes the `agent-loops` command through
-`_build/prod/rel/agent_loops/bin/agent-loops` after `make release`.
+The product surface is the Codex plugin MCP adapter plus the Elixir/Phoenix
+scheduler. The Elixir release also exposes the compatible `agent-loops` command
+through `_build/prod/rel/agent_loops/bin/agent-loops` after `make release` for
+terminal diagnostics, legacy scripts, and direct release-wrapper proofing.
 
 ## Commands
 

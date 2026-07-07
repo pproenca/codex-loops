@@ -11,34 +11,33 @@ workflows, fanout/multi-agent orchestration, ultracode-style work, workflow
 lifecycle inspection, an executable workflow script, or a reusable Codex skill
 that captures a workflow-shaped operating procedure.
 
-The current runtime is Elixir-based. It executes `.exs` workflow files, stores
-runs in SQLite, and exposes the `agent-loops` CLI. Run data is stored at
-`~/.codex/workflows/runs_1.sqlite` by default, or at
-`CODEX_LOOPS_JOURNAL_PATH` when set.
+The product surface is the Codex plugin MCP adapter plus the local
+Elixir/Phoenix scheduler. MCP manages lifecycle and calls the scheduler HTTP
+API. Elixir owns runtime supervision, workflow workers, Phoenix PubSub/LiveView,
+and the SQLite journal. Run data is stored at
+`~/.codex/workflows/runs_1.sqlite` by default, or at `CODEX_LOOPS_JOURNAL_PATH`
+when set.
 
-## CLI Surface
+## MCP Surface
 
-```bash
-agent-loops validate <script> [--json]
-agent-loops test <script> [--run-id <id>] [--budget <n>] [--json]
-agent-loops run <script> [--run-id <id>] [--provider mock|codex] [--budget <n>] [--json]
-agent-loops workflow <script> [--run-id <id>] [--provider mock|codex] [--budget <n>] [--json]
-agent-loops resume [<script>] [--run-id <id>] [--provider mock|codex] [--json]
-agent-loops status [--run-id <id>] [--event-limit <n>] [--json]
-agent-loops inspect [--run-id <id>] [--json]
-agent-loops list [--limit <n>] [--json]
-agent-loops help
-```
+- `workflow_validate`: validate an existing `.exs` workflow script.
+- `workflow_start`: start a run from an existing workflow script. Use
+  `provider: "mock"` for offline proof and `provider: "codex"` only after
+  approval, because it spends a real Codex turn.
+- `workflow_status`: read the scheduler's journal-backed run projection.
+- `workflow_inspect`: read ordered scheduler event projections.
+- `workflow_resume`: resume an existing run through the scheduler API.
+- `workflow_open_ui`: return the Phoenix LiveView run URL.
 
-`workflow` aliases `run`. `test` is always offline and uses the mock provider.
-`run`, `workflow`, and `resume` default to the live `codex` provider unless
-`--provider mock` is supplied.
+The remaining `agent-loops` command is a compatibility/developer wrapper, not
+the product control path. Use it only when the user explicitly asks for terminal
+commands or when debugging the release locally.
 
 If working from a repo clone, the packaged binary is built with:
 
 ```bash
 make release
-_build/prod/rel/agent_loops/bin/agent-loops help
+make proof-mcp
 ```
 
 ## Artifact Selection
@@ -51,9 +50,8 @@ Before writing files, classify what the user means by "workflow":
   Codex execution.
 - **Reusable Codex skill**: use this path when the user asks to save a workflow
   as a skill, playbook, reusable procedure, or future Codex behavior. Write or
-  update a `SKILL.md` in a user-approved skill location. Do not call
-  `agent-loops validate`, `agent-loops test`, `agent-loops run`, or
-  `agent-loops resume` unless the user also asks for an executable script.
+  update a `SKILL.md` in a user-approved skill location. Do not call MCP
+  execution tools unless the user also asks for an executable script.
 - **Both**: when explicitly requested, write the reusable skill as the operating
   guide and create a tested workflow script for the executable path.
 - **Ambiguous**: ask whether the user wants an executable workflow script, a
@@ -87,7 +85,7 @@ Use a scout-first authoring loop:
    constraints, closed schemas, and expected output shape.
 5. For mutating workflows, include adversarial verification and a final build or
    test gate before reporting completion.
-6. Run `validate` and `test` before live execution.
+6. Run `workflow_validate` and a mock `workflow_start` before live execution.
 
 Useful DSL forms:
 
@@ -105,8 +103,9 @@ Useful DSL forms:
 Before live Codex execution:
 
 ```bash
-agent-loops validate .codex/workflows/<name>.exs --json
-agent-loops test .codex/workflows/<name>.exs --run-id <id> --json
+workflow_validate script_path=.codex/workflows/<name>.exs
+workflow_start script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_status run_id=<id>
 ```
 
 Read the JSON payload. If validation or mock testing fails, stop and report the
@@ -118,20 +117,19 @@ verification commands, or caller approval are unclear.
 Run live workflows only after the testing gate is satisfied:
 
 ```bash
-agent-loops run .codex/workflows/<name>.exs \
-  --run-id <id-live> \
-  --provider codex \
-  --json
+workflow_start script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
+workflow_status run_id=<id-live>
 ```
 
 After launch:
 
 ```bash
-agent-loops status --run-id <id-live> --json
-agent-loops inspect --run-id <id-live> --json
+workflow_status run_id=<id-live>
+workflow_inspect run_id=<id-live>
+workflow_open_ui run_id=<id-live>
 ```
 
-Use `resume --run-id <id> --provider codex --json` when a run failed and should
+Use `workflow_resume run_id=<id> provider=codex` when a run failed and should
 reuse completed journaled nodes.
 
 ## Development Proofs

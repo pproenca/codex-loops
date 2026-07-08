@@ -184,16 +184,18 @@ reference or a function call is **not** a literal and is rejected.
 
 ### 2.4 The closed combinator vocabulary
 
-The DSL recognizes exactly these **14** combinator names:
+The frozen base DSL recognizes these **14** combinator names:
 
 ```
 agent  log  phase  parallel  pipeline  return  collect
 while_budget  until_dry  verify  judge  synthesize  fan_out  refine
 ```
 
-> *(Dataflow §10 addendum: the implemented core recognizes `let` and `emit` alongside the base
-> set and admits `~P` only in the checked positions described there. Proposed `gather` and `map`
-> remain DEFER.)*
+> *(Dataflow/refine amendments: the implemented core recognizes exactly **17** live
+> combinators — the base 14 plus `let`, `emit`, and `emit_result`. `gather` and `map`
+> remain DEFER and MUST be rejected until their deferred sections are explicitly promoted.
+> `emit_result` is the only structured terminal surface admitted by the refine V2 amendment
+> (§9.13, §10.7a).)*
 
 Two names are contextual, not standalone combinators:
 
@@ -224,6 +226,8 @@ Statement :
   - LogStmt
   - AgentStmt
   - ReturnStmt
+  - EmitStmt
+  - EmitResultStmt
   - ParallelStmt
   - PipelineStmt
   - VerifyStmt
@@ -235,6 +239,11 @@ Statement :
   - RefineStmt
 ```
 
+TerminalStmt :
+  - ReturnStmt
+  - EmitStmt
+  - EmitResultStmt
+
 `collect` is not in `Statement`: it appears only in `BodyStatement` (§3.7). A top-level
 `collect` parses syntactically as a call but is rejected by validation (§5.6).
 
@@ -244,12 +253,15 @@ Statement :
 PhaseStmt  : `phase` `(` StringLiteral `)`
 LogStmt    : `log` `(` StringLiteral `)`
 ReturnStmt : `return` `(` Literal `)`
+EmitResultStmt : `emit_result` `(` BindingRefAtom `)`
 ```
 
 - `phase` names a milestone. Its `StringLiteral` name MUST be unique within the workflow.
 - `log` emits a static message. No interpolation.
-- `return` sets the workflow's terminal value. `Literal` MUST satisfy §2.3. The workflow
-  MUST contain at least one `return`.
+- `return` sets the workflow's terminal value. `Literal` MUST satisfy §2.3. A workflow
+  MUST terminate with a final `return`, `emit`, or `emit_result` (§5.10.2, §10.7, §10.7a).
+- `emit_result` emits the structured result of a result-capable binding. In this amendment
+  only `refine` bindings are result-capable (§10.7a).
 
 ### 3.2 Agent
 
@@ -1068,16 +1080,44 @@ workflow "x" do
 end
 ```
 
-**Rule 5.10.2 — A workflow MUST contain a `return`.** The top-level node list MUST contain
-at least one `%Return{}`; otherwise a finding located at the workflow declaration line.
-*(Dataflow §10 addendum: the implemented core widens this terminal rule so a final top-level
-`emit` also satisfies it; see §10.7.)*
+**Rule 5.10.2 — A workflow MUST end with a terminal statement.** The top-level node list
+MUST end with exactly one terminal statement: `return`, `emit`, or `emit_result`.
+`return` supplies a literal terminal value (§3.1); `emit` supplies a rendered template
+value (§10.7); `emit_result` supplies a structured result value from a result-capable
+binding (§10.7a). Any top-level node after a terminal statement is rejected. A workflow
+with no terminal statement raises a finding located at the workflow declaration line.
 
 ```counter-example
 workflow "x" do
   phase("p")
-  log("hi")                  # workflow must contain a `return`
+  log("hi")                  # workflow must end with return/emit/emit_result
 end
+```
+
+**Rule 5.10.2a — `emit_result` is a final top-level terminal over one result-capable
+binding.** `emit_result` MUST appear only at top level, MUST be the final top-level node,
+and MUST take exactly one literal binding atom. The binding MUST resolve, at compile time,
+to a result-capable producer. In this amendment only `refine` is result-capable.
+
+Pinned findings:
+
+- Unknown binding: `` `emit_result` references unknown binding :r ``.
+- Non-result binding: `` `emit_result` requires a result-capable binding; :a is bound to agent ``.
+- Non-atom argument: `` `emit_result` expects a literal binding atom ``.
+
+```counter-example
+while_budget reserve: 0, max_iterations: 1 do
+  emit_result(:r)             # `emit_result` is top-level only
+end
+```
+
+```counter-example
+emit_result(result(:r))       # argument must be one literal binding atom
+```
+
+```counter-example
+let :a = agent("draft")
+emit_result(:a)               # `agent` bindings are not result-capable
 ```
 
 **Rule 5.10.3 — The workflow name is a string literal.** `workflow name do … end` requires
@@ -1255,6 +1295,16 @@ partial progress**:
   `{:error, {:malformed_output, address, reason}}`. There is **no** `run_completed` on the
   fail path. The run **aborts**; it does not skip the node or continue. For a **top-level**
   fail-closed node the `agent_failed` is genuinely terminal — the last event in the journal.
+- **An expected provider failure is data, not a writer crash.** If `CallProvider` returns
+  an `ExpectedProviderFailure` (§6.4.1), an ordinary `agent` commits `agent_failed` with
+  `reason = {:provider_failure, kind, detail}`, preserves the provider-supplied
+  `usage`/`activity`, halts the run, and yields
+  `{:error, {:provider_failure, address, kind, detail}}`. The provider failure is not
+  schema-retried: no decoded model output exists to validate. This clause is distinct from
+  a provider bug (malformed return, raise, exit, malformed usage/activity/detail), which
+  still crashes the live writer. `refine` reviewer lanes deliberately handle expected
+  provider failures differently: they journal non-terminal role-failure data and continue
+  the convergence loop with consensus false (§9.7).
 - **Concurrent regions are partial-commit then abort.** In `parallel`, `pipeline`,
   `verify`, `judge`, and `fan_out`, every lane's events are committed in input order —
   **including the events of a failed lane** — and the **first** failure reason (in input
@@ -1289,7 +1339,7 @@ partial progress**:
   failure.** In `parallel`/`pipeline`/`verify`/`judge`/`fan_out` the provider call runs
   off-thread inside `BuildAgent`/`RunLane`/`ScoreLane`, whose result contract is only
   `{:ok, …}` or the schema-`{:failed, …}` lane result (§6.9). A **provider-level** crash —
-  `CallProvider` returning a non-`{:ok, output, usage}` shape or raising (§6.4.1) — is
+  `CallProvider` returning malformed data, raising, or exiting (§6.4.1) — is
   **not** a schema `{:failed, …}`: it is not caught and converted, it **propagates** off the
   lane task and **crashes the live writer**, exactly as a top-level provider crash does.
   Because the region commits nothing until every lane result is gathered and `CommitLanes`
@@ -1319,11 +1369,20 @@ ExecuteRun(run_id, tree, provider, budget, script_path):
   - If {status.state} is `:completed`:
     - Return {:ok, run_id}.            ; no fresh run_started, no re-run
   - If {status.state} is `:failed`:
-    - Return {:error, {:malformed_output, status.failure.address, status.failure.reason}}.
+    - Return {:error, FailureReturn(status.failure)}.
       ; status.failure is the LAST agent_failed (last-wins fold, §7.3); for a single-failure
       ; run this equals the first, but for a 2+-lane failure it is the LAST failing lane —
       ; a resume therefore returns a DIFFERENT tuple than the initial run did (§6.1, §7.3).
   - Return {RunTree(run_id, tree, provider, budget, script_path, prior)}.
+
+FailureReturn(failure):
+  - If failure.reason is {:provider_failure, kind, detail}:
+    - Return {:provider_failure, failure.address, kind, detail}.
+  - If failure.reason is {:did_not_converge, address, reason}:
+    - Return {:did_not_converge, address, reason}.
+  - If failure.reason is {:invalid_refine_input, address, reason}:
+    - Return {:invalid_refine_input, address, reason}.
+  - Return {:malformed_output, failure.address, failure.reason}.
 ```
 
 ```
@@ -1472,9 +1531,9 @@ Consequences a conforming implementation MUST preserve:
   workflow that must end with a given value MUST place that `return` **last**. Example:
   `agent("a"); return(:early); agent("b"); return(:late)` runs both agents and completes
   with value `:late`, not `:early`.
-  *(Dataflow §10 addendum: the current compiler enforces terminal-final placement for top-level
-  `return` and `emit`; a top-level node after either terminal is rejected. The base last-wins
-  model remains historical context for §1–§8; see §10.7.)*
+  *(Dataflow/refine addendum: the current compiler enforces terminal-final placement for top-level
+  `return`, `emit`, and `emit_result`; a top-level node after any terminal is rejected. The
+  base last-wins model remains historical context for §1–§8; see §10.7 and §10.7a.)*
 - **`Agent`** — see RunAgent (§6.4).
 - **`Collect`** — see RunCollect (§6.6).
 - **`WhileBudget`** / **`UntilDry`** — Loop (§6.7), entered at `iteration = 0`:
@@ -1549,6 +1608,8 @@ RunAgent(node, run_id, provider, prior, ctx):
   - If {outcome} is {:committed, result, _usage}:
     - Return {:cont, ctx with last_result = result}.        ; replay, never re-run
   - If {outcome} is {:failed, reason}:
+    - If reason is {:provider_failure, kind, detail}:
+      - Return {:halt, ctx, {:provider_failure, node.address, kind, detail}}.
     - Return {:halt, ctx, {:malformed_output, node.address, reason}}.
   - If {outcome} is {:resume, next}:
     - Return CommitAttempt(node, run_id, provider, iteration, next, ctx).
@@ -1569,7 +1630,12 @@ ResolveIdempotency(events, node_path, iteration):
 ```
 CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Let {key} be IdempotencyKey(run_id, node.address, iteration, attempt).
-  - Let {output, usage, activity} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
+  - Let {provider_outcome} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
+  - If {provider_outcome} is {:provider_failure, kind, detail, usage, activity}:
+    - Let {reason} be {:provider_failure, kind, detail}.
+    - Let {ctx} be Commit(Event.agent_failed(node, iteration, attempt + 1, reason, usage, activity), ctx).
+    - Return {:halt, ctx, {:provider_failure, node.address, kind, detail}}.
+  - Otherwise {provider_outcome} is {:ok, output, usage, activity}.
   - If {node.schema} is nil:                                 ; schemaless
     - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, output, usage, activity), ctx).
     - Return {:cont, ctx with last_result = output}.
@@ -1580,7 +1646,7 @@ CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Let {ctx} be Commit(Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity), ctx).
   - If {attempt} < node.retries:
     - Return CommitAttempt(node, run_id, provider, iteration, attempt + 1, ctx).  ; recurse with the advanced cursor
-  - Let {ctx} be Commit(Event.agent_failed(node, iteration, attempt + 1, reason), ctx).
+  - Let {ctx} be Commit(Event.agent_failed(node, iteration, attempt + 1, reason, nil, []), ctx).
   - Return {:halt, ctx, {:malformed_output, node.address, reason}}.
 ```
 
@@ -1591,6 +1657,13 @@ idempotency `key`; a conforming backend MUST use `key` as its request-idempotenc
 re-issued request after a lost commit returns the already-produced result **without
 charging again** (money spent at most once, result never dropped).
 
+An expected provider failure consumes exactly one attempt. It is committed as `agent_failed`
+immediately and is not retried by the workflow runtime, because there is no candidate
+`output` to pass through `Schema.Validate`. If a provider wants a transient failure retried
+inside a backend-specific transport layer, it MUST do so before returning from `run_agent/4`;
+once `ExpectedProviderFailure` crosses the provider port it is a terminal provider outcome
+for that idempotency key.
+
 ### 6.4.1 CallProvider (the provider port)
 
 A provider is a pair `{module, opts}`. `CallProvider` is the single seam between the
@@ -1598,25 +1671,100 @@ deterministic runner and a non-deterministic backend:
 
 ```
 CallProvider({module, opts}, prompt, schema, key):
-  - Return module.run_agent(prompt, schema, key, opts).
+  - Let {raw} be module.run_agent(prompt, schema, key, opts).
+  - Return NormalizeProviderOutcome(raw).
 ```
 
 - **Inputs.** `prompt :: String.t()` (this node's literal prompt — never a splice of any
   other node's output), `schema :: map() | nil` (the node's JSON-schema map, or `nil` for a
   schemaless turn), `key :: IdempotencyKey` (§6.5), and the backend-specific `opts`.
-- **Success return.** A conforming backend MUST return either `{:ok, result, usage}` or
-  `{:ok, result, usage, activity}`. `result` is the decoded provider output (`term()`; for a
-  schema-bound turn a decoded JSON value — a map, list, or scalar), `usage` is a
-  `%Usage{input_tokens, output_tokens, total_tokens}` of non-negative integers, and
-  `activity` is an ordered list of maps describing provider progress (§7.2). The three-tuple
-  form is normalized to the four-tuple form with `activity == []`. The runner
-  **hard-matches** one of these success shapes: `CallProvider` returning any other shape (an
-  `{:error, …}` tuple, a network failure, a raised exception) is **not** a
-  schema-validation failure and is **not** retried. It crashes the live writer, which the
-  caller observes via its monitor as `{:error, {:run_crashed, reason}}` (§6.1, §7.4) —
-  mapped to exit 1 (or exit 130 when `reason` is `:killed`) per §7.5. Fail-closed retry
-  (§6.4) applies **only** to a successful call whose `output` fails `Schema.Validate`; a
-  provider-level failure is a crash, not a retry.
+- **Provider return.** A conforming backend MUST return either a `ProviderSuccess` or an
+  `ExpectedProviderFailure`.
+
+  ```
+  ProviderSuccess :
+    - {:ok, result, usage}
+    - {:ok, result, usage, activity}
+
+  ExpectedProviderFailure :
+    - {:error, {:provider_failure, kind, detail, usage, activity}}
+  ```
+
+  `kind` MUST be exactly one of `:quota_exceeded | :model_limit | :timeout |
+  :unavailable`:
+
+  - `:quota_exceeded`: account, rate, billing, or quota exhaustion prevented completion.
+  - `:model_limit`: the request exceeds context, output, schema, or model capability
+    limits and will not succeed unchanged.
+  - `:timeout`: the provider did not produce a terminal result before a configured deadline.
+  - `:unavailable`: the backend or service is temporarily unreachable or unable to accept work.
+
+  `NormalizeProviderOutcome` converts the success three-tuple form to
+  `{:ok, result, usage, []}` and converts `ExpectedProviderFailure` to
+  `{:provider_failure, kind, detail, usage, activity}`. `result` is the decoded provider
+  output (`term()`; for a schema-bound turn a decoded JSON value — a map, list, or scalar).
+  success `usage` is normalized by `NormalizeProviderSuccessUsage`; `nil` contributes a
+  zero `%Usage{}`. Expected-failure `usage` is normalized by
+  `NormalizeProviderFailureUsage`; `nil` remains `nil` because some provider failures have
+  no billable usage to report.
+  `activity` is an ordered list of JSON objects describing provider progress (§7.2).
+
+  Expected provider failure values are data, not crashes. Invalid return shapes, malformed
+  failure data, raised exceptions, unexpected process exits, malformed streams, missing final
+  results, unknown `turn.failed`/`error` frames, and malformed `usage`/`activity` are provider
+  bugs. Provider bugs crash the live writer; the caller observes
+  `{:error, {:run_crashed, reason}}` (§6.1, §7.4), mapped to exit 1 (or 130 when `reason` is
+  `:killed`) per §7.5.
+
+  ```
+  JsonValue :
+    - null
+    - boolean
+    - integer
+    - string
+    - JsonArray
+    - JsonObject
+
+  JsonArray : ordered list of JsonValue
+  JsonObject : map with string keys and JsonValue values
+  ProviderFailureDetailValue : JsonValue
+  ```
+
+  Provider failure `detail` uses this integer-only JSON subset. Floats, NaN, Infinity,
+  atoms, tuples, structs, PIDs, functions, and maps with non-string keys are malformed
+  failure data and MUST crash the writer.
+
+  ```
+  NormalizeProviderSuccessUsage(value):
+    - If value is nil: Return %Usage{input_tokens: 0, output_tokens: 0, total_tokens: 0}.
+    - If value is %Usage{input_tokens, output_tokens, total_tokens} and all three fields are
+      non-negative integers: Return value.
+    - If value is %{"input_tokens" => i, "output_tokens" => o, "total_tokens" => t} and i,
+      o, and t are non-negative integers: Return %Usage{input_tokens: i, output_tokens: o,
+      total_tokens: t}.
+    - Otherwise raise a provider bug.
+
+  NormalizeProviderFailureUsage(value):
+    - If value is nil: Return nil.
+    - Otherwise Return NormalizeProviderSuccessUsage(value).
+  ```
+
+  ```
+  NormalizeProviderOutcome(raw):
+    - If raw is {:ok, result, usage}:
+      - Return {:ok, result, NormalizeProviderSuccessUsage(usage), []}.
+    - If raw is {:ok, result, usage, activity} and activity is a JSON array:
+      - Return {:ok, result, NormalizeProviderSuccessUsage(usage), activity}.
+    - If raw is {:error, {:provider_failure, kind, detail, usage, activity}},
+      kind is one of the four expected kinds, detail is a ProviderFailureDetailValue,
+      and activity is a JSON array:
+      - Return {:provider_failure, kind, detail, NormalizeProviderFailureUsage(usage), activity}.
+    - Otherwise raise a provider bug.
+  ```
+
+  Public JSON usage is always
+  `%{"inputTokens" => i, "outputTokens" => o, "totalTokens" => t}` or `null` inside role
+  failure records when no usage exists.
 - **Activity sink.** The runner MAY add `activity_sink: (map() -> :ok)` to `opts`. A
   backend that receives it MAY call it for non-terminal progress while the turn is running.
   The runner journals each sink call as `agent_activity` with the next local
@@ -1630,19 +1778,22 @@ CallProvider({module, opts}, prompt, schema, key):
   overriding any author-supplied value. This provider-port normalization is for Codex/OpenAI
   structured-output strictness; it does not mutate `%Agent{schema}` in the inert tree, and
   the writer still validates the returned value against the original schema map.
-- **Turn independence.** Because `CallProvider` receives only `(prompt, schema, key,
+- **Turn independence and idempotency.** Because `CallProvider` receives only `(prompt, schema, key,
   opts)`, no conversation state, thread, or prior result is carried between turns. Every
   agent turn is independent; all context an agent needs MUST be present in its own literal
   prompt (Principle 6). A backend MUST use `key` as its request-idempotency key so a
-  re-issued request after a lost commit returns the already-produced `result` without
-  charging again.
+  re-issued request after a lost commit returns the already-produced terminal provider
+  outcome without charging again. This includes `ExpectedProviderFailure`: after the backend
+  accepts a request under a key, a re-issued call with the same key MUST return the same
+  `{kind, detail, usage, activity}` without double charge, allowing resume to journal the
+  same `agent_failed` or `refine_role_failed` after a return-to-commit crash.
   *(Proposed §10 — dataflow: a proposed extension would widen the `prompt` input and this Turn-independence clause to §6.4.1′, admitting a deterministically-rendered template materialized to a `String.t()` by a pure journal fold before the call; `CallProvider`'s `(prompt, schema, key, opts)` signature is unchanged; see §10.)*
 
 **Provider-port callbacks.** A provider module has two callbacks:
 
 | callback | signature | required? | when called |
 |---|---|---|---|
-| `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> {:ok, result, usage} \| {:ok, result, usage, activity}` | **REQUIRED** | once per paid attempt (§6.4) |
+| `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> ProviderSuccess \| ExpectedProviderFailure` | **REQUIRED** | once per paid attempt (§6.4) |
 | `c:validate_config/1` | `validate_config(opts) -> :ok \| {:error, reason}` | OPTIONAL | once, **pre-run**, during `ResolveProvider` |
 
 **Provider resolution (pre-run gate, exit 4).** Before the run starts — before
@@ -1667,10 +1818,11 @@ The two failure classes are **disjoint and pinned**:
   configuration — an API key, endpoint, model id — is absent or invalid). No `run_started`
   is committed; no lease is taken. A provider with **no** `validate_config/1` is treated as
   `:ok` at this gate (it can only fail later, at call time).
-- **Call-time (`{:error, {:run_crashed, reason}}` ⇒ exit 1, or 130 when `reason` is
-  `:killed`).** A provider that **resolved** but whose `run_agent/4` later returns a non-
-  `{:ok, result, usage}` shape or raises (§6.4.1, "Success return"). This crashes the live
-  writer mid-run and is **never** an exit-4 `provider-config` failure.
+- **Call-time provider outcome.** A provider that **resolved** may later return an
+  `ExpectedProviderFailure`; that is handled as data by §6.4 and is **never** an exit-4
+  `provider-config` failure. A provider that returns any other malformed shape or raises
+  (§6.4.1, `NormalizeProviderOutcome`) crashes the live writer mid-run and surfaces as
+  `{:error, {:run_crashed, reason}}` ⇒ exit 1, or 130 when `reason` is `:killed`.
 
 An **absent or `nil`** `:provider` option is neither of the above: it is a caller misuse of
 the run API (a missing REQUIRED option, §7.6), reported as `{:error, {:usage, :provider}}`
@@ -1997,6 +2149,10 @@ Ledger.Of(run_id):
     - If it is `run_started`:                 Set {total} to its payload.budget.
     - If it is `agent_committed`:              Set {spent} to spent + its payload.usage.total_tokens.
     - If it is `agent_attempt_rejected`:       Set {spent} to spent + its payload.usage.total_tokens.
+    - If it is `agent_failed` and payload.usage is not nil:
+      Set {spent} to spent + payload.usage.total_tokens.
+    - If it is `refine_role_failed` and payload.usage is not nil:
+      Set {spent} to spent + payload.usage.total_tokens.
     - Else: no-op.
   - Return {total: total, spent: spent}.
 
@@ -2015,8 +2171,10 @@ Pinned rules a conforming implementation MUST honor:
   `nil` (absent) budget is the **unbounded** case: `Remaining` returns the atom `:infinity`,
   which sorts above every integer (§6.8), so `budget_remaining() > n` is always `true` and
   `fan_out` raises (§6.10). A `non_neg_integer()` budget makes `Remaining` an integer.
-- **Rejected attempts still pay.** Both `agent_committed` and `agent_attempt_rejected` add
-  to `spent` — a fail-closed retry is charged. No other event type affects the ledger.
+- **Rejected and expected-failed attempts still pay.** `agent_committed`,
+  `agent_attempt_rejected`, `agent_failed` with provider usage, and `refine_role_failed`
+  with provider usage add to `spent`. A schema-exhaustion `agent_failed` has `usage == nil`
+  because its paid rejected attempts were already charged individually.
 - **Monotonicity.** Because every `usage.total_tokens` is `>= 0`, `spent` is monotonically
   non-decreasing and `remaining` monotonically non-increasing across a run (see §6.7's
   termination note for why non-increasing does not by itself imply termination).
@@ -2394,7 +2552,7 @@ types (the log is versioned and additive).
 | `:agent_committed` | `address, iteration, idempotency_key, label, prompt, result, usage, activity` |
 | `:agent_activity` | `address, iteration, attempt, activity_index, label, prompt, entry` |
 | `:agent_attempt_rejected` | `address, iteration, attempt, label, prompt, output, reason, usage, activity` |
-| `:agent_failed` | `address, iteration, attempts, reason` (last event for a top-level fail; inside a concurrent region later lane events may follow it in seq order — the run's halt reason is the **first** `agent_failed` (§6.1), while the Status fold's `failure` is the **last** `agent_failed` in seq order (§7.3)) |
+| `:agent_failed` | `address, iteration, attempts, reason, usage, activity` (last event for a top-level fail; `usage`/`activity` are `nil`/`[]` for schema exhaustion and provider-supplied for expected provider failures; inside a concurrent region later lane events may follow it in seq order — the run's halt reason is the **first** `agent_failed` (§6.1), while the Status fold's `failure` is the **last** `agent_failed` in seq order (§7.3)) |
 | `:parallel_started` / `:parallel_completed` | `address, branch_count` / `address` |
 | `:pipeline_started` / `:pipeline_completed` | `address, items, item_count, stage_count` / `address` |
 | `:iteration_started` | `address, iteration` |
@@ -2404,11 +2562,13 @@ types (the log is versioned and additive).
 | `:verify_started` / `:verify_settled` | `address, mode, voter_count, threshold` / `address, confirmations, total, threshold, survived` |
 | `:judge_started` / `:judge_settled` | `address, candidates, criteria` / `address, scores, pick, winner` |
 | `:fan_out_started` / `:fan_out_completed` | `address, per, width` / `address` |
-| `:refine_started` | `address, input, max_rounds, until, on_non_convergence, max_concurrency, reviewer_timeout_ms, reviewers, reviser, artifact_schema_version, review_schema_version` |
+| `:refine_started` | `address, input, max_rounds, until, on_non_convergence, max_concurrency, reviewer_timeout_ms, gates, reviewers, reviser, artifact_schema_version, review_adapter_versions` |
 | `:refine_round_started` | `address, round, artifact` |
-| `:refine_round_decision` | `address, round, consensus, approval_count, total, reviewer_decisions, artifact, open_findings` |
-| `:refine_completed` | `address, converged, final_round, rounds, artifact, open_findings` |
-| `:refine_non_converged` | `address, reason, final_round, rounds, artifact, open_findings` |
+| `:refine_role_failed` | `address, role, role_address, round, reviewer, reviewer_index, attempts, reason, detail, usage, activity` |
+| `:refine_gate_evaluated` | `address, gate, predicate, result, input_round, input_refs` |
+| `:refine_round_decision` | `address, round, consensus, approval_count, total, reviewer_decisions, artifact, open_findings, role_failures, failed_reviewers, report_snippets` |
+| `:refine_completed` | `address, converged, final_round, rounds, artifact, open_findings, role_failures, failed_reviewers, cold_read, report_snippets` |
+| `:refine_non_converged` | `address, reason, final_round, rounds, artifact, open_findings, role_failures, failed_reviewers, cold_read, report_snippets` |
 | `:refine_input_invalid` | `address, input, reason` |
 | `:run_completed` | `value` (terminal on success path; no address) |
 
@@ -2458,6 +2618,11 @@ Payload-value pins (each is observable output, so it is normative):
   activity entry maps for the completed attempt. Entries MAY carry `activity_index` when the
   runner reconciles them with streamed `agent_activity` events; read-model folds use that
   index to avoid counting the same streamed/final activity twice, never value-only dedupe.
+- **`agent_failed.usage` / `agent_failed.activity`** are present on every `agent_failed`.
+  Schema-exhaustion failures write `usage: nil, activity: []` because each paid rejected
+  attempt has already been journaled as `agent_attempt_rejected`. Expected provider failures
+  write the provider-supplied normalized `usage` and `activity` from §6.4.1 so failed turns
+  remain visible in token/tool accounting.
 
 `run_completed` is the terminal success event; on failure the terminal event is
 `agent_failed`, `refine_non_converged`, or `refine_input_invalid` and **no**
@@ -2480,15 +2645,17 @@ over the journal (it consults no process state). `state` transitions:
 ```
 
 The fold accumulates `logs`, `agents`, `rejected`, `accumulators`, `verifications`,
-`judgments`, `usage` (summed only from `agent_committed` and `agent_attempt_rejected` —
-rejections still pay), and sets `result = value` on `run_completed`. Every clause increments
-`event_count`, so the fold is total.
+`judgments`, `refines`, `usage` (summed from `agent_committed`, `agent_attempt_rejected`,
+`agent_failed` with usage, and `refine_role_failed` with usage), `tool_activity` (ordered
+provider activity entries with raw event refs), and sets `result = value` on
+`run_completed`. Every clause increments `event_count`, so the fold is total.
 
 **List-projection shapes (pinned).** These projections live in the `Workflow.Status` struct
 returned by `Workflow.Status.of/1` (§7.6). Of them, **only `logs` (verbatim) and
-`agentCount = length(agents)`** surface in the §7.5 run-projection envelope; the `agents`,
-`rejected`, `verifications`, and `judgments` lists are **not** envelope fields — they are
-reachable only through the `Workflow.Status` struct (§7.5). Each is an **ordered list
+`agentCount = length(agents)`** surface in the minimal §7.5 run-projection envelope; the
+full §7.5 projection additionally exposes `agents`, `rejected`, `verifications`,
+`judgments`, `refines`, `toolActivity`, and `rawRefs` for inspect/status clients that need
+the data behind the counts. Each is an **ordered list
 appended in `seq` order** (one entry per matching event, in the order the fold visits them):
 
 - **`logs`** is an ordered list of **bare `message` strings** — exactly the `log_emitted`
@@ -2502,14 +2669,41 @@ appended in `seq` order** (one entry per matching event, in the order the fold v
   `%{address, iteration, label, prompt, result, usage, idempotency_key, activity}`. On
   `agent_failed`, the fold upserts a `status: :failed` projection using the latest matching
   rejection for `label`, `prompt`, `activity`, and phase placement, so an exhausted
-  rejected-only agent remains selectable in read surfaces. `agentCount` in the envelope
-  (§7.5) is exactly `length(agents)`.
+  rejected-only agent remains selectable in read surfaces. If `agent_failed.reason` is
+  `{:provider_failure, kind, detail}`, the failed projection MUST include
+  `%{provider_failure: %{kind, detail}, usage, activity}` from the `agent_failed` payload
+  rather than fabricating a rejected output. `agentCount` in the envelope (§7.5) is exactly
+  `length(agents)`.
   *(Proposed §10 — dataflow: a proposed extension pins the projected `prompt` — and the `agent_committed.prompt` / `agent_attempt_rejected.prompt` payload keys (§7.2) — to the rendered `String.t()`, never an inert `%Template{}`; see §10.)*
 - **`rejected`** is an ordered list appending, on each `agent_attempt_rejected`, the map
   `%{address, iteration, attempt, label, prompt, output, reason, activity}`.
 - **`verifications`** / **`judgments`** append, on each `verify_settled` / `judge_settled`,
   the map `%{address, confirmations, total, threshold, survived}` /
   `%{address, scores, pick, winner}` respectively.
+- **`refines`** upserts one projection per `refine_started.address`. The projection shape is
+  `%{address, state, converged, rounds, final_round, open_findings, final_open_defects,
+  failed_reviewers, role_failures, artifact_preview, reviewer_decisions, cold_read,
+  report_snippets, raw_refs}`. `artifact_preview` is the first 4096 bytes of the latest
+  `refine_round_started.artifact`, `refine_round_decision.artifact`, or terminal refine
+  artifact, with no ellipsis added. `raw_refs` is a map with exactly these keys:
+  `%{started, rounds, decisions, role_failures, gates, gate_role_agents, terminal, journal}`.
+  Each ref is `%{run_id, seq, type, address}`; `started` and `terminal` are one ref or `nil`,
+  the other keys are ordered lists. `gates` contains every `refine_gate_evaluated` event for
+  the refine address, including a true `:halt` gate that produces a failed
+  `refine_non_converged` run with no downstream `emit_result`. `gate_role_agents` contains
+  every `agent_activity`, `agent_committed`, `agent_attempt_rejected`, or `agent_failed` event
+  whose address is the cold-read or repair role address (`refine.address ++ [3]` or
+  `refine.address ++ [4]`). `journal` is the seq-ordered concatenation of every ref used by
+  the refine projection, including `started`, `rounds`, `decisions`, `role_failures`,
+  `gates`, `gate_role_agents`, and `terminal`. `final_open_defects` is the derived list of
+  terminal `open_findings` plus `role_failures` normalized as role-failure defect records
+  (§9.11 `FinalOpenDefectJSON`), preserving Claude-style final reports without making
+  role failures masquerade as successful reviewer findings.
+- **`tool_activity`** appends every `agent_activity` entry and every terminal activity entry
+  carried by `agent_committed`, `agent_attempt_rejected`, `agent_failed`, or
+  `refine_role_failed`, each with a raw ref `%{run_id, seq, type, address}`. No semantic
+  interpretation of provider-specific tool payloads is required; the ordered entries are the
+  tool/transcript read surface.
 
 Two conforming implementations therefore emit **byte-identical** `logs` (and the other list
 projections) for the same journal.
@@ -2518,7 +2712,8 @@ projections) for the same journal.
 `failure = %{address, attempts, reason}` and `state = :failed` **unconditionally** — there
 is **no** state guard, so a later `agent_failed` **overwrites** an earlier one. On
 `refine_non_converged`, the fold sets
-`failure = %{address: address, attempts: 0, reason: {:did_not_converge, address, :max_rounds}}`;
+`failure = %{address: address, attempts: 0, reason: {:did_not_converge, address, reason}}`,
+where `reason` is `refine_non_converged.payload.reason`;
 on `refine_input_invalid`, it sets
 `failure = %{address: address, attempts: 0, reason: {:invalid_refine_input, address, reason}}`.
 The folded `failure` is therefore the **last** terminal failure event in `seq` order. In the
@@ -2550,15 +2745,28 @@ a projection, computable from the journal alone.
 
 ### 7.4 Result shape
 
-The final value of a completed run is the `run_completed` payload's `value` — the
-workflow's `%Return{}` value (a compile-time literal). A provider's per-turn `result` is
-opaque (`term()`), accompanied by `%Usage{input_tokens, output_tokens, total_tokens}`
-(all `non_neg_integer()`, summed field-wise).
+The final value of a completed run is the `run_completed` payload's `value`, supplied by the
+workflow's final terminal statement (§5.10.2):
+
+- `return(literal)` stores that compile-time literal.
+- `emit(~P"...")` stores the rendered UTF-8 text.
+- `emit_result(:binding)` stores the binding's structured public JSON projection. In this
+  version the only result-capable binding is `refine`, whose public result shape is
+  `RefineResultJSON` (§9.11).
+
+A provider's per-turn `result` is opaque (`term()`), accompanied by
+`%Usage{input_tokens, output_tokens, total_tokens}` (all `non_neg_integer()`, summed
+field-wise). Provider results are distinct from terminal `emit_result` projections: a
+provider may return host terms, but `emit_result` MUST write a JSON-encodable structured
+projection to `run_completed.value`.
 
 Run API return values:
 
 - `{:ok, run_id}` on completion.
 - `{:error, {:malformed_output, address, reason}}` on fail-closed abort.
+- `{:error, {:provider_failure, address, kind, detail}}` when a provider returns an
+  expected failure (`kind` = `:quota_exceeded | :model_limit | :timeout | :unavailable`) for
+  an ordinary agent turn.
 - `{:error, {:already_running, pid}}` when a live writer holds the lease.
 - `{:error, {:run_crashed, reason}}` on writer crash.
 
@@ -2579,8 +2787,11 @@ JSON `code`:
 |---|---|---|
 | `:usage` | `usage` | 2 |
 | `:provider_config` | `provider-config` | 4 |
+| `:provider_failure` | `provider-failure` | 7 |
 | `:validation` | `validation` | 6 |
 | `:malformed_output` | `malformed-output` | 8 |
+| `:did_not_converge` | `did-not-converge` | 9 |
+| `:invalid_refine_input` | `invalid-refine-input` | 10 |
 | `:killed` | `killed` | 130 |
 | `:runtime` | `runtime` | 1 |
 
@@ -2588,29 +2799,45 @@ Success exits `0`. Run-outcome mapping: `{:error, {:provider_config, reason}}` �
 **before** the run starts by `ResolveProvider` (§6.4.1) when the selected provider cannot be
 configured or resolved (a module that does not export `run_agent/4`, or a `validate_config/1`
 that returns `{:error, reason}` because required configuration is absent) → exit 4;
-`{:malformed_output, …}` → exit 8; `{:run_crashed, :killed}` → exit 130; `{:run_crashed, _}`
-and `{:already_running, _}` → exit 1; a compile/validation failure of the workflow script →
-exit 6; a missing script file, a bad option, an **absent/`nil` `:provider`** option
+`{:provider_failure, …}` → exit 7; `{:malformed_output, …}` → exit 8;
+`{:did_not_converge, …}` → exit 9; `{:invalid_refine_input, …}` → exit 10;
+`{:run_crashed, :killed}` → exit 130; `{:run_crashed, _}` and `{:already_running, _}` → exit
+1; a compile/validation failure of the workflow script → exit 6; a missing script file, a
+bad option, an **absent/`nil` `:provider`** option
 (`{:usage, :provider}`, §6.4.1), or a resume with no resolvable script path
 (`{:no_script_path, run_id}`, §6.2) → exit 2. The `provider-config` code (exit 4) is the
-pre-run provider-resolution failure; it is distinct from a provider that resolves but then
-fails a call at run time, which is `{:run_crashed, reason}` (exit 1, §6.4.1).
+pre-run provider-resolution failure. After a provider resolves, an `ExpectedProviderFailure`
+from `run_agent/4` is `{:provider_failure, address, kind, detail}` (exit 7); only provider
+bugs — malformed return shapes, malformed expected-failure data, raises/exits, malformed
+streams, or malformed usage/activity — are `{:run_crashed, reason}` (exit 1, §6.4.1).
 
 The run projection envelope (for `run`/`test`/`resume`/`status`/`inspect`) carries
 **exactly** these fields: `runId, state, treeName, phase, logs, agentCount, eventCount,
-usage, result, failure`, plus a `command` field added by the caller. Here `logs` is the §7.3
-`logs` projection verbatim — an ordered (seq-order) JSON array of the `log_emitted`
-**message strings** — and `agentCount` is `length(agents)` (the §7.3 `agents` list); `usage`
-is `%{"inputTokens", "outputTokens", "totalTokens"}`; `failure` is `nil` or
-`%{"address", "attempts", "reason" => inspect(reason)}`. The §7.3 `agents`, `rejected`,
-`verifications`, and `judgments` list projections are **not** envelope fields: the envelope
-exposes the agent stream solely as the `agentCount` integer, and the rejection/verification/
-judgment lists are reachable only through the `Workflow.Status` struct (`Workflow.Status.of/1`,
-§7.3, §7.6). A value that is not JSON-encodable is rendered
-via `inspect/1` so the envelope always encodes; as in §4.4, this `inspect/1` fallback is
-byte-normative **only for the Elixir embedding** — a non-Elixir host MUST still produce an
-encodable envelope, but its string rendering of a non-JSON-encodable value is
-implementation-defined.
+usage, result, failure, agents, rejected, verifications, judgments, refines, toolActivity,
+rawRefs`, plus a `command` field added by the caller. Here `logs` is the §7.3 `logs`
+projection verbatim — an ordered (seq-order) JSON array of the `log_emitted` **message
+strings** — and `agentCount` is `length(agents)` (the §7.3 `agents` list); `usage` is
+`%{"inputTokens", "outputTokens", "totalTokens"}` including expected-failure usage; `failure`
+is `nil` or `%{"address", "attempts", "reason" => inspect(reason)}`. `agents`, `rejected`,
+`verifications`, `judgments`, `refines`, and `toolActivity` are the §7.3 list projections
+rendered to JSON. `rawRefs` is a top-level map containing at least
+`%{"journal" => [%{"runId", "seq", "type", "address"?}]}` for every folded event, where
+`"address"` is present when the event payload has a node/refine address. Implementations MAY
+include backend transcript/artifact locators when the provider exposes stable opaque refs;
+such refs are data only and MUST NOT be dereferenced by the workflow runtime.
+
+`result` is encoded by `TerminalJSON(run_completed.value)`:
+
+```
+TerminalJSON(value):
+  - If value is a `RefineResultJSON` projection (§9.11): Return value unchanged.
+  - If value is JSON-encodable: Return value unchanged.
+  - Otherwise Return inspect(value).
+```
+
+The `inspect/1` fallback is permitted only for literal `return` values or other non-result
+legacy terminal values. A conforming implementation MUST NOT stringify an `emit_result`
+projection: `emit_result(:r)` remains structured JSON in the envelope.
 
 **Scope of this section: envelope and exit codes only; the CLI *input* surface is
 non-normative.** What §7.5 pins is the **output** contract of a `--json` invocation — the
@@ -2692,8 +2919,8 @@ Normative requirements a conforming implementation MUST satisfy:
 
 - **C1 (closed vocabulary).** It MUST reject, at compile time, any form outside the 14-way
   vocabulary (and the body vocabulary inside loops), per §5.
-  *(Dataflow §10 addendum: the implemented core recognizes `let` and `emit`; `gather`/`map`
-  remain DEFER and `reduce`/`select` remain REJECT.)*
+  *(Dataflow/refine addendum: the implemented core recognizes `let`, `emit`, and
+  `emit_result`; `gather`/`map` remain DEFER and `reduce`/`select` remain REJECT.)*
 - **C2 (determinism by absence).** It MUST NOT provide any workflow-body construct that
   reads a clock, randomness, environment, filesystem, or external module. Determinism
   MUST be a property of the vocabulary, not a runtime linter.
@@ -2798,9 +3025,10 @@ BindingRefAtom :: `:` AtomName
 
 RefineOpts : KeywordList
   required exactly once: reviewers:, revise_with:, until:, max_rounds:
-  optional at most once: on_non_convergence:, max_concurrency:
+  optional at most once: on_non_convergence:, max_concurrency:, gates:
 
-ReviewerSpec : `reviewer` `(` Atom `,` StringLiteral `)`
+ReviewerSpec : `reviewer` `(` Atom `,` StringLiteral ReviewerOpts? `)`
+ReviewerOpts : `,` KeywordList       ; only adapter:
 ReviewerList : `[` ReviewerSpec `,` ReviewerSpec+ `]`
 ```
 
@@ -2849,7 +3077,10 @@ Uniqueness is by reviewer atom name, compared exactly after parsing the atom lit
 Reviewer names MUST match `AtomName` (the same lexical recognizer used by `let` binding
 names in §10.5.1); dynamic atoms, strings, module aliases, and atoms ending in `?` or `!`
 are rejected. Reviewer prompts MUST be literal strings; templates, interpolated strings,
-variables, and non-string terms are rejected.
+variables, and non-string terms are rejected. A reviewer MAY supply `adapter:` with one of
+the literal atoms `:findings_v1 | :defects_v1 | :violations_v1 | :concerns_v1`; when omitted
+the adapter is `:findings_v1`. Unknown keys, repeated keys, non-literal adapters, and
+unknown adapter atoms are rejected at compile time.
 
 ```counter-example
 refine agent("draft"), reviewers: [reviewer(:a, "check")],
@@ -2861,11 +3092,17 @@ refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:a, "y")],
   revise_with: agent("fix"), until: :unanimous, max_rounds: 3
 ```
 
+```counter-example
+refine agent("draft"), reviewers: [reviewer(:a, "x", adapter: :anything), reviewer(:b, "y")],
+  revise_with: agent("fix"), until: :unanimous, max_rounds: 3
+```
+
 **R4 — option cardinality is exact and unknown options are rejected.**
 
 Required keys: `reviewers:`, `revise_with:`, `until:`, `max_rounds:`. Optional keys:
-`on_non_convergence:`, `max_concurrency:`. Required keys MUST appear exactly once; optional keys
-MUST appear at most once.
+`on_non_convergence:`, `max_concurrency:`, `gates:`. Required keys MUST appear exactly once;
+optional keys MUST appear at most once. `gates:` is the closed gate option language in §9.13;
+it is not a general branch body.
 
 ```counter-example
 refine agent("draft"), reviewers: [], reviewers: [],
@@ -2931,13 +3168,19 @@ refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
 %Workflow.Node.Refine{
   address: address(),
   input: {:producer, Agent.t()} | {:binding, name :: atom(), ref :: BindingRef},
-  reviewers: [%{index: non_neg_integer(), name: atom(), prompt: String.t(), agent: Agent.t()}],
+  reviewers: [%{index: non_neg_integer(), name: atom(), prompt: String.t(),
+                adapter: reviewer_adapter(), agent: Agent.t()}],
   reviser: Agent.t(),
   until: :unanimous,
   max_rounds: pos_integer(),
   on_non_convergence: :fail | :accept_current,
-  max_concurrency: pos_integer()
+  max_concurrency: pos_integer(),
+  gates: RefineGates.t()
 }
+```
+
+```
+reviewer_adapter() = :findings_v1 | :defects_v1 | :violations_v1 | :concerns_v1
 ```
 
 `BindingRef` extends to:
@@ -2946,8 +3189,10 @@ refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
 {:node, address()} | {:map, address()} | {:refine, address()}
 ```
 
-`let :x = refine ...` records `:x -> {:refine, address}`. `BoundValue({:refine, address})`
-reads `refine_completed.payload.artifact`.
+`let :x = refine ...` records `:x -> {:refine, address}`.
+`BoundRefineArtifact({:refine, address})` reads `refine_completed.payload.artifact` for
+template rendering, while `BoundRefineResult({:refine, address})` reads the structured
+result projection for `emit_result`.
 
 Addresses and paid-effect iteration slots:
 
@@ -2976,7 +3221,7 @@ Artifact schema version 1 is exactly:
 }
 ```
 
-Review schema version 1 is exactly:
+The default findings adapter schema (`:findings_v1`) is exactly:
 
 ```elixir
 %{
@@ -2985,6 +3230,8 @@ Review schema version 1 is exactly:
   "additionalProperties" => false,
   "properties" => %{
     "approved" => %{"type" => "boolean"},
+    "cross_expert_note" => %{"type" => "string"},
+    "report_snippet" => %{"type" => "string"},
     "findings" => %{
       "type" => "array",
       "items" => %{
@@ -3029,6 +3276,53 @@ Pinned invalid-input reasons:
 :artifact_value_unsupported
 ```
 
+The other literal adapters reuse the same closed field types and differ only in top-level
+and item field names:
+
+| adapter | required top-level fields | item array field | item issue field | item fix field | approval rule |
+|---|---|---|---|---|---|
+| `:findings_v1` | `approved, findings` | `findings` | `issue` | `fix` | `approved == true` |
+| `:defects_v1` | `pass, defects` | `defects` | `issue` | `fix` | `pass == true` |
+| `:violations_v1` | `pass, violations` | `violations` | `issue` | `fix` | `pass == true` |
+| `:concerns_v1` | `verdict, concerns` | `concerns` | `concern` | `recommendation` | `verdict == "approve"` |
+
+For every adapter, each item MUST normalize to `id`, `blocking`, `issue`, and `fix`.
+`id`, the adapter's issue field, and the adapter's fix field are required non-empty valid
+UTF-8 binaries. `blocking` is required for `:findings_v1`, `:defects_v1`, and
+`:concerns_v1`. For `:violations_v1`, an item MAY omit `blocking` and instead provide
+`severity`; severities `"blocker"`, `"blocking"`, `"critical"`, and `"error"` are blocking,
+and all other severities are non-blocking. `cross_expert_note` and `report_snippet` are
+OPTIONAL top-level valid UTF-8 binaries on every adapter schema and are normalized into the
+committed reviewer result's `"report_snippets"` list. They are copied from committed
+reviewer results into `refine_round_decision.report_snippets`, never into `open_findings`.
+
+The schema selected for a reviewer role is a pure function of its literal `adapter:`. An
+authored reviewer cannot provide an arbitrary schema; adding an adapter requires adding a
+new literal atom and its complete schema/normalizer to this specification.
+
+```
+ReviewerAdapterSchema(adapter):
+  - If adapter is :findings_v1: Return the default findings adapter schema above.
+  - If adapter is :defects_v1:
+    - Return AdapterObjectSchema("pass", "defects", "issue", "fix", require_blocking: true).
+  - If adapter is :violations_v1:
+    - Return AdapterObjectSchema("pass", "violations", "issue", "fix", require_blocking: false).
+  - If adapter is :concerns_v1:
+    - Return AdapterObjectSchema("verdict", "concerns", "concern", "recommendation",
+        require_blocking: true).
+
+AdapterObjectSchema(approval_field, array_field, issue_field, fix_field, opts):
+  - Return a JSON-schema object with `additionalProperties: false`, required fields
+    `[approval_field, array_field]`, and `properties`:
+    - approval_field: boolean for `pass`, string enum `["approve", "changes"]` for `verdict`;
+    - optional top-level `cross_expert_note` and `report_snippet` fields as strings;
+    - array_field: array of objects with `additionalProperties: false`;
+    - each item requires `id`, issue_field, fix_field, and also `blocking` when
+      opts.require_blocking is true;
+    - item `properties` contain `id`, issue_field, and fix_field as strings; `blocking` as
+      boolean; and, for `:violations_v1`, optional `severity` as string.
+```
+
 #### 9.5.2 Reviewer normalization
 
 Reviewer committed result is exactly:
@@ -3038,13 +3332,20 @@ Reviewer committed result is exactly:
   "approved" => boolean(),
   "findings" => [
     %{"id" => binary(), "blocking" => boolean(), "issue" => binary(), "fix" => binary()}
-  ]
+  ],
+  "report_snippets" => [binary()]
 }
 ```
 
-Extra fields are rejected. `id`, `issue`, and `fix` MUST be non-empty valid UTF-8 binaries.
-Reviewer normalization failure is treated like schema failure: journal
-`agent_attempt_rejected`; because reviewers use `retries: 0`, then journal `agent_failed`.
+For every adapter, including `:findings_v1`, this is the adapter-normalized shape; the
+committed `agent_committed.result` MUST always be this canonical map, never the raw
+provider map. `"report_snippets"` is always present, including `[]`, and contains the
+selected adapter output's optional
+`cross_expert_note` followed by optional `report_snippet`, omitting absent fields and empty
+strings. Extra fields outside the selected
+adapter schema are rejected. Reviewer normalization failure is treated like schema failure:
+journal `agent_attempt_rejected`; because reviewers use `retries: 0`, a reviewer-role
+failure then journals `refine_role_failed` rather than terminal `agent_failed` (§9.7).
 
 A review is clear iff `approved == true` and no finding has `blocking == true`.
 
@@ -3073,8 +3374,38 @@ If a reviewer is non-clear but has no blocking finding, insert:
 Reviewer decisions have this exact shape, in reviewer index order:
 
 ```elixir
-%{reviewer: atom(), reviewer_index: non_neg_integer(), approved: boolean(), clear: boolean()}
+%{reviewer: atom(), reviewer_index: non_neg_integer(), approved: boolean(), clear: boolean(),
+  adapter: reviewer_adapter(), status: :completed | :failed}
 ```
+
+For a `refine_role_failed` reviewer, the corresponding decision is present with
+`approved: false`, `clear: false`, `status: :failed`, and the reviewer's literal adapter.
+
+Role failures have this exact shape:
+
+```elixir
+%{
+  role: :reviewer | :cold_read | :repair,
+  address: address(),
+  role_address: address(),
+  round: non_neg_integer() | nil,
+  reviewer: atom() | nil,
+  reviewer_index: non_neg_integer() | nil,
+  attempts: pos_integer(),
+  reason: term(),
+  detail: term() | nil,
+  usage: Usage.t() | nil,
+  activity: [map()]
+}
+```
+
+`reason` is one of `{:provider_failure, kind, detail}`, `{:malformed_output, reason}`,
+`{:reviewer_timeout, timeout_ms}`, `{:reviewer_crashed, reason}`,
+`{:cold_read_timeout, timeout_ms}`, `{:cold_read_crashed, reason}`, or
+`{:repair_failed, reason}`. Reviewer role failures are ordered by reviewer index ascending,
+then by their journal `seq` when a reviewer somehow produces more than one role-failure
+record for the same round. Gate role failures (`:cold_read`, `:repair`) sort after reviewer
+round failures in gate execution order.
 
 ### 9.6 Prompt construction
 
@@ -3093,7 +3424,7 @@ artifact
 "\n--- END CODEX LOOPS REFINE REVIEW INPUT ---"
 ```
 
-`ReviserPrompt(base, round, artifact, open_findings)` is exactly:
+`ReviserPrompt(base, round, artifact, open_findings, role_failures)` is exactly:
 
 ```text
 base
@@ -3104,6 +3435,8 @@ base
 artifact
 "\nblocking-finding-count: " <> Integer.to_string(length(open_findings)) <> "\n"
 SerializeFindings(open_findings)
+"reviewer-role-failure-count: " <> Integer.to_string(length(role_failures)) <> "\n"
+SerializeRoleFailures(role_failures)
 "--- END CODEX LOOPS REFINE REVISION INPUT ---"
 ```
 
@@ -3122,6 +3455,37 @@ zeroes:
 "fix:\n" <> f.fix <> "\n"
 ```
 
+`SerializeRoleFailures` concatenates entries in order. `reason` and `detail` are rendered
+with `inspect/1` under the same host/version caveat as §4.4:
+
+```text
+"role-failure " <> Integer.to_string(index) <> ":\n"
+"reviewer: " <> Atom.to_string(f.reviewer) <> "\n"
+"reviewer-index: " <> Integer.to_string(f.reviewer_index) <> "\n"
+"reason:\n" <> inspect(f.reason) <> "\n"
+"detail:\n" <> inspect(f.detail) <> "\n"
+```
+
+`ColdReadPrompt(base, projection)` is exactly:
+
+```text
+base
+"\n\n--- CODEX LOOPS REFINE COLD READ INPUT ---\n"
+"artifact-bytes: " <> Integer.to_string(byte_size(projection.artifact)) <> "\n"
+"artifact:\n"
+projection.artifact
+"\nopen-finding-count: " <> Integer.to_string(length(projection.open_findings)) <> "\n"
+SerializeFindings(projection.open_findings)
+"role-failure-count: " <> Integer.to_string(length(projection.role_failures)) <> "\n"
+SerializeRoleFailures(projection.role_failures)
+"--- END CODEX LOOPS REFINE COLD READ INPUT ---"
+```
+
+`RepairPrompt(base, projection)` is exactly `ReviserPrompt(base, projection.final_round,
+projection.artifact, projection.open_findings ++ ColdReadOpenFindings(projection.cold_read),
+projection.role_failures)`, where `ColdReadOpenFindings(%{state: :completed})` returns that
+cold-read state's `open_findings` and all other cold-read states return `[]`.
+
 ### 9.7 Execution
 
 For `max_rounds = N`, review rounds are `0..N-1`. Reviser runs only for rounds `0..N-2`.
@@ -3136,17 +3500,21 @@ RunRefine(node):
     - binding input: BoundArtifact(ref); on error commit refine_input_invalid and halt.
   - For r in 0..N-1:
     - Commit/replay refine_round_started(address, r, artifact).
-    - Run reviewers [i,1,j] at iteration r concurrently, cap max_concurrency, bounded by
-      reviewer_timeout_ms from refine_started.payload.
-    - Commit reviewer lane events in reviewer index order.
-      If any reviewer role agent returns an agent failure, halt with the first failing
-      reviewer in reviewer-index order and do not write `refine_round_decision`,
-      `refine_non_converged`, or `refine_completed`.
+    - Run reviewers [i,1,j] at iteration r concurrently with RunReviewerRoleAgent, cap
+      max_concurrency, bounded by reviewer_timeout_ms from refine_started.payload.
+    - Commit reviewer lane events and `refine_role_failed` records in reviewer index order.
+      A reviewer role failure is **not** a run halt. Preserve every successful reviewer
+      output from the same round and keep the failed lane as structured data.
     - Compute/replay refine_round_decision.
-    - If consensus: commit refine_completed(converged: true, open_findings: []) and return artifact.
+    - If consensus: return FinalizeRefine(node, artifact, base_terminal: :completed,
+      base_reason: nil, converged: true, round: r, open_findings: [], role_failures: []).
     - If r == N-1:
-      - :fail commits refine_non_converged and halts with {:did_not_converge, address, :max_rounds}.
-      - :accept_current commits refine_completed(converged: false) and returns artifact.
+      - If on_non_convergence is :fail:
+        return FinalizeRefine(node, artifact, base_terminal: :non_converged,
+          base_reason: :max_rounds, converged: false, round: r, open_findings, role_failures).
+      - If on_non_convergence is :accept_current:
+        return FinalizeRefine(node, artifact, base_terminal: :completed,
+          base_reason: nil, converged: false, round: r, open_findings, role_failures).
     - Run reviser [i,2] at iteration r with ArtifactSchemaV1 and ArtifactNormalizer.
       If the reviser role agent returns an agent failure, halt with that `agent_failed`
       result and do not write a later `refine_round_started`, `refine_non_converged`,
@@ -3154,31 +3522,62 @@ RunRefine(node):
     - Set artifact to reviser committed result.
 ```
 
-`RunRoleAgent` wraps normal agent attempt handling: provider output is schema-validated against
-the role-owned schema (`ArtifactSchemaV1` for producer/reviser, `ReviewSchemaV1` for reviewers),
-then role-normalized, then committed. Schema or normalization failure journals
-`agent_attempt_rejected`; after retries are exhausted it journals `agent_failed` exactly like
-existing fail-closed agents. Inline producer and reviser retries MUST journal each rejected
-attempt before the next paid retry is attempted, so a crash between attempts resumes at the first
-unjournaled attempt and never loses a paid failed attempt. Committed role results are normalized
-only.
+`RunRoleAgent` wraps normal agent attempt handling for artifact-producing roles. Provider
+output is schema-validated against `ArtifactSchemaV1`, then role-normalized, then committed.
+Schema or normalization failure journals `agent_attempt_rejected`; after retries are
+exhausted it journals terminal `agent_failed` exactly like existing fail-closed agents.
+Inline producer and reviser retries MUST journal each rejected attempt before the next paid
+retry is attempted, so a crash between attempts resumes at the first unjournaled attempt and
+never loses a paid failed attempt. Committed role results are normalized only.
 
-Reviewer fanout uses the existing concurrent-region lane discipline (§6.9): workers run
-off-thread and MUST NOT write the journal directly; the single writer commits lane events in
-reviewer index order; each paid effect uses `ResolveIdempotency`; and first-failure semantics are
-computed from reviewer index order even if another worker finishes first. Completed lane events
-that exist before the halt are still journaled in that order, matching existing parallel behavior.
-Reviewer lanes MUST be bounded by an explicit finite timeout. The timeout is an operational
-runtime constant, not a DSL author option: the writer captures it as `reviewer_timeout_ms` in
-`refine_started.payload`, then execution and resume use that journaled value. A reviewer lane that
-exits or times out before producing a schema-valid review is converted into an `agent_failed` event
-at that reviewer's address and iteration, committed in reviewer-index order. The reference
-implementation uses matchable reasons `{:reviewer_timeout, timeout_ms}` and
-`{:reviewer_crashed, reason}`.
+`RunReviewerRoleAgent` is the reviewer-specific variant. It validates provider output
+against the reviewer adapter's role-owned schema (§9.5.2), normalizes to the canonical
+review map, and returns either `{:ok, events, review}` or
+`{:role_failed, events, role_failure}`. It MUST NOT return terminal `{:failed, ...}` for an
+expected reviewer failure. The following reviewer failures become `role_failure` data:
+
+- an `ExpectedProviderFailure` from §6.4.1 (`reason = {:provider_failure, kind, detail}`);
+- schema or adapter-normalization exhaustion after the reviewer's retry budget
+  (`reason = {:malformed_output, reason}`);
+- reviewer timeout (`reason = {:reviewer_timeout, timeout_ms}`);
+- reviewer lane exit caught by the refine reviewer scheduler
+  (`reason = {:reviewer_crashed, reason}`).
+
+Malformed provider return shapes, malformed expected-failure data, raised provider
+exceptions, malformed streams, and malformed usage/activity remain provider bugs (§6.4.1)
+and crash the live writer; `RunReviewerRoleAgent` MUST NOT turn provider bugs into
+role-failure data.
+
+Reviewer fanout uses the existing concurrent-region lane discipline (§6.9) with a different
+settlement contract: workers run off-thread and MUST NOT write the journal directly; the
+single writer commits lane events and `refine_role_failed` records in reviewer index order;
+each paid effect uses `ResolveIdempotency`; and scheduling remains unobservable. There is no
+"first failing reviewer" halt reason, because reviewer role failures are part of the
+round's decision data. Reviewer lanes MUST be bounded by an explicit finite timeout. The
+timeout is an operational runtime constant, not a DSL author option: the writer captures it
+as `reviewer_timeout_ms` in `refine_started.payload`, then execution and resume use that
+journaled value. A reviewer lane that exits or times out before producing a schema-valid
+review is converted into a `refine_role_failed` event at the refine address, not an
+`agent_failed` event.
+
+```
+CommitReviewerLanes(results, run_id, seq):
+  - Let {seq'} be seq, {reviews} be [], and {role_failures} be [].
+  - For each reviewer lane result in reviewer index order:
+    - If lane is {:ok, events, review}:
+      - Set {seq'} to CommitAll(run_id, seq', events).
+      - Append review to {reviews}.
+    - If lane is {:role_failed, events, failure}:
+      - Set {seq'} to CommitAll(run_id, seq', events).
+      - Set {seq'} to CommitAll(run_id, seq', [Event.refine_role_failed(failure)]).
+      - Append failure to {role_failures}.
+  - Return {:ok, seq', reviews, role_failures}.
+```
 
 `refine_started` is authoritative after it is journaled. On resume, role prompts, retries,
-labels, reviewers, input descriptor, `max_concurrency`, and `reviewer_timeout_ms` MUST be read from
-`refine_started.payload`, not from recompiled source at the same address.
+labels, reviewers, input descriptor, `max_concurrency`, `gates`, and
+`reviewer_timeout_ms` MUST be read from `refine_started.payload`, not from recompiled source
+at the same address.
 
 `ReplayDecision(address, round)` is replay-idempotent:
 
@@ -3186,9 +3585,16 @@ labels, reviewers, input descriptor, `max_concurrency`, and `reviewer_timeout_ms
   verbatim, including `artifact`, `reviewer_decisions`, `open_findings`, and `consensus`. Do not
   re-run reviewers, re-normalize reviewer results, recompute findings, or re-render a reviser
   prompt from the recompiled source.
-- If no decision exists, compute it only from already-journaled reviewer `agent_committed` events
-  for `(address ++ [1, reviewer_index], iteration = round)` after any missing reviewer lanes have
-  been run and committed. A partial reviewer set is not enough to compute a decision.
+- If no decision exists, compute it only from a **settled reviewer set**: for each reviewer
+  declared in `refine_started.payload.reviewers`, exactly one of the following MUST already
+  be journaled for the round: a reviewer `agent_committed` event at
+  `(address ++ [1, reviewer_index], iteration = round)`, or a `refine_role_failed` event
+  for that reviewer/round. A partial reviewer set is not enough to compute a decision.
+  `consensus` is true iff every reviewer has a committed clear review and
+  `role_failures == []`; any role failure makes consensus false while preserving successful
+  reviewer findings. `report_snippets` is rebuilt only from committed reviewer
+  `agent_committed.result["report_snippets"]` values, in reviewer index order, so a crash
+  after reviewer commit but before `refine_round_decision` never loses snippet data.
 
 ### 9.8 Output and event payloads
 
@@ -3200,10 +3606,27 @@ input =
   | %{kind: :binding, name: atom(), ref: BindingRef}
 
 reviewer_descriptor =
-  %{index: non_neg_integer(), name: atom(), address: [i, 1, j], prompt: binary(), retries: 0, label: binary() | nil}
+  %{index: non_neg_integer(), name: atom(), address: [i, 1, j], prompt: binary(),
+    adapter: reviewer_adapter(), retries: 0, label: binary() | nil}
 
 reviser_descriptor =
   %{address: [i, 2], prompt: binary(), retries: non_neg_integer(), label: binary() | nil}
+
+cold_read_descriptor =
+  nil |
+  %{name: atom(), address: [i, 3], prompt: binary(), adapter: reviewer_adapter(),
+    retries: 0, label: binary() | nil, when: gate_predicate()}
+
+repair_descriptor =
+  nil |
+  %{address: [i, 4], prompt: binary(), retries: non_neg_integer(),
+    label: binary() | nil, when: gate_predicate()}
+
+gate_descriptor =
+  %{cold_read: cold_read_descriptor, repair: repair_descriptor,
+    halt_when: gate_predicate() | nil}
+
+raw_ref = %{run_id: binary(), seq: non_neg_integer(), type: atom(), address: address() | nil}
 ```
 
 ```
@@ -3211,8 +3634,10 @@ refine_started
   key: (type, address)
   payload:
     %{address, input, max_rounds, until: :unanimous, on_non_convergence,
-      max_concurrency, reviewer_timeout_ms, reviewers: [reviewer_descriptor],
-      reviser: reviser_descriptor, artifact_schema_version: 1, review_schema_version: 1}
+      max_concurrency, reviewer_timeout_ms, gates: gate_descriptor,
+      reviewers: [reviewer_descriptor],
+      reviser: reviser_descriptor, artifact_schema_version: 1,
+      review_adapter_versions: %{findings_v1: 1, defects_v1: 1, violations_v1: 1, concerns_v1: 1}}
 
 refine_round_started
   key: (type, address, round)
@@ -3222,39 +3647,64 @@ refine_round_decision
   key: (type, address, round)
   payload:
     %{address, round, consensus, approval_count, total,
-      reviewer_decisions: [reviewer_decision], artifact, open_findings: [open_finding]}
+      reviewer_decisions: [reviewer_decision], artifact, open_findings: [open_finding],
+      role_failures: [role_failure], failed_reviewers: [atom()], report_snippets: [binary()]}
+
+refine_role_failed
+  key: (type, address, role, round, role_address)
+  payload:
+    %{address, role, role_address, round, reviewer, reviewer_index,
+      attempts, reason, detail, usage, activity}
+
+refine_gate_evaluated
+  key: (type, address, gate)
+  payload:
+    %{address, gate: :cold_read | :repair | :halt, predicate: gate_predicate() | nil,
+      result: boolean(), input_round, input_refs: [raw_ref]}
 
 refine_completed
   key: (type, address)
   payload:
-    %{address, converged, final_round, rounds, artifact, open_findings: [open_finding]}
+    %{address, converged, final_round, rounds, artifact, open_findings: [open_finding],
+      role_failures: [role_failure], failed_reviewers: [atom()], cold_read: cold_read_state | nil,
+      report_snippets: [binary()]}
 
 refine_non_converged
   key: (type, address)
   payload:
-    %{address, reason: :max_rounds, final_round, rounds, artifact, open_findings: [open_finding]}
+    %{address, reason: :max_rounds | {:gate, gate_predicate()}, final_round, rounds, artifact, open_findings: [open_finding],
+      role_failures: [role_failure], failed_reviewers: [atom()], cold_read: cold_read_state | nil,
+      report_snippets: [binary()]}
 
 refine_input_invalid
   key: (type, address)
   payload: %{address, input, reason}
 ```
 
-`open_findings` is always present, including `[]`.
+`open_findings`, `role_failures`, `failed_reviewers`, and `report_snippets` are always
+present, including `[]`. `failed_reviewers` is the list of reviewer names from
+`role_failures`, ordered by reviewer index and deduped first occurrence wins. `cold_read` is
+`nil` unless a closed cold-read gate (§9.13) is configured and has run.
 
 `refine_non_converged` folds to failed status; resume returns
-`{:error, {:did_not_converge, address, :max_rounds}}`.
+`{:error, {:did_not_converge, address, reason}}`, where `reason` is the event payload's
+`reason` (`:max_rounds` or `{:gate, gate_predicate()}`).
 
 `refine_input_invalid` folds to failed status; resume returns
 `{:error, {:invalid_refine_input, address, reason}}`.
 
-`refine_completed` folds as successful refine output. `BoundValue({:refine, address})`
-returns `payload.artifact`, whether `converged` is true or false.
+`refine_completed` folds as successful refine output. `BoundRefineArtifact({:refine,
+address})` returns `payload.artifact`, whether `converged` is true or false.
+`BoundRefineResult({:refine, address})` returns the durable result projection defined in
+§9.11.
 
 ### 9.9 §7 run-model integration
 
-§7.2 directly includes the six event constructors listed in §9.8. Two of them are terminal
-failure events: `refine_non_converged` and `refine_input_invalid`. They are terminal in the same
-sense as `agent_failed`: no `run_completed` is written after them.
+§7.2 directly includes the refine event constructors listed in §9.8.
+`refine_role_failed` and `refine_gate_evaluated` are **non-terminal** read-model/replay data;
+they MUST NOT set run state to `:failed`. Two refine events are terminal failure events:
+`refine_non_converged` and `refine_input_invalid`. They are terminal in the same sense as
+`agent_failed`: no `run_completed` is written after them.
 
 §7.3 state transitions become:
 
@@ -3269,29 +3719,29 @@ Failure projection remains the single `%{address, attempts, reason}` map:
 
 - On `agent_failed`, keep the existing `%{address, attempts, reason}` projection.
 - On `refine_non_converged`, set
-  `failure = %{address: address, attempts: 0, reason: {:did_not_converge, address, :max_rounds}}`.
+  `failure = %{address: address, attempts: 0, reason: {:did_not_converge, address, reason}}`,
+  where `reason` is `refine_non_converged.payload.reason`.
 - On `refine_input_invalid`, set
   `failure = %{address: address, attempts: 0, reason: {:invalid_refine_input, address, reason}}`.
 
 §7.4 run API return values add:
 
-- `{:error, {:did_not_converge, address, :max_rounds}}` when `on_non_convergence: :fail`
-  reaches `max_rounds`.
+- `{:error, {:did_not_converge, address, reason}}` when `on_non_convergence: :fail`
+  reaches `max_rounds` (`reason == :max_rounds`) or a `halt_when:` gate fires
+  (`reason == {:gate, gate_predicate()}`).
 - `{:error, {:invalid_refine_input, address, reason}}` when a bound input cannot normalize to
   an artifact.
 
 §6.2 resume uses the folded failure projection for both new terminal events, so resuming a run
-failed by `refine_non_converged` returns `{:error, {:did_not_converge, address, :max_rounds}}`,
-and resuming a run failed by `refine_input_invalid` returns
+failed by `refine_non_converged` returns `{:error, {:did_not_converge, address, reason}}`,
+where `reason` is either `:max_rounds` or `{:gate, gate_predicate()}`; resuming a run
+failed by `refine_input_invalid` returns
 `{:error, {:invalid_refine_input, address, reason}}`. The JSON failure envelope remains the §7.5
 shape; both new failures serialize with `"attempts": 0` and `"reason": inspect(reason)`.
 
-§7.5 adds two CLI mappings:
-
-| internal code | JSON `code` | exit code |
-|---|---|---|
-| `:did_not_converge` | `did-not-converge` | 9 |
-| `:invalid_refine_input` | `invalid-refine-input` | 10 |
+The CLI mappings for these refine terminal failures are part of the §7.5 source-of-truth
+table: `:did_not_converge` serializes as `did-not-converge` with exit code `9`, and
+`:invalid_refine_input` serializes as `invalid-refine-input` with exit code `10`.
 
 ### 9.10 Migration guidance
 
@@ -3310,10 +3760,199 @@ shape; both new failures serialize with `"attempts": 0` and `"reason": inspect(r
 ### 9.11 §10 dataflow integration
 
 §10.5 `Producer` includes `RefineStmt` as a bindable producer. `let :x = refine ...` inserts
-the refine node at address `[i]`, records
-`BindingEnv[:x] = {:refine, [i]}`, commits no `let` event, and resolves the value by folding
-the `refine_completed` event at `[i]`. `BoundValue({:refine, address})` returns
-`refine_completed.payload.artifact`.
+the refine node at address `[i]`, records `BindingEnv[:x] = {:refine, [i]}`, commits no
+`let` event, and exposes two deterministic folds:
+
+- `BoundRefineArtifact({:refine, address})` returns `refine_completed.payload.artifact` for
+  text rendering in `~P`.
+- `BoundRefineResult({:refine, address})` returns the structured result projection for
+  `emit_result(:x)` (§10.7a).
+
+The structured projection is the public JSON object `RefineResultJSON`:
+
+```json
+{
+  "artifact": "<string>",
+  "converged": true,
+  "rounds": 1,
+  "finalRound": 0,
+  "openFindings": [],
+  "finalOpenDefects": [],
+  "roleFailures": [],
+  "failedReviewers": [],
+  "reviewerDecisions": [],
+  "coldRead": null,
+  "reportSnippets": [],
+  "rawRefs": {"journal": []}
+}
+```
+
+`RefineResultJSON` MUST use exactly these string keys. It MUST NOT contain atom keys, atom
+values, tuples, structs, or `inspect/1`-only terms. The nested shapes are:
+
+```elixir
+OpenFindingJSON =
+  %{"reviewer" => string(), "reviewerIndex" => non_neg_integer(),
+    "id" => string(), "issue" => string(), "fix" => string()}
+
+RoleFailureDefectJSON =
+  %{"kind" => "role_failure", "role" => "reviewer" | "cold_read" | "repair",
+    "roleAddress" => [non_neg_integer()],
+    "reviewer" => string() | nil, "reviewerIndex" => non_neg_integer() | nil,
+    "id" => string(), "issue" => string(), "fix" => string(),
+    "reason" => ReasonJSON}
+
+FinalOpenDefectJSON =
+  OpenFindingJSON | RoleFailureDefectJSON
+
+ReviewerDecisionJSON =
+  %{"reviewer" => string(), "reviewerIndex" => non_neg_integer(),
+    "approved" => boolean(), "clear" => boolean(),
+    "adapter" => string(), "status" => "completed" | "failed"}
+
+RoleFailureJSON =
+  %{"role" => "reviewer" | "cold_read" | "repair",
+    "roleAddress" => [non_neg_integer()], "round" => non_neg_integer() | nil,
+    "reviewer" => string() | nil, "reviewerIndex" => non_neg_integer() | nil,
+    "attempts" => pos_integer(), "reason" => ReasonJSON,
+    "detail" => JsonValue | string() | nil, "usage" => UsageJSON | nil,
+    "activity" => [JsonObject]}
+
+ReasonJSON =
+  %{"code" => "provider_failure", "kind" => string(), "detail" => JsonValue}
+  | %{"code" => "malformed_output", "detail" => string()}
+  | %{"code" => "reviewer_timeout" | "cold_read_timeout", "timeoutMs" => non_neg_integer()}
+  | %{"code" => "reviewer_crashed" | "cold_read_crashed" | "repair_failed", "detail" => string()}
+
+ColdReadJSON =
+  %{"state" => "completed", "openFindings" => [OpenFindingJSON],
+      "reviewerDecision" => ReviewerDecisionJSON, "reportSnippets" => [string()],
+      "repaired" => boolean()}
+  | %{"state" => "failed", "roleFailure" => RoleFailureJSON, "repaired" => false}
+```
+
+Role failure conversion is normative. `BoundRefineResult` and every JSON status projection
+that exposes role failures MUST use these algorithms; they MUST NOT expose internal atoms,
+tuples, structs, or host `inspect/1` strings directly.
+
+```
+RoleFailureToJSON(f):
+  - Return %{
+      "role" => Atom.to_string(f.role),
+      "roleAddress" => f.role_address,
+      "round" => f.round,
+      "reviewer" => if f.reviewer == nil, do: nil, else: Atom.to_string(f.reviewer),
+      "reviewerIndex" => f.reviewer_index,
+      "attempts" => f.attempts,
+      "reason" => ReasonToJSON(f.reason),
+      "detail" => RoleFailureDetailToJSON(f.detail),
+      "usage" => UsageToJSON(f.usage),
+      "activity" => ActivityToJSON(f.activity)
+    }.
+
+ReasonToJSON({:provider_failure, kind, detail}):
+  - Return %{"code" => "provider_failure", "kind" => Atom.to_string(kind),
+      "detail" => ProviderFailureDetailToJSON(detail)}.
+ReasonToJSON({:malformed_output, detail}):
+  - Return %{"code" => "malformed_output", "detail" => DiagnosticString(detail)}.
+ReasonToJSON({:reviewer_timeout, timeout_ms}):
+  - Return %{"code" => "reviewer_timeout", "timeoutMs" => timeout_ms}.
+ReasonToJSON({:cold_read_timeout, timeout_ms}):
+  - Return %{"code" => "cold_read_timeout", "timeoutMs" => timeout_ms}.
+ReasonToJSON({:reviewer_crashed, detail}):
+  - Return %{"code" => "reviewer_crashed", "detail" => DiagnosticString(detail)}.
+ReasonToJSON({:cold_read_crashed, detail}):
+  - Return %{"code" => "cold_read_crashed", "detail" => DiagnosticString(detail)}.
+ReasonToJSON({:repair_failed, detail}):
+  - Return %{"code" => "repair_failed", "detail" => DiagnosticString(detail)}.
+
+ProviderFailureDetailToJSON(detail):
+  - Return detail unchanged.  ; §6.4.1 already requires ProviderFailureDetailValue.
+
+RoleFailureDetailToJSON(nil): Return nil.
+RoleFailureDetailToJSON(detail) when detail is a ProviderFailureDetailValue: Return detail.
+RoleFailureDetailToJSON(detail) when detail is a binary: Return detail.
+RoleFailureDetailToJSON(detail): Return DiagnosticString(detail).
+
+UsageToJSON(nil): Return nil.
+UsageToJSON(%Usage{input_tokens: i, output_tokens: o, total_tokens: t}):
+  - Return %{"inputTokens" => i, "outputTokens" => o, "totalTokens" => t}.
+
+ActivityToJSON(activity):
+  - Return activity unchanged.  ; provider activity was validated as [JsonObject] at §6.4.1.
+```
+
+`DiagnosticString` is the only way non-JSON diagnostic terms enter the public structured
+result. It is deterministic and host-independent for the term classes this specification
+allows role failures to journal:
+
+```
+DiagnosticString(term):
+  - Return DeterministicJSONEncode(DiagnosticValue(term)).
+
+DiagnosticValue(term):
+  - nil, boolean, integer, or binary string -> the same JSON scalar.
+  - atom -> %{"atom" => Atom.to_string(term)}.
+  - list -> map DiagnosticValue over elements in order.
+  - tuple -> %{"tuple" => [DiagnosticValue(element_0), ...]}.
+  - map -> %{"map" => entries}, where entries is the list of
+    %{"key" => DiagnosticValue(key), "value" => DiagnosticValue(value)} sorted by
+    DeterministicJSONEncode(DiagnosticValue(key)) bytewise ascending.
+  - any other host value -> %{"opaque" => "unsupported"}.
+
+DeterministicJSONEncode(value):
+  - Encode JSON without insignificant whitespace.
+  - Encode object keys in bytewise ascending order.
+  - Encode strings with the JSON escapes required by RFC 8259.
+```
+
+Crash and malformed-output details that need more fidelity than
+`%{"opaque" => "unsupported"}` MUST be converted to a binary or JSON value before the
+`refine_role_failed` event is committed. Once committed, public conversion is exactly the
+fold above.
+
+`UsageJSON` is `%{"inputTokens" => i, "outputTokens" => o, "totalTokens" => t}`. `rawRefs`
+contains JSON refs `%{"runId" => string(), "seq" => non_neg_integer(), "type" => string(),
+"address" => [non_neg_integer()]}`.
+`finalOpenDefects` is a list of `FinalOpenDefectJSON` values: the `openFindings` list
+unchanged, followed by `RoleFailuresAsDefects(roleFailures)`. It preserves failed reviewer
+lanes and gate-role failures as explicit defects without pretending they were successful
+review findings. `rawRefs` contains at least the terminal `refine_completed` journal ref and
+every `refine_round_decision`, `refine_role_failed`, `refine_gate_evaluated`, and gate-role
+`agent_activity`, `agent_committed`, `agent_attempt_rejected`, or `agent_failed` journal ref
+used to build the projection.
+
+```
+RoleFailuresAsDefects(role_failures):
+  - Let failures be the list produced by mapping each role failure through RoleFailureToJSON.
+  - Return the List produced by mapping each RoleFailureJSON f in failures, in order, to:
+    %{
+      "kind" => "role_failure",
+      "role" => f["role"],
+      "roleAddress" => f["roleAddress"],
+      "reviewer" => f["reviewer"],
+      "reviewerIndex" => f["reviewerIndex"],
+      "id" => "role_failure:" <> f["role"] <> ":" <> AddressPathString(f["roleAddress"]),
+      "issue" => "Refine role failed: " <> f["reason"]["code"],
+      "fix" => "Re-run or revise with the available successful findings; provider/runtime detail: " <> RenderJSONDetail(f["detail"]),
+      "reason" => f["reason"]
+    }
+```
+
+`RoleFailureDefectJSON` is deliberately not an `OpenFindingJSON`: `:cold_read` and `:repair`
+failures can have `reviewer == nil` and `reviewerIndex == nil`. Its `kind` is always
+`"role_failure"`, and its `id` is prefixed with `"role_failure:"` so consumers can
+distinguish infrastructure/role failures from reviewer-authored findings without guessing
+from nullable reviewer fields.
+`AddressPathString(address)` returns the slash-separated decimal path with a leading slash
+and no trailing slash; for example `[4, 3]` becomes `"/4/3"`.
+`RenderJSONDetail(nil) = ""`; for a string it returns the string; for any other `JsonValue`
+it returns deterministic JSON encoding with object keys sorted bytewise ascending.
+
+`cold_read_state()` in journal payloads is `nil` when no cold-read ran, otherwise the
+internal atom-keyed form of the completed/failed variants above. `ColdReadJSON` is its
+public JSON projection. The conversion is key-by-key and atom values become the strings
+shown in `ColdReadJSON`.
 
 The §10.11 `BindingRef` union extends from
 `{:node, address} | {:map, address} | {:element, over_ref}` to
@@ -3327,6 +3966,15 @@ ResolveRef(ref, run_id, lane):
 BoundRefineArtifact(run_id, address):
   - Fold the journal for the refine_completed event at address.
   - Return that event's payload.artifact.
+
+BoundRefineResult(run_id, address):
+  - Fold the journal for the refine_completed event at address.
+  - Fold the journal for all refine_round_decision, refine_role_failed, and
+    refine_gate_evaluated events whose payload.address == address, plus gate-role
+    agent_activity, agent_committed, agent_attempt_rejected, and agent_failed events whose
+    payload.address is address ++ [3] or address ++ [4].
+  - Convert the internal projection to `RefineResultJSON` above.
+  - Return that public JSON object.
 ```
 
 `{:refine, address}` is valid only after `refine_completed`; a terminal
@@ -3340,15 +3988,248 @@ Reviewers MAY run in any order or in parallel, since all observable reviewer eve
 reviewer index order and `OpenFindings` is totally ordered. Scheduling MUST NOT affect the
 verdict, the revision prompt, the terminal event, or the bound artifact.
 
+### 9.13 Closed schema-bound gates for cold-read, repair, and halt
+
+`refine` admits one narrow gate option language. It is **not** a top-level combinator, not a
+general `if`, and not a branch body: each gate can only trigger a built-in refine action
+over the current structured refine result projection.
+
+```
+RefineGates : `[` RefineGate (`,` RefineGate)* `]`
+RefineGate :
+  - `cold_read:` ColdReadGate
+  - `repair_when:` GatePredicate
+  - `halt_when:` GatePredicate
+
+ColdReadGate : `[` `reviewer:` ReviewerSpec `,` `when:` GatePredicate `]`
+
+GatePredicate :
+  - `path_exists` `(` JsonPointerString `)`
+  - `path_non_empty` `(` JsonPointerString `)`
+  - `path_count` `(` JsonPointerString `)` CompareOp IntegerLiteral
+  - `path_equals` `(` JsonPointerString `,` Literal `)`
+
+CompareOp : `>` | `<` | `>=` | `<=` | `==`
+JsonPointerString :: `"` JsonPointerCharacter* `"`      ; same raw-string rule as §10.4.1
+```
+
+Validation is compile-time and closed:
+
+- `gates:` MUST be a literal keyword list containing each gate key at most once.
+- `cold_read:` lowers its `ReviewerSpec` to a `cold_read_descriptor` at address
+  `address ++ [3]`; `repair_when:` lowers the existing `revise_with:` agent to a
+  `repair_descriptor` at address `address ++ [4]`. Both descriptors are stored in
+  `refine_started.payload.gates`; resume MUST use those journaled descriptors.
+- `JsonPointerString` MUST be a literal RFC 6901 pointer string beginning with `"/"` or the
+  empty string `""`; invalid escape sequences (`~` not followed by `0` or `1`) are rejected.
+- `path_equals` literals MUST pass `GateLiteralToJSON` below at compile time; unsupported
+  literal kinds and duplicate object keys after atom-to-string conversion are rejected.
+- A gate predicate evaluates against the provisional `BoundRefineResult` projection (§9.11),
+  not against arbitrary agent output. Unknown paths evaluate to missing; they do not raise.
+- `repair_when:` and `halt_when:` MAY both be present. Execution order is fixed:
+  cold-read, then repair, then halt. A true `halt_when:` after the cold-read/repair pass
+  wins over completion and commits `refine_non_converged` with
+  `reason: {:gate, gate_predicate()}`.
+
+Gate evaluation is a pure operation over the public `RefineResultJSON` shape (§9.11). Before
+evaluating a gate, the provisional internal projection is converted to the same string-keyed
+JSON object shape that `emit_result` would expose. Gate lookup does not use the template
+formatter's `JsonPointer.Get`, because gates must distinguish a missing path from a present
+JSON `null`.
+
+```
+GatePredicate.Evaluate(predicate, projection):
+  - Let json be RefineResultJSON(projection).
+  - If predicate is path_exists(pointer):
+    - Return GatePointer.Resolve(json, pointer) is {:present, _}.
+  - If predicate is path_non_empty(pointer):
+    - Let lookup be GatePointer.Resolve(json, pointer).
+    - If lookup is :missing: Return false.
+    - Otherwise let lookup be {:present, value}; Return GateNonEmpty(value).
+  - If predicate is path_count(pointer) op n:
+    - Let count be GateCount(GatePointer.Resolve(json, pointer)).
+    - Return CompareInteger(count, op, n).
+  - If predicate is path_equals(pointer, literal):
+    - Let lookup be GatePointer.Resolve(json, pointer).
+    - If lookup is :missing: Return false.
+    - Otherwise let lookup be {:present, value}.
+    - Let literal_json be GateLiteralToJSON(literal).  ; validation already proved this succeeds
+    - Return JSONEqual(value, literal_json).
+
+GatePointer.Resolve(value, pointer):
+  - If pointer == "": Return {:present, value}.
+  - Split pointer on "/" after the leading slash; unescape "~1" to "/" and "~0" to "~".
+  - Let current be value.
+  - For each token:
+    - If current is a JSON object and contains string key token: set current to current[token].
+    - Else if current is a JSON array and token is a canonical base-10 array index
+      (`"0"` or a non-empty digit sequence not starting with `"0"`) whose integer value is
+      less than length(current): set current to that zero-based element.
+    - Else Return :missing.
+  - Return {:present, current}.
+
+GateNonEmpty(value):
+  - If value is null: Return false.
+  - If value is a JSON string: Return byte_size(value) > 0.
+  - If value is a JSON array: Return length(value) > 0.
+  - If value is a JSON object: Return map_size(value) > 0.
+  - Otherwise Return true.  ; booleans and numbers are present non-null scalars; no truthiness
+
+GateCount(:missing): Return 0.
+GateCount({:present, null}): Return 0.
+GateCount({:present, value}) when value is a JSON array: Return length(value).
+GateCount({:present, value}) when value is a JSON object: Return map_size(value).
+GateCount({:present, _scalar}): Return 1.  ; strings, booleans, and numbers are scalars
+
+CompareInteger(left, op, right):
+  - `>`  returns left > right.
+  - `<`  returns left < right.
+  - `>=` returns left >= right.
+  - `<=` returns left <= right.
+  - `==` returns left == right.
+```
+
+`path_count` therefore counts list elements and object members; it does not count string
+bytes or characters. A missing path and a present JSON `null` both have count `0`, but only
+the latter satisfies `path_exists`.
+
+`path_equals` has no runtime coercion. Its right-hand literal is converted once during
+validation:
+
+```
+GateLiteralToJSON(literal):
+  - nil -> null.
+  - boolean, binary string, or integer -> the same JSON scalar.
+  - atom -> Atom.to_string(atom) as a JSON string.
+  - list -> map GateLiteralToJSON over elements in order.
+  - map -> convert each key:
+    - string key -> same string key.
+    - atom key -> Atom.to_string(key).
+    - any other key -> validation error.
+    Then convert values recursively and reject if two keys become the same string.
+  - float, tuple, PID/function/reference, or any other literal kind -> validation error.
+
+JSONEqual(a, b):
+  - null equals null.
+  - booleans equal only the same boolean.
+  - strings equal only byte-identical strings.
+  - integers equal only the same integer value.
+  - arrays equal iff they have the same length and pairwise JSONEqual elements.
+  - objects equal iff they have the same string-key set and JSONEqual values for every key.
+  - Values of different JSON kinds are not equal.
+```
+
+Consequences: `path_equals("/x", nil)` is true for a present JSON `null` and false for a
+missing `/x`; `path_equals("/x", :approved)` compares to the JSON string `"approved"`;
+`path_equals("/x", "1")` does not equal the JSON integer `1`; `path_non_empty("/x")` is
+true for `false` and `0` because gates do not use truthiness.
+
+Execution is deterministic, journaled, and bounded:
+
+```
+FinalizeRefine(node, artifact, base_terminal, base_reason, converged, round, open_findings, role_failures):
+  - Let projection be ProvisionalRefineResult(..., cold_read: nil, report_snippets).
+  - Let {cold_result} be ReplayOrEvaluateGate(node, :cold_read, projection).
+  - If cold_result is true:
+    - Let {projection} be RunOrReplayColdRead(node, projection).
+  - Let {repair_result} be ReplayOrEvaluateGate(node, :repair, projection).
+  - If repair_result is true:
+    - Let {projection} be RunOrReplayRepair(node, projection).
+  - Let {halt_result} be ReplayOrEvaluateGate(node, :halt, projection).
+  - If halt_result is true:
+    - Commit/replay refine_non_converged with reason {:gate, node.gates.halt_when}.
+    - Return {:halt, ctx, {:did_not_converge, node.address, {:gate, node.gates.halt_when}}}.
+  - If base_terminal is :non_converged:
+    - Commit/replay refine_non_converged with reason base_reason.
+    - Return {:halt, ctx, {:did_not_converge, node.address, base_reason}}.
+  - Commit/replay refine_completed with projection.
+  - Return {:cont, ctx with last_result = projection.artifact}.
+
+ReplayOrEvaluateGate(node, gate, projection):
+  - If node.gates has no descriptor/predicate for gate: Return false.
+  - If a refine_gate_evaluated event exists for (node.address, gate): Return payload.result.
+  - Let result be GatePredicate.Evaluate(predicate, projection).
+  - Commit refine_gate_evaluated(address, gate, predicate, result,
+      input_round: projection.final_round, input_refs: projection.raw_refs.journal).
+  - Return result.
+```
+
+`refine_gate_evaluated` is the replay boundary for gate booleans. Resume MUST NOT
+re-evaluate a gate whose event is already journaled, even if a script edit would change the
+predicate. It reuses the journaled `result` and the journaled descriptors in
+`refine_started.payload.gates`.
+
+Cold-read is one replayable reviewer-role effect:
+
+```
+RunOrReplayColdRead(node, projection):
+  - Let descriptor be refine_started.payload.gates.cold_read.
+  - Let outcome be ResolveIdempotency(prior, descriptor.address, 0).
+  - If outcome is {:committed, review, _usage}:
+    - Return projection with cold_read from that committed canonical review.
+  - If a refine_role_failed exists with role: :cold_read and role_address == descriptor.address:
+    - Return projection with cold_read = %{state: :failed, role_failure, repaired: false}
+      and role_failures including that failure.
+  - Otherwise run RunReviewerRoleAgent with role :cold_read, address descriptor.address,
+    iteration 0, adapter descriptor.adapter, prompt ColdReadPrompt(descriptor.prompt, projection),
+    and the same reviewer_timeout_ms captured in refine_started.
+  - On success, commit its ordinary agent events at [i,3] and return projection with
+    cold_read = %{state: :completed, open_findings, reviewer_decision, report_snippets,
+      repaired: false}.
+  - On expected provider/schema/timeout/crash lane failure, commit refine_role_failed with
+    role: :cold_read, reviewer: descriptor.name, reviewer_index: nil, round: nil, and return
+    projection with cold_read failed. Do not fail the run.
+```
+
+Repair is one replayable artifact-role effect:
+
+```
+RunOrReplayRepair(node, projection):
+  - Let descriptor be refine_started.payload.gates.repair.
+  - Let outcome be ResolveIdempotency(prior, descriptor.address, 0).
+  - If outcome is {:committed, artifact, _usage}:
+    - Return projection with artifact replaced by artifact and cold_read.repaired = true
+      when cold_read.state is :completed.
+  - If a refine_role_failed exists with role: :repair and role_address == descriptor.address:
+    - Return projection with that role_failure appended, artifact unchanged, and
+      cold_read.repaired unchanged or false.
+  - Otherwise run an artifact role agent at [i,4], iteration 0, with ArtifactSchemaV1 and
+    ArtifactNormalizer over RepairPrompt(descriptor.prompt, projection).
+  - On success, commit ordinary agent events at [i,4], replace artifact with the normalized
+    artifact, and set cold_read.repaired = true when cold_read.state is :completed.
+  - On ExpectedProviderFailure or schema/normalization exhaustion, commit refine_role_failed
+    with role: :repair, reviewer: nil, reviewer_index: nil, round: nil, and reason
+    {:repair_failed, underlying_reason}. Do not crash and do not commit terminal
+    agent_failed; artifact remains unchanged.
+```
+
+Gate role effects use ordinary idempotency keys `(run_id, [i,3], 0, attempt)` and
+`(run_id, [i,4], 0, attempt)`. Their successful paid attempts are ordinary
+`agent_committed` events and their rejected schema attempts are ordinary
+`agent_attempt_rejected` events, so budget, tool activity, raw refs, and resume reuse follow
+§6.4/§7.3 automatically. Their expected role failures are `refine_role_failed` events, so
+budget and tool activity are folded by §6.7.1 and §7.3. Provider bugs still crash the writer.
+
+This gate language covers the observed corpus cases:
+
+- cold-read only when a structured result has defects (`path_non_empty("/openFindings")`);
+- repair only when a cold-read returns defects (`path_non_empty("/coldRead/openFindings")`);
+- halt when a schema-bound build/review report says work is blocked
+  (`path_equals("/build/status", "blocked")`).
+
+It deliberately cannot select an arbitrary subtree, run unbounded loops, call user code, or
+evaluate host-language predicates.
+
 ---
 
 ## 10. Dataflow core and proposed extensions
 
 > **Status: dataflow core implemented; remaining surface proposed/deferred.** The reference
-> implementation has shipped the zero-new-event dataflow core: `let :name = agent(...)`,
+> implementation has shipped the zero-new-event dataflow/refine core: `let :name = agent(...)`,
 > `let :name = synthesize(...)`, `let :name = refine(...)`, top-level `agent(~P"...")`
-> prompt injection over previous `let` bindings, and terminal `emit(~P"...")`. This section is the normative home for that
-> dataflow addendum going forward while §1–§8 remain the frozen base specification, carrying
+> prompt injection over previous `let` bindings, terminal `emit(~P"...")`, and structured
+> terminal `emit_result(:name)`. This section is the normative home for that
+> dataflow/refine addendum going forward while §1–§8 remain the frozen base specification, carrying
 > only forward-reference notes to this section. `SPEC-DATAFLOW-PROPOSAL.md` remains design
 > provenance, not the primary spec.
 >
@@ -3381,21 +4262,23 @@ producer with `let`, render it through `~P`, and consume it from a later top-lev
 `emit`.
 
 **The thesis: add DATA FLOW, not CONTROL FLOW.** This extension would add the ability to **flow
-a journaled value into a later prompt or the terminal result** — and deliberately **not** add
-control flow: no general `if`, no value-dependent choice of which subtree runs, no unbounded
-iteration, no arbitrary computation. It changes only *what data a node's prompt is rendered
-from*, never which nodes run or how many times. The deferred `map` proposal is the one
+a journaled value into a later prompt, a template terminal value, or a closed structured result
+projection** — and deliberately **not** add control flow: no general `if`, no value-dependent
+choice of which subtree runs, no unbounded iteration, no arbitrary computation. It changes only
+*what data a node's prompt/terminal projection is derived from*, never which nodes run or how
+many times. The deferred `map` proposal is the one
 possible exception: it would add bounded, capped fan-out over a journaled collection and remains
 outside the implemented core.
 
 **The governing rule (the spine).** Three clauses apply to every idiom in §10:
 
-1. **Flow only journaled values, and only through deterministic renders.** A value MAY flow from
-   node *P* into node *Q*'s prompt (or the terminal result) **iff** *P*'s output is already a
+1. **Flow only journaled values, and only through closed projections.** A value MAY flow from
+   node *P* into node *Q*'s prompt or an `emit` terminal **iff** *P*'s output is already a
    committed journal event **before** *Q* executes, and the flow happens through the
    deterministic, total, closure-free `RenderText` of §4.4 — widened here (§10.4) to accept
-   journaled values as input. No interpolation (`"… #{expr} …"`), no computed value, no closure
-   ever enters a prompt.
+   journaled values as input. A value MAY flow into `emit_result` only through that producer's
+   explicitly specified result projection (§10.7a), never through `RenderText`. No interpolation
+   (`"… #{expr} …"`), no computed value, no closure ever enters a prompt or structured result.
 2. **Transform collections with nodes only — never lambdas.** The implemented core has no
    collection transform beyond existing `synthesize`. The deferred future forms keep the same
    rule: per-element work uses a **node** (`map`, one agent per element) and folding a collection
@@ -3440,11 +4323,12 @@ When promoted, §10 would amend the following shipped clauses. Each amendment is
 These are presented as **proposed amendments**; the shipped clauses in §1–§8 are unchanged and
 carry only the one-line forward-reference notes that point here.
 
-- **Principle 6 → Principle 6′ (journaled-values-only, deterministic-render-only).** A name MAY
+- **Principle 6 → Principle 6′ (journaled-values-only, deterministic-projection-only).** A name MAY
   be bound (via `let`, §10.5) only to a value **already committed to the journal** by a
   lexically-preceding node. A bound value MAY flow into a later node **only** through
   `RenderText` (§10.4) over an **inert `%Template{}`** whose only dynamic parts are
-  assigns-referencing-bindings. It MUST NOT flow through interpolation, a closure, arithmetic, a
+  assigns-referencing-bindings, or into `emit_result` through an explicitly specified public
+  result projection (§10.7a). It MUST NOT flow through interpolation, a closure, arithmetic, a
   general conditional, or any computed value. Every prompt and terminal value remains a
   deterministic function of journaled data (Principle 3). This forbids strictly more than
   "arbitrary interpolation would" and permits only the narrow, checked case.
@@ -3490,16 +4374,18 @@ carry only the one-line forward-reference notes that point here.
   terminal result is (a) committed to the journal by a lexically-preceding node and resolved by a
   pure fold, and (b) rendered by the deterministic, closure-free `RenderText`. Interpolation,
   closures, arithmetic-in-prompts, and computed values remain rejected.
-- **The closed-vocabulary cluster → 18-way when all §10 deferred forms ship.** Five shipped
+- **The closed-vocabulary cluster → 19-way when all deferred forms ship.** Five shipped
   clauses that fix the combinator *count* widen in lockstep from the live **14-way** baseline:
-  **Principle 1 → 1′** ("exactly **18** combinators — the shipped 14 plus `let`, `map`,
-  `gather`, `emit`"); **§2.4 → §2.4′** (recognized names 14 → 18); **§8 C1 → C1′** (reject any
-  form outside this widened vocabulary); **Rule 5.1.3**'s vocabulary set widened (so the four §10
-  names are not "unknown bare calls" — each gets its own `parse/2` clause); **§11.2** at-a-glance
-  table gains four rows. `collect` remains **body-only**. The implemented dataflow core currently
-  recognizes the live 14 plus `let` and `emit`; `gather` and `map` remain DEFER.
+  **Principle 1 → 1′** ("exactly **19** combinators — the shipped 14 plus `let`, `emit`,
+  `emit_result`, `gather`, and `map`"); **§2.4 → §2.4′** (recognized names 14 → live 17,
+  deferred 19); **§8 C1 → C1′** (reject any form outside this widened vocabulary); **Rule
+  5.1.3**'s vocabulary set widened (so the five added names are not "unknown bare calls" —
+  each gets its own `parse/2` clause); **§11.2** at-a-glance table gains five rows. `collect`
+  remains **body-only**. The implemented dataflow/refine core currently recognizes the live
+  14 plus `let`, `emit`, and `emit_result`; `gather` and `map` remain DEFER.
 - **Separately (terminal-value amendment): §5.10.2** ("a workflow MUST contain a `return`") is
-  widened by `emit` to "a `return` **or** an `emit`" (§10.7 / DF-E2).
+  widened by `emit` and `emit_result` to "a final `return`, `emit`, or `emit_result`"
+  (§10.7 / §10.7a / DF-E2 / DF-ER1).
 
 Every amendment is a strengthening. C2–C8 (except C1 → C1′) are untouched; `map` extends C7 with
 one more structural cap (`map.max`) and loses nothing.
@@ -3542,13 +4428,26 @@ Tag ::
   - StatementTag               ; `<% … %>` (no `=`) — rejected (Rule T.2)
   - CommentTag                 ; `<%# … %>` — rejected (Rule T.7)
   - LiteralEscapeTag           ; `<%%` — rejected (Rule T.8)
-AssignHole :: `<%=` TemplateWS* `@` AssignName TemplateWS* `%>`
+AssignHole :: `<%=` TemplateWS* HoleExpr TemplateWS* `%>`
+HoleExpr ::
+  - AssignExpr
+  - FormatExpr
+AssignExpr :: `@` AssignName
+FormatExpr ::
+  - `path` `(` AssignExpr `,` JsonPointerString `)`
+  - `flatten` `(` AssignExpr (`,` JsonPointerString)? `)`
+  - `count` `(` AssignExpr (`,` JsonPointerString)? `)`
+  - `numbered_findings` `(` AssignExpr (`,` JsonPointerString)? `)`
+  - `truncate` `(` AssignExpr `,` IntegerLiteral `)`
 StatementTag :: `<%` [lookahead != `=` and != `#` and != `%`] TagBody `%>`
 CommentTag :: `<%#` TagBody `%>`
 LiteralEscapeTag :: `<%%` TagBody `%>`
 TagBody :: (SourceCharacter but not the sequence `%>`)*
-AssignName :: (Letter | `_`) (Letter | Digit | `_`)*   ; recognizer ~r/\A@([A-Za-z_][A-Za-z0-9_]*)\z/
-TemplateWS :: ' ' | '\t' | '\n' | '\r'          ; space, tab, line terminators (literal characters)
+AssignName :: (Letter | `_`) (Letter | Digit | `_`)*   ; recognizer ~r/\A[A-Za-z_][A-Za-z0-9_]*\z/
+JsonPointerString :: `"` JsonPointerCharacter* `"`      ; RFC 6901 pointer literal after unescaping
+JsonPointerCharacter :: SourceCharacter but not `"` or `\`
+JsonPointerCharacter :: `\` (`"` | `\`)
+TemplateWS :: U+0020 | U+0009 | U+000A | U+000D         ; space, tab, LF, CR
 ```
 
 The sigil **delimiter** (`~P"…"`, `~P"""…"""`, `~P[…]`, `~P/…/`, …) is Elixir's own concern and
@@ -3561,21 +4460,24 @@ wherever `<%` (`EExTagOpen`) begins it MUST be lexed as the start of a `Tag`, ne
 closed by `%>` before end-of-template is a compile error (Rule T.6), not a fallback to text.
 The implemented core also rejects any raw `#{` sequence before tag scanning (Rule T.9); even
 though uppercase sigils would otherwise treat it as literal text, the prompt-template surface keeps
-all dynamic holes in the single `<%= @name %>` vocabulary.
+all dynamic holes in the closed `HoleExpr` vocabulary above.
 
 **10.4.2 The inert `%Template{}` struct (semantic model).**
 
 ```
 %Workflow.Template{
-  segments :: [String.t()],   ; alternating literal text runs; length(assigns) + 1
-  assigns  :: [String.t()]    ; referenced assign names, in source order
+  segments :: [String.t()],   ; alternating literal text runs; length(holes) + 1
+  holes    :: [TemplateHole.t()],
+  assigns  :: [String.t()]    ; referenced assign names, in source order, duplicates retained
 }
 ```
 
 - Every `segments` entry is a **binary** (a slice of `raw`), never a charlist. For `n` holes,
   `segments` contains `n + 1` entries: the literal text before the first hole, the text between
-  holes, and the final tail. Empty text runs are retained. `assigns` stores the scanned assign
-  names as strings in the same order as the holes.
+  holes, and the final tail. Empty text runs are retained. `holes` stores parsed inert
+  formatter records in the same order as the holes. `assigns` stores the scanned assign names
+  as strings in source order and is used for name-resolution; a formatted hole still
+  contributes its underlying assign name.
 - An `@name` inside a template is **template syntax, not Elixir** — a scanned run of characters,
   never a variable or module-attribute AST node; macro hygiene does not apply. The struct holds
   **zero closures** and is `Macro.escape`-able into a compile-time constant (Principle 7).
@@ -3593,32 +4495,45 @@ the lowered template. It calls **no** `EEx.tokenize`, **no** `EEx.Engine`, and *
 ```
 Template.parse(raw, env):              ; a plain function CALLED FROM parse/2 — no macro expansion
   - If raw contains the two-byte sequence `#{`: Return {:error, Finding at the sigil} (Rule T.9).
-  - Return Scan(raw, empty List, empty List, env).
+  - Return Scan(raw, empty List, empty List, empty List, env).
 
-Scan(source, segments, assigns, env):
+Scan(source, segments, holes, assigns, env):
   - If source contains no `<%`:
-    - Return {:ok, %Template{segments: reverse([source | segments]), assigns: reverse(assigns)}}.
+    - Return {:ok, %Template{segments: reverse([source | segments]),
+                             holes: reverse(holes),
+                             assigns: reverse(assigns)}}.
   - Let literal be the bytes before the first `<%`.
   - Let rest be the bytes after that opener.
-  - Return ScanTag(literal, rest, segments, assigns, env).
+  - Return ScanTag(literal, rest, segments, holes, assigns, env).
 
-ScanTag(literal, rest, segments, assigns, env):    ; rest is the suffix after `<%`
+ScanTag(literal, rest, segments, holes, assigns, env):    ; rest is the suffix after `<%`
   - If rest begins with `=`:
     - If the suffix after `=` contains no `%>`: Return {:error, Finding: missing `%>`} (Rule T.6).
     - Let body be the bytes strictly between `=` and the first `%>`.
     - Let trimmed be body with leading/trailing TemplateWS removed.
-    - If trimmed matches ~r/\A@([A-Za-z_][A-Za-z0-9_]*)\z/ capturing name:
+    - Let {hole} be ParseHoleExpr(trimmed).
+    - If {hole} is {:ok, hole}:
       - Let remaining be the bytes after the first `%>`.
-      - Return Scan(remaining, [literal | segments], [name | assigns], env).
-    - Otherwise: Return {:error, Finding: only `<%= @name %>` holes are allowed} (Rules T.1, T.3).
+      - Return Scan(remaining, [literal | segments], [hole | holes], [hole.assign | assigns], env).
+    - Otherwise: Return {:error, Finding: only closed template holes are allowed} (Rules T.1, T.3, T.10).
   - Otherwise:
-    - Return {:error, Finding: only `<%= @name %>` holes are allowed} (Rules T.2, T.7, T.8).
+    - Return {:error, Finding: only closed template holes are allowed} (Rules T.2, T.7, T.8).
+
+ParseHoleExpr(trimmed):
+  - If trimmed matches AssignExpr: Return {:ok, %{op: :identity, assign: name, args: []}}.
+  - If trimmed matches one of the five FormatExpr productions exactly:
+    - Validate any JsonPointerString with ParseJsonPointer.
+    - Validate any IntegerLiteral as a non-negative integer for truncate.
+    - Return {:ok, %{op, assign: name, args}}.
+  - Return :error.
 ```
 
 Every branch recurses on a strictly shorter suffix, returns, or raises — there is no
 fall-through. "No embedded Elixir" is a **structural** guarantee of the recognizer, not a
-validation applied after admitting a superset. Assign names are stored as strings; binding
-resolution compares them to `Atom.to_string(binding_name)`, so no template assign atom is created.
+validation applied after admitting a superset. The formatter names are not function calls;
+they are byte-recognized grammar terminals with fixed semantics. Assign names are stored as
+strings; binding resolution compares them to `Atom.to_string(binding_name)`, so no template
+assign atom is created.
 
 **10.4.4 Validation rules (each with the smallest counter-example).** Template-*shape* rules are
 enforced by the scanner as `parse/2` lowers the node; forbidden **expression** forms take the
@@ -3626,8 +4541,10 @@ forbidden-form `raise` path, a rejected **tag shape** with no embedded expressio
 `Finding`, both anchored at the sigil's `meta`. Name-resolution rules are checked by the
 **consuming** combinator's `parse/2` walk under the threaded `BindingEnv`.
 
-- **Rule T.1 — a hole is a bare assign.** `~P"Improve <%= @draft + 1 %>"` (arithmetic) and
-  `~P"Improve <%= String.upcase(@draft) %>"` (a call) are rejected.
+- **Rule T.1 — a hole is a bare assign or a closed formatter.**
+  `~P"Improve <%= @draft + 1 %>"` (arithmetic) and
+  `~P"Improve <%= String.upcase(@draft) %>"` (a host call) are rejected. The only admitted
+  formatter names are `path`, `flatten`, `count`, `numbered_findings`, and `truncate`.
 - **Rule T.2 — no control statements.** `~P"<% if @ok do %>yes<% end %>"` is rejected.
 - **Rule T.3 — no block expressions.** `~P"<%= for x <- @xs do %>...<% end %>"` is rejected.
 - **Rule T.4 — every referenced assign resolves to an in-scope binding.**
@@ -3645,6 +4562,9 @@ forbidden-form `raise` path, a rejected **tag shape** with no embedded expressio
 - **Rule T.9 — no raw interpolation marker.** `~P"literal #{x}"` is rejected by the implemented
   scanner even though uppercase sigils do not interpolate it; write literal braces as text that
   does not form the `#{` sequence, or use `<%= @x %>` for a real dataflow hole.
+- **Rule T.10 — JSON Pointer literals are checked.** `~P"<%= path(@r, \"open\") %>"` is
+  rejected because the pointer does not start with `"/"` or equal `""`; `~P"<%= path(@r,
+  \"/a~2b\") %>"` is rejected because `~2` is not an RFC 6901 escape.
 
 **10.4.5 Render.** Rendering reuses §4.4's `RenderText` unchanged.
 
@@ -3655,16 +4575,71 @@ RenderTemplate(template, run_id, bindings, lane):
 
 TemplateParts(template, bindings, lane):
   - Let parts be the List [{:text, first(template.segments)}].
-  - For each pair {name, text} from zip(template.assigns, tail(template.segments)), in order:
-    - Let ref be the binding whose atom key string equals name.
-    - Append ResolvePart(ref, lane) to parts.
+  - For each pair {hole, text} from zip(template.holes, tail(template.segments)), in order:
+    - Let ref be the binding whose atom key string equals hole.assign.
+    - Let value_part be ResolvePart(ref, lane).
+    - Append ApplyFormatter(hole, value_part, run_id, lane) to parts.
     - Append {:text, text} to parts.
   - Return parts.
 
 ResolvePart(ref, lane):
   - If ref is {:node, address}: Return {:bound_value, ref}.
   - If ref is {:map, address}: Return {:bound_list, ref}.      ; deferred map/gather support
+  - If ref is {:refine, address}: Return {:bound_refine, ref}.
   - If ref is {:element, over}: Resolve per the deferred map lane rules in §10.11.
+
+ApplyFormatter(hole, value_part, run_id, lane):
+  - If hole.op is :identity:
+    - If value_part is {:bound_refine, ref}: Return {:bound_refine_artifact, ref}.
+    - Return value_part.                                        ; preserves existing RenderText behavior
+  - Let value be MaterializeFormatterPart(value_part, run_id, lane).
+  - If hole.op is :path: Return JsonPointer.Get(value, hole.args.pointer).
+  - If hole.op is :flatten: Return Flatten(JsonPointer.Get(value, hole.args.pointer or "")).
+  - If hole.op is :count: Return Count(JsonPointer.Get(value, hole.args.pointer or "")).
+  - If hole.op is :numbered_findings:
+    - Return NumberedFindings(JsonPointer.Get(value, hole.args.pointer or "")).
+  - If hole.op is :truncate: Return Truncate(RenderText(value), hole.args.max_bytes).
+
+MaterializeFormatterPart(value_part, run_id, lane):
+  - If value_part is {:bound_value, ref}: Return ResolveRef(ref, run_id, lane).
+  - If value_part is {:bound_list, ref}: Return ResolveRef(ref, run_id, lane).
+  - If value_part is {:bound_refine, {:refine, address}}: Return BoundRefineResult(run_id, address).
+  - If value_part is {:bound_refine_artifact, ref}: Return ResolveRef(ref, run_id, lane).
+  - Otherwise Return value_part.
+
+JsonPointer.Get(value, ""): Return value.
+JsonPointer.Get(value, pointer):
+  - Split pointer on "/" after the leading slash; unescape "~1" to "/" and "~0" to "~".
+  - For each token:
+    - If current value is a map and has string key token: step to that value.
+    - Else if current value is a map and has an existing atom key whose `Atom.to_string(key) == token`:
+      step to that value. Implementations MUST NOT create atoms from pointer tokens.
+    - Else if current value is a list and token is a base-10 non-negative integer less than length(list):
+      step to that zero-based element.
+    - Else Return nil.
+  - Return current value.
+
+Flatten(value):
+  - If value is a list: recursively flatten list elements left-to-right.
+  - Otherwise Return [value].
+
+Count(value):
+  - If value is nil: Return 0.
+  - If value is a list or map: Return length(value) or map_size(value).
+  - Otherwise Return 1.
+
+NumberedFindings(value):
+  - Let list be Flatten(value).
+  - For each item with 1-based index i:
+    - If item is a map, read string keys "id", "issue", and "fix" (falling back to atom keys).
+      Missing keys render as "".
+      Emit "#{i}. [#{id}] #{issue}\n   Fix: #{fix}".
+    - Otherwise emit "#{i}. " <> RenderText(item).
+  - Join emitted lines with "\n".
+
+Truncate(binary, max_bytes):
+  - Return the longest prefix of binary whose byte_size is <= max_bytes and which ends on a
+    valid UTF-8 boundary. No ellipsis is added.
 
 RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.Compiler.to_text/1)
   - If term is a binary: Return term unchanged.
@@ -3676,16 +4651,12 @@ RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.C
 > fixed host `inspect/1`. Authors needing cross-host byte stability MUST bind **binary** values
 > (or pre-render via `map`). Binary bindings render byte-identically everywhere.
 
-> **Note — structured bindings render as Elixir `inspect/1`, not JSON.** `RenderText`'s non-binary
-> branch renders a term via `inspect/1`, so a **schema-bound** producer's value — a decoded JSON
-> term (a map/list, §6.4.1), not a binary — splices **Elixir-literal** syntax into a downstream
-> `~P` prompt. Injecting `let :bugs = agent(…, schema: %{"type" => "array", …})` as `<%= @bugs %>`
-> yields text like `[%{"file" => "a.ex", "line" => 3}]` (Elixir map/atom syntax), **not** JSON — a
-> compiling but misleading prompt. An author feeding structured data to a downstream model SHOULD
-> therefore bind or produce a **binary** (prose) value, or pre-render it, and reserve structured
-> (non-binary) bindings for cases where Elixir-inspect text is acceptable to the consuming agent.
-> The same caveat applies to `emit` (§10.7) and `gather` (§10.9.1) prompts. This is a teaching note;
-> the behavior is exactly the `RenderText` above.
+> **Note — structured bindings default to Elixir `inspect/1`; use formatters for stable
+> projections.** A bare `<%= @bugs %>` still renders a decoded JSON term through
+> `inspect/1`. Authors who need a stable slice of structured data SHOULD use
+> `path(@bugs, "/items")`, `count(@bugs, "/items")`, `numbered_findings(@review,
+> "/openFindings")`, or `truncate(@draft, 4000)` rather than depending on whole-value
+> `inspect/1`.
 
 **10.4.6 Conformance (template layer).**
 
@@ -3694,9 +4665,9 @@ RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.C
   closure or quoted expression, and the scanner MUST NOT call `EEx.tokenize`, `EEx.Engine`, or
   `Code.string_to_quoted` on a hole body. The implemented core rejects raw `#{` (Rule T.9) and
   treats sigil modifiers as no-op surface metadata.
-- **DF-T2.** The scanner MUST admit only `<%= @name %>` holes and literal text and MUST accept and
-  reject **exactly** the §10.4.1 language — every other `<%…` opener and every raw `#{` opener is
-  a caller-located compile error at the sigil's `meta`.
+- **DF-T2.** The scanner MUST admit only closed `HoleExpr` holes and literal text and MUST accept
+  and reject **exactly** the §10.4.1 language — every other `<%…` opener and every raw `#{`
+  opener is a caller-located compile error at the sigil's `meta`.
 - **DF-T3.** `RenderTemplate` MUST render assign values through §4.4's `RenderText` unchanged, so a
   template and the corresponding `verify`/`judge` splice render an identical binary identically.
 - **DF-T4.** `template.assigns` MUST list referenced assign names in source order as strings,
@@ -3917,9 +4888,9 @@ host/version caveat under a cross-version resume). This is admitted by the amend
 Produce the run's terminal value by **rendering a template over bound values**, rather than by
 returning a compile-time literal (`return`).
 
-**10.7.1 Surface grammar.** `EmitStmt : `emit` `(` TemplateLiteral `)`` — **template-only** (unlike
-`gather`), where `TemplateLiteral` is the §10.6.1 syntactic symbol for a `~P` sigil token (its raw
-content the §10.4.1 lexical `Template` language).
+**10.7.1 Surface grammar.** `EmitStmt : `emit` `(` TemplateLiteral `)`` — **template-only**,
+where `TemplateLiteral` is the §10.6.1 syntactic symbol for a `~P` sigil token (its raw
+content is the §10.4.1 lexical `Template` language).
 
 ```elixir
 emit(~P"""
@@ -3946,10 +4917,10 @@ value flows into the terminal `run_completed` event.
 
 - **Rule E.1 — assigns resolve** (Rules T.4/T.5). `emit(~P"Result: <%= @answer %>")` with no
   preceding `let :answer` is rejected.
-- **Rule E.2 — final terminal from `return` OR `emit`.** §5.10.2 is widened: a workflow MUST end
-  with a final top-level `return` **or** `emit`; both set the terminal value. A workflow with a
-  `let` but no final `return`/`emit` is rejected (no terminal value), and any top-level node after
-  a `return`/`emit` is rejected.
+- **Rule E.2 — final terminal from `return`, `emit`, or `emit_result`.** §5.10.2 is widened:
+  a workflow MUST end with a final top-level `return`, `emit`, or `emit_result`; each sets the
+  terminal value. A workflow with a `let` but no final terminal is rejected (no terminal value),
+  and any top-level node after a terminal is rejected.
 - **Rule E.3 — `emit` is top-level-only** (Tier-1 restriction), mirroring `let`/`map`/`gather`.
 - **Rule E.4 — `emit`'s argument MUST be a `~P` Template** (active guard). `parse/2`'s `emit`
   clause MUST match `{:emit, meta, [{:sigil_P, _, _}]}` and reject any other argument. The real
@@ -3984,13 +4955,56 @@ marker is RECOMMENDED-not-required for observability.)
 
 - **DF-E1.** `emit` MUST set the terminal value to a deterministic `RenderTemplate` fold over the
   journal; the value MUST be journaled in `run_completed.value`.
-- **DF-E2.** A workflow MUST end with a final top-level `return` or `emit`; that final terminal
-  node supplies the terminal value.
+- **DF-E2.** A workflow MUST end with a final top-level `return`, `emit`, or `emit_result`;
+  that final terminal node supplies the terminal value.
 - **DF-E3.** `emit` MUST commit no paid effect and MUST NOT allow later top-level nodes; the
   compiler enforces terminal-final placement.
 - **DF-E4.** `emit`'s argument MUST be a `~P` `Template`; `parse/2` MUST match `{:emit, meta,
   [{:sigil_P, _, _}]}` and actively reject any non-template argument with a caller-located `Finding`
   — never stringify it via `to_text/1`.
+
+### 10.7a `emit_result` — emit structured terminal data — Verdict: ADOPT
+
+`emit` is text rendering. `emit_result` is the distinct structured terminal surface: it
+places a result-capable binding's deterministic projection directly into `run_completed.value`
+without converting it through `RenderText`, `inspect/1`, or a template.
+
+**10.7a.1 Surface grammar.**
+
+```
+EmitResultStmt : `emit_result` `(` BindingRefAtom `)`
+```
+
+The argument is exactly one literal binding atom. The current result-capable producer set is
+`refine` only; `agent`, `synthesize`, deferred `gather`, and deferred `map` are not
+result-capable unless a future section defines a result projection for them.
+
+**10.7a.2 Execution algorithm.**
+
+```
+RunEmitResult(node, run_id, ctx):
+  - Let ref be node.binding_ref.                         ; resolved at compile time
+  - If ref is {:refine, address}:
+    - Let value be BoundRefineResult(run_id, address).   ; §9.11
+    - Return {:cont, ctx with return = value}.
+```
+
+`emit_result` commits no event of its own. The structured value is journaled only as
+`run_completed.value`, exactly like `return` and `emit`. It is deterministic because
+`BoundRefineResult` is a pure fold over already-journaled refine events. The value MUST be
+the public JSON-encodable `RefineResultJSON` shape (§9.11); implementations MUST NOT store
+the internal atom-keyed projection in `run_completed.value`.
+
+**10.7a.3 Validation and conformance.**
+
+- **DF-ER1.** `emit_result` MUST be top-level and final, sharing Rule 5.10.2a.
+- **DF-ER2.** `emit_result` MUST NOT accept a `~P` template or literal value. Text belongs to
+  `emit`; literals belong to `return`; structured result projections belong to
+  `emit_result`.
+- **DF-ER3.** The emitted value MUST be the result projection, not the artifact-only binding
+  used by template rendering. For `refine`, this is `BoundRefineResult`, including
+  `artifact`, `converged`, `rounds`, `openFindings`, `finalOpenDefects`,
+  `roleFailures`, `failedReviewers`, `coldRead`, `reportSnippets`, and `rawRefs`.
 
 ### 10.8 pipeline-with-dataflow — Verdict: ADOPT (by composition)
 
@@ -4033,9 +5047,9 @@ the core dataflow slice.
 **10.9.1 `gather` — fold a bound collection into one value with a NODE (DEFER).** `synthesize`
 generalized from **literal** to **journaled** inputs.
 
-- **Grammar.** `GatherStmt : `gather` `(` Prompt `)`` — reuses `AgentStmt`'s
-  `Prompt : StringLiteral | TemplateLiteral` (§10.6.1) (a literal `gather` is grammatical but
-  pointless — it is `synthesize` with no inputs).
+- **Grammar.** `GatherStmt : `gather` `(` TemplateLiteral `)`` — template-only. A literal
+  `gather("...")` is rejected because it would be indistinguishable from `synthesize` with no
+  journaled inputs and would contradict `gather`'s purpose as a fold over bound values.
 - **Struct + addressing.** `gather` is dispatched as a **schemaless agent turn** — an ephemeral
   `%Agent{schema: nil, retries: 0}` built at **runtime** over its rendered template — analogous to
   how the implemented `synthesize` is dispatched: at **compile time** `synthesize` keeps its own
@@ -4255,6 +5269,14 @@ BoundRefineArtifact(run_id, address):          ; refine producer fold
   - Fold the journal for the refine_completed at address.
   - Return that event's payload.artifact.
 
+BoundRefineResult(run_id, address):            ; structured refine result fold
+  - Fold the journal for the refine_completed at address.
+  - Fold all refine_round_decision, refine_role_failed, and refine_gate_evaluated events
+    whose payload.address == address, plus gate-role agent_activity, agent_committed,
+    agent_attempt_rejected, and agent_failed events whose payload.address is
+    address ++ [3] or address ++ [4].
+  - Return the §9.11 `RefineResultJSON` public projection.
+
 BoundList(run_id, address):                    ; a map's ordered lane-result list
   - Let width be the width of the map_started at address (payload.width).
   - Return the List [ BoundValue(run_id, address ++ [e, 0]) for e in 0..(width - 1) ], in ascending e order.
@@ -4270,19 +5292,22 @@ recursive compile entry `parse/2` delegates to per form, §5) threads an additio
 level, the **empty** env `%{}` at the four nested positions (where templates are actively
 rejected), and the element-extended env at the `map` lane.
 
-**Journal events.** The dataflow **core** (Template + `let` + injection + `emit`) adds **zero** new
-event types: `let` rides the producer's existing `agent_committed`; injection rides
-`agent_committed.prompt` / `agent_attempt_rejected.prompt`; `emit` rides `run_completed.value`.
-Deferred `gather` would also ride one ordinary `agent_committed`. Only the **deferred** `map` adds
-two events (`map_started`, `map_completed`, §10.9.2). This preserves §7.1's "journal is the single
-source of truth": every bound value is a fold over an event the producer already commits.
+**Journal events.** The dataflow **core** (Template + `let` + injection + `emit` +
+`emit_result`) adds **zero** new event types: `let` rides the producer's existing
+`agent_committed`/`refine_completed`; injection rides `agent_committed.prompt` /
+`agent_attempt_rejected.prompt`; `emit` and `emit_result` ride `run_completed.value`.
+Deferred `gather` would also ride one ordinary `agent_committed`. Only the **deferred** `map`
+adds two events (`map_started`, `map_completed`, §10.9.2). This preserves §7.1's "journal is
+the single source of truth": every bound value is a fold over an event the producer already
+commits.
 
-**Result shape & exit codes.** Unchanged from §7. A template that fails name resolution (Rules
-T.4/T.5) or violates a template-shape rule (Rules T.1–T.3, T.6–T.9) is a **compile-time** error
-located at the offending declaration (exit 6, validation — §7.5), never a runtime failure. A
-schema-bound injected `agent` still fails closed on malformed structured output (retry-then-fail,
-exit 8) exactly as §6.4.2; the rendered prompt changes what the agent is asked, not the error
-model.
+**Result shape & exit codes.** Unchanged from §7 except for `emit_result`, which places a
+structured result projection in `run_completed.value`. A template that fails name resolution
+(Rules T.4/T.5) or violates a template-shape rule (Rules T.1–T.3, T.6–T.10) is a
+**compile-time** error located at the offending declaration (exit 6, validation — §7.5),
+never a runtime failure. A schema-bound injected `agent` still fails closed on malformed
+structured output (retry-then-fail, exit 8) exactly as §6.4.2; the rendered prompt changes
+what the agent is asked, not the error model.
 
 **Error model (pinned).** §10 introduces **no new** runtime error channel for the implemented
 core. `let` and an injected `agent` inherit §6.1's abort/propagate model verbatim (a producer
@@ -4294,12 +5319,13 @@ closed).
 
 ### 10.12 Conformance rollup
 
-An implementation of the shipped dataflow core MUST satisfy DF-T1..DF-T4 (template),
-DF-L1..DF-L4 (`let` over `agent`/`synthesize`), DF-P1..DF-P3 (top-level injection),
-DF-E1..DF-E4 (`emit`), and DF-C1 (pipeline-by-composition). It MUST keep `gather` and `map`
-out of the accepted surface until those DEFER sections are promoted, and it MUST reject the two
-excluded idioms per DF-X1 (`select`/`when`) and DF-X2 (`reduce`). A future promotion of the
-deferred idioms MUST additionally satisfy DF-G1..DF-G2 (`gather`) and DF-M1..DF-M5 (`map`).
+An implementation of the shipped dataflow/refine core MUST satisfy DF-T1..DF-T4 (template),
+DF-L1..DF-L4 (`let` over `agent`/`synthesize`/`refine`), DF-P1..DF-P3 (top-level injection),
+DF-E1..DF-E4 (`emit`), DF-ER1..DF-ER3 (`emit_result`), and DF-C1
+(pipeline-by-composition). It MUST keep `gather` and `map` out of the accepted surface until
+those DEFER sections are promoted, and it MUST reject the two excluded idioms per DF-X1
+(`select`/`when`) and DF-X2 (`reduce`). A future promotion of the deferred idioms MUST
+additionally satisfy DF-G1..DF-G2 (`gather`) and DF-M1..DF-M5 (`map`).
 
 Promotion of §10 into §1–§8 MUST also apply the §10.3 amendments in lockstep: it MUST NOT
 surface an inert `%Template{}` where a reader expects a prompt string (§6.4-commit′ / §7.2′ /
@@ -4335,14 +5361,15 @@ Requirements you MUST meet:
 2. Every base prompt, name, and value is a **compile-time literal string/atom** — never a
    variable, never `"… #{interpolation} …"`, never a function call. For dataflow, use only
    `let` over a previous `agent`/`synthesize` and render with `~P` holes like `<%= @draft %>`.
-3. The block terminates with a final `return(<literal>)` or `emit(~P"...")`.
+3. The block terminates with a final `return(<literal>)`, `emit(~P"...")`, or
+   `emit_result(:refine_binding)`.
 4. Inside a loop body use only `agent`, `log`, `phase`, `collect`.
 5. Compile with `mix compile`; every mistake is a located compile error.
 
-Note (terminal placement): `return` and `emit` set the terminal value and must be the final
-top-level statement. There is no early-exit or "return early on a condition" construct in this
-vocabulary; a `return(:early)` followed by more top-level work is rejected by the compiler.
-Put the `return`/`emit` you want as the result **last**.
+Note (terminal placement): `return`, `emit`, and `emit_result` set the terminal value and
+must be the final top-level statement. There is no early-exit or "return early on a
+condition" construct in this vocabulary; a `return(:early)` followed by more top-level work
+is rejected by the compiler. Put the terminal you want as the result **last**.
 
 ### 11.2 The closed vocabulary at a glance
 
@@ -4357,6 +5384,7 @@ Put the `return`/`emit` you want as the result **last**.
 | `let :name = synthesize(…)` | top-level producer | binds a synthesized result for later `~P` rendering |
 | `agent(~P"… <%= @name %> …")` | top-level only | renders previous `let` bindings into a prompt |
 | `emit(~P"… <%= @name %> …")` | final top-level only | terminal value rendered from previous `let` bindings |
+| `emit_result(:name)` | final top-level only | structured terminal result from a result-capable binding (`refine`) |
 | `return(:atom)` | literal | terminal value |
 | `parallel([agent(…), …])` | list of agents | barrier fan-out |
 | `pipeline([items…], [agent(…), …])` | items × stages | per-item lanes, no barrier — **the item is a journal label only; it is NOT injected into stage prompts** (§3.4, §11.4 Use-case G) |
@@ -4393,7 +5421,7 @@ body `log`; read the per-pass events instead — `iteration_started`, `loop_deci
 | `agent("go", retries: 1)` with no schema | requires a `schema:` | Add `schema: %{…}` or drop the options. |
 | `agent("go", label: :bad)` | label must be a string literal | Use a display string such as `label: "read:docs"`. |
 | `agent("go", schema: %{type: "object"})` (atom keys) | *compiles*, but validation silently no-ops (accepts all output — `schema["type"]` is `nil`, §6.4.2) | Use **string** keys: `schema: %{"type" => "object", "properties" => %{…}, "required" => […]}`. |
-| `return`/`emit` missing | workflow must terminate with `return` or `emit` | Add final `return(:ok)` (or any literal) or final `emit(~P"…")`. |
+| `return`/`emit`/`emit_result` missing | workflow must terminate with a final terminal | Add final `return(:ok)` (or any literal), final `emit(~P"…")`, or `emit_result(:review_loop)` for a result-capable binding. |
 | `collect` at top level | must appear inside a loop body | Put it inside `while_budget`/`until_dry`. |
 | `until_dry` body without `collect` | body must `collect` | Add `collect(into: :name)`. |
 | `verify("f", voters: 3, lenses: [:a])` | not both | Pick one panel selector. |

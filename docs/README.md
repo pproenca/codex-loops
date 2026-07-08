@@ -14,6 +14,7 @@ The distributable scheduler artifact is the `agent_loops` Mix release. The old
 - `docs/runtime.md`: architecture, journal model, packaging, providers.
 - `docs/workflow-authoring.md`: `.exs` workflow authoring and testing gate.
 - `docs/operations.md`: setup, build, release, proof, live proof.
+- `docs/adr/`: accepted architecture and packaging decisions.
 
 ## Quick Start
 

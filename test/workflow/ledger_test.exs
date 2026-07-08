@@ -12,7 +12,7 @@ defmodule Workflow.LedgerTest do
   alias Workflow.{Run, Journal, Ledger, Event}
   alias Workflow.Node.Agent
   alias Workflow.Provider.Usage
-  alias Workflow.Test.{EchoProvider, ScriptedProvider}
+  alias Workflow.Test.{EchoProvider, ProviderFailureProvider, ScriptedProvider}
 
   defmodule Demo do
     use Workflow
@@ -53,6 +53,32 @@ defmodule Workflow.LedgerTest do
     Event.agent_attempt_rejected(%Agent{address: [0], prompt: "p"}, 0, 0, %{}, :bad, usage(usage))
   end
 
+  defp failed(total_tokens) do
+    Event.agent_failed(
+      %Agent{address: [0], prompt: "p"},
+      0,
+      1,
+      {:provider_failure, :timeout, %{"message" => "deadline"}},
+      usage(total_tokens)
+    )
+  end
+
+  defp role_failed(total_tokens) do
+    Event.refine_role_failed(%{
+      address: [0],
+      role: :reviewer,
+      role_address: [0, 1, 0],
+      round: 0,
+      reviewer: :spec,
+      reviewer_index: 0,
+      attempts: 1,
+      reason: {:provider_failure, :timeout, %{"message" => "deadline"}},
+      detail: %{"message" => "deadline"},
+      usage: usage(total_tokens),
+      activity: []
+    })
+  end
+
   defp usage(total), do: %Usage{input_tokens: 0, output_tokens: total, total_tokens: total}
 
   describe "pure fold (Ledger.fold/1)" do
@@ -78,6 +104,36 @@ defmodule Workflow.LedgerTest do
 
       assert ledger.spent == 6
       assert Ledger.remaining(ledger) == 4
+    end
+
+    test "expected provider failure usage counts against the budget" do
+      ledger = Ledger.fold([started(10), failed(3)])
+
+      assert ledger.spent == 3
+      assert Ledger.remaining(ledger) == 7
+    end
+
+    test "refine role failure usage counts against the budget" do
+      ledger = Ledger.fold([started(10), role_failed(4)])
+
+      assert ledger.spent == 4
+      assert Ledger.remaining(ledger) == 6
+    end
+
+    test "schema-exhaustion failures with nil usage do not move the budget" do
+      ledger =
+        Ledger.fold([
+          started(10),
+          Event.agent_failed(
+            %Agent{address: [0], prompt: "p"},
+            0,
+            1,
+            {:missing_required, "label"}
+          )
+        ])
+
+      assert ledger.spent == 0
+      assert Ledger.remaining(ledger) == 10
     end
 
     test "an empty journal folds to the unbounded zero-spend default" do
@@ -153,6 +209,25 @@ defmodule Workflow.LedgerTest do
                Run.run(Classify, run_id: id, provider: {Workflow.Test.ExplodingProvider, []})
 
       assert Ledger.of(id) == ledger
+    end
+
+    test "expected provider failure usage is reconstructed from the journal" do
+      id = run_id()
+
+      assert {:error, {:provider_failure, [0], :timeout, %{"message" => "deadline"}}} =
+               Run.run(Demo,
+                 run_id: id,
+                 provider:
+                   {ProviderFailureProvider,
+                    detail: %{"message" => "deadline"},
+                    usage: %Usage{input_tokens: 2, output_tokens: 1, total_tokens: 3}},
+                 budget: 50
+               )
+
+      ledger = Ledger.of(id)
+
+      assert ledger.spent == 3
+      assert Ledger.remaining(ledger) == 47
     end
   end
 end

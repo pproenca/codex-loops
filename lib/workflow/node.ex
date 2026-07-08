@@ -31,6 +31,21 @@ defmodule Workflow.Node.Emit do
         }
 end
 
+defmodule Workflow.Node.EmitResult do
+  @moduledoc """
+  Completes the run with a structured public result projection for a result-capable
+  binding. This is intentionally distinct from `Emit`, which renders text.
+  """
+  @enforce_keys [:address, :binding, :ref]
+  defstruct [:address, :binding, :ref]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          binding: atom(),
+          ref: Workflow.Node.binding_ref()
+        }
+end
+
 defmodule Workflow.Node.Phase do
   @moduledoc "Marks entry into a named phase. Pure structural marker; no effects."
   @enforce_keys [:address, :name]
@@ -250,13 +265,30 @@ defmodule Workflow.Node.Refine do
     :max_rounds,
     on_non_convergence: :fail,
     max_concurrency: nil,
-    reviewer_timeout_ms: nil
+    reviewer_timeout_ms: nil,
+    gates: %{}
   ]
+
+  @type gate_predicate :: Workflow.Refine.Gate.predicate()
+
+  @type cold_read_gate :: %{
+          predicate: gate_predicate(),
+          reviewer: %{
+            name: atom(),
+            prompt: String.t(),
+            adapter: Workflow.Refine.ReviewerAdapter.t(),
+            agent: Workflow.Node.Agent.t()
+          }
+        }
+
+  @type repair_gate :: %{predicate: gate_predicate(), agent: Workflow.Node.Agent.t()}
+  @type halt_gate :: %{predicate: gate_predicate()}
 
   @type reviewer :: %{
           index: non_neg_integer(),
           name: atom(),
           prompt: String.t(),
+          adapter: Workflow.Refine.ReviewerAdapter.t(),
           agent: Workflow.Node.Agent.t()
         }
 
@@ -271,7 +303,12 @@ defmodule Workflow.Node.Refine do
           max_rounds: pos_integer(),
           on_non_convergence: :fail | :accept_current,
           max_concurrency: pos_integer() | nil,
-          reviewer_timeout_ms: pos_integer() | nil
+          reviewer_timeout_ms: pos_integer() | nil,
+          gates: %{
+            optional(:cold_read) => cold_read_gate(),
+            optional(:repair) => repair_gate(),
+            optional(:halt) => halt_gate()
+          }
         }
 end
 

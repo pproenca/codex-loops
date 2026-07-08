@@ -8,8 +8,9 @@ defmodule Workflow.DataflowCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Agent, Emit, Synthesize}
+  alias Workflow.Node.{Agent, Emit, EmitResult, Refine, Synthesize}
   alias Workflow.Template
+  alias Workflow.Template.Hole
 
   defp env, do: %{__ENV__ | file: "workflows/dataflow.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
@@ -26,7 +27,11 @@ defmodule Workflow.DataflowCompilerTest do
                %Agent{address: [0], prompt: "Write a draft."},
                %Emit{
                  address: [1],
-                 template: %Template{segments: ["Final draft: ", ""], assigns: ["draft"]},
+                 template: %Template{
+                   segments: ["Final draft: ", ""],
+                   holes: [%Hole{op: :identity, assign: "draft", args: %{}}],
+                   assigns: ["draft"]
+                 },
                  bindings: %{draft: {:node, [0]}}
                }
              ] = tree.nodes
@@ -49,7 +54,11 @@ defmodule Workflow.DataflowCompilerTest do
                },
                %Emit{
                  address: [1],
-                 template: %Template{segments: ["Summary: ", ""], assigns: ["summary"]},
+                 template: %Template{
+                   segments: ["Summary: ", ""],
+                   holes: [%Hole{op: :identity, assign: "summary", args: %{}}],
+                   assigns: ["summary"]
+                 },
                  bindings: %{summary: {:node, [0]}}
                }
              ] = tree.nodes
@@ -58,8 +67,31 @@ defmodule Workflow.DataflowCompilerTest do
     test "workflows may terminate with emit" do
       assert {:ok, tree} = parse(~s|emit(~P"done")|)
 
-      assert [%Emit{address: [0], template: %Template{segments: ["done"], assigns: []}}] =
+      assert [
+               %Emit{
+                 address: [0],
+                 template: %Template{segments: ["done"], holes: [], assigns: []}
+               }
+             ] =
                tree.nodes
+    end
+
+    test "emit_result terminates with a result-capable refine binding" do
+      assert {:ok, tree} =
+               parse("""
+               let :final = refine(agent("Draft."),
+                 reviewers: [reviewer(:spec, "Review."), reviewer(:runtime, "Runtime.")],
+                 revise_with: agent("Fix."),
+                 until: :unanimous,
+                 max_rounds: 1
+               )
+               emit_result(:final)
+               """)
+
+      assert [
+               %Refine{address: [0]},
+               %EmitResult{address: [1], binding: :final, ref: {:refine, [0]}}
+             ] = tree.nodes
     end
 
     test "a top-level agent may use a ~P template prompt over an earlier binding" do
@@ -76,6 +108,7 @@ defmodule Workflow.DataflowCompilerTest do
                  address: [1],
                  prompt: %Template{
                    segments: ["Improve this draft: ", ""],
+                   holes: [%Hole{op: :identity, assign: "draft", args: %{}}],
                    assigns: ["draft"]
                  },
                  bindings: %{draft: {:node, [0]}}
@@ -84,17 +117,17 @@ defmodule Workflow.DataflowCompilerTest do
              ] = tree.nodes
     end
 
-    test "a workflow without a terminal return or emit is a located finding" do
+    test "a workflow without a terminal return, emit, or emit_result is a located finding" do
       env = %{__ENV__ | file: "workflows/dataflow.ex", line: 7}
 
       assert {:error, %Finding{line: 7} = f} =
                Compiler.parse(Code.string_to_quoted!(~s|phase("p")\nlog("still running")|), env)
 
-      assert f.message =~ "must terminate with `return` or `emit`"
+      assert f.message =~ "must terminate with `return`, `emit`, or `emit_result`"
       assert Finding.format(f) =~ "workflows/dataflow.ex:7"
     end
 
-    test "a terminal return or emit must be the final top-level node" do
+    test "a terminal return, emit, or emit_result must be the final top-level node" do
       assert {:error, %Finding{line: 1} = f} = parse(~s|return(:ok)\nlog("after")|)
       assert f.message =~ "must be the final top-level node"
 
@@ -102,6 +135,107 @@ defmodule Workflow.DataflowCompilerTest do
                parse(~s|emit(~P"done")\nagent("after")|)
 
       assert f.message =~ "must be the final top-level node"
+
+      assert {:error, %Finding{line: 7} = f} =
+               parse("""
+               let :final = refine(agent("Draft."),
+                 reviewers: [reviewer(:spec, "Review."), reviewer(:runtime, "Runtime.")],
+                 revise_with: agent("Fix."),
+                 until: :unanimous,
+                 max_rounds: 1
+               )
+               emit_result(:final)
+               log("after")
+               """)
+
+      assert f.message =~ "must be the final top-level node"
+    end
+
+    test "emit_result rejects unknown, non-atom, and non-result bindings" do
+      assert {:error, %Finding{} = f} = parse(~s|emit_result(:missing)|)
+      assert f.message == "`emit_result` references unknown binding :missing"
+
+      assert {:error, %Finding{} = f} = parse(~s|emit_result(result(:final))|)
+      assert f.message == "`emit_result` expects a literal binding atom"
+
+      assert {:error, %Finding{} = f} =
+               parse("""
+               let :draft = agent("Draft.")
+               emit_result(:draft)
+               """)
+
+      assert f.message ==
+               "`emit_result` requires a result-capable binding; :draft is bound to agent"
+    end
+
+    test "emit_result is rejected inside loop bodies" do
+      assert {:error, %Finding{} = f} =
+               parse("""
+               let :final = refine(agent("Draft."),
+                 reviewers: [reviewer(:spec, "Review."), reviewer(:runtime, "Runtime.")],
+                 revise_with: agent("Fix."),
+                 until: :unanimous,
+                 max_rounds: 1
+               )
+
+               while_budget reserve: 0, max_iterations: 1 do
+                 emit_result(:final)
+               end
+
+               return(:ok)
+               """)
+
+      assert f.message == "`emit_result` is not allowed inside a loop body"
+    end
+
+    test "compiles adopted template formatter holes as inert parsed data" do
+      assert {:ok, tree} =
+               parse("""
+               let :review = agent("Review.")
+               let :draft = agent("Draft.")
+               emit(~P|ID <%= path(@review, "/items/0/id") %> Count <%= count(@review) %> Flat <%= flatten(@review, "/groups") %> Findings <%= numbered_findings(@review, "/items") %> Short <%= truncate(@draft, 5) %>|)
+               """)
+
+      assert [
+               %Agent{address: [0], prompt: "Review."},
+               %Agent{address: [1], prompt: "Draft."},
+               %Emit{
+                 template: %Template{
+                   segments: [
+                     "ID ",
+                     " Count ",
+                     " Flat ",
+                     " Findings ",
+                     " Short ",
+                     ""
+                   ],
+                   holes: [
+                     %Hole{
+                       op: :path,
+                       assign: "review",
+                       args: %{pointer: "/items/0/id"}
+                     },
+                     %Hole{op: :count, assign: "review", args: %{pointer: ""}},
+                     %Hole{
+                       op: :flatten,
+                       assign: "review",
+                       args: %{pointer: "/groups"}
+                     },
+                     %Hole{
+                       op: :numbered_findings,
+                       assign: "review",
+                       args: %{pointer: "/items"}
+                     },
+                     %Hole{op: :truncate, assign: "draft", args: %{max_bytes: 5}}
+                   ],
+                   assigns: ["review", "review", "review", "review", "draft"]
+                 },
+                 bindings: %{review: {:node, [0]}, draft: {:node, [1]}}
+               }
+             ] = tree.nodes
+
+      refute contains_function?(tree)
+      assert Macro.escape(tree)
     end
   end
 
@@ -155,7 +289,7 @@ defmodule Workflow.DataflowCompilerTest do
                emit(~P"Final draft: <%= draft %>")
                """)
 
-      assert f.message =~ "only `<%= @name %>` holes are allowed"
+      assert f.message =~ "only `<%= @name %>` or closed formatter holes are allowed"
 
       assert {:error, %Finding{line: 2} = f} =
                parse("""
@@ -174,6 +308,94 @@ defmodule Workflow.DataflowCompilerTest do
       assert f.message =~ "`for` holes are not allowed"
     end
 
+    test "rejects unsupported template formatter expressions and invalid arguments" do
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :review = agent("Review.")
+               emit(~P"<%= String.upcase(@review) %>")
+               """)
+
+      assert f.message =~ "only `<%= @name %>` or closed formatter holes are allowed"
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :review = agent("Review.")
+               emit(~P"<%= unknown(@review) %>")
+               """)
+
+      assert f.message =~ "only `<%= @name %>` or closed formatter holes are allowed"
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :review = agent("Review.")
+               emit(~P|<%= path(@review, "open") %>|)
+               """)
+
+      assert f.message =~ "invalid JSON pointer"
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :review = agent("Review.")
+               emit(~P|<%= path(@review, "/a~2b") %>|)
+               """)
+
+      assert f.message =~ "invalid JSON pointer"
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :draft = agent("Draft.")
+               emit(~P"<%= truncate(@draft, -1) %>")
+               """)
+
+      assert f.message =~ "truncate formatter expects a non-negative integer"
+    end
+
+    test "template holes trim only TemplateWS and truncate accepts only non-negative integer literals" do
+      nbsp = <<0xC2, 0xA0>>
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :draft = agent("Draft.")
+               emit(~P"<%= #{nbsp}@draft#{nbsp} %>")
+               """)
+
+      assert f.message =~ "only `<%= @name %>` or closed formatter holes are allowed"
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :draft = agent("Draft.")
+               emit(~P"<%= truncate(@draft, +1) %>")
+               """)
+
+      assert f.message =~ "truncate formatter expects a non-negative integer"
+
+      assert {:error, %Finding{line: 2} = f} =
+               parse("""
+               let :draft = agent("Draft.")
+               emit(~P"<%= truncate(@draft, -0) %>")
+               """)
+
+      assert f.message =~ "truncate formatter expects a non-negative integer"
+
+      assert {:ok, tree} =
+               parse("""
+               let :draft = agent("Draft.")
+               emit(~P"<%= truncate(@draft, 1_000) %><%= truncate(@draft, 0x10) %>")
+               """)
+
+      assert [
+               %Agent{},
+               %Emit{
+                 template: %Template{
+                   holes: [
+                     %Hole{op: :truncate, args: %{max_bytes: 1000}},
+                     %Hole{op: :truncate, args: %{max_bytes: 16}}
+                   ]
+                 }
+               }
+             ] = tree.nodes
+    end
+
     test "rejects raw statement and comment tags in templates" do
       assert {:error, %Finding{line: 2} = f} =
                parse("""
@@ -181,7 +403,7 @@ defmodule Workflow.DataflowCompilerTest do
                emit(~P"<% if true do %>x<% end %>")
                """)
 
-      assert f.message =~ "only `<%= @name %>` holes are allowed"
+      assert f.message =~ "only `<%= @name %>` or closed formatter holes are allowed"
 
       assert {:error, %Finding{line: 2} = f} =
                parse("""
@@ -189,7 +411,7 @@ defmodule Workflow.DataflowCompilerTest do
                emit(~P"<%# comment %><%= @draft %>")
                """)
 
-      assert f.message =~ "only `<%= @name %>` holes are allowed"
+      assert f.message =~ "only `<%= @name %>` or closed formatter holes are allowed"
     end
 
     test "rejects inadmissible binding names" do

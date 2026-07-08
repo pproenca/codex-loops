@@ -238,7 +238,7 @@ defmodule Workflow.CompilerTest do
       assert {:error, %Finding{line: 7} = f} =
                Compiler.parse(Code.string_to_quoted!(~s|phase("p")\nlog("hi")|), env)
 
-      assert f.message =~ "must terminate with `return` or `emit`"
+      assert f.message =~ "must terminate with `return`, `emit`, or `emit_result`"
       assert Finding.format(f) =~ "workflows/demo.ex:7"
     end
   end

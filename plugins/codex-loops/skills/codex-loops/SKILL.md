@@ -24,8 +24,9 @@ when set.
 - `workflow_start`: start a run from an existing workflow script. Use
   `provider: "mock"` for offline proof and `provider: "codex"` only after
   approval, because it spends a real Codex turn.
-- `workflow_status`: read the scheduler's journal-backed run projection.
-- `workflow_inspect`: read ordered scheduler event projections.
+- `workflow_status`: read the public §7.5 journal-backed status projection.
+- `workflow_inspect`: read the public §7.5 inspect/status projection with ordered
+  `rawRefs.journal`.
 - `workflow_resume`: resume an existing run through the scheduler API.
 - `workflow_open_ui`: return the Phoenix LiveView run URL.
 

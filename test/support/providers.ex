@@ -285,6 +285,35 @@ defmodule Workflow.Test.ExplodingProvider do
     do: raise("provider was called when a journaled effect should have been replayed")
 end
 
+defmodule Workflow.Test.ProviderFailureProvider do
+  @moduledoc """
+  Returns a SPEC-level expected provider failure instead of crashing the writer.
+
+  Tests use this to prove provider-side quota/timeout/unavailable/model-limit
+  failures are journaled as data, preserving usage and activity for the failed
+  paid turn.
+  """
+  @behaviour Workflow.Provider
+
+  alias Workflow.Provider.Usage
+
+  @impl true
+  def run_agent(prompt, _schema, key, opts) do
+    if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt, key})
+
+    kind = Keyword.get(opts, :kind, :timeout)
+    detail = Keyword.get(opts, :detail, %{"message" => "provider timeout"})
+    usage = Keyword.get(opts, :usage, %Usage{input_tokens: 4, output_tokens: 1, total_tokens: 5})
+
+    activity =
+      Keyword.get(opts, :activity, [
+        %{kind: "provider", label: "Provider", summary: "expected failure", status: "failed"}
+      ])
+
+    {:error, {:provider_failure, kind, detail, usage, activity}}
+  end
+end
+
 defmodule Workflow.Test.VerdictProvider do
   @moduledoc """
   A verify-panel mock that casts a **deterministic** verdict per voter, keyed on the
@@ -379,6 +408,17 @@ defmodule Workflow.Test.RefineProvider do
             end
 
           %{"artifact" => artifact}
+
+        [_refine_index, 3] ->
+          review = Keyword.fetch!(opts, :cold_read_review)
+
+          %{
+            "approved" => Keyword.fetch!(review, :approved),
+            "findings" => Keyword.get(review, :findings, [])
+          }
+
+        [_refine_index, 4] ->
+          %{"artifact" => Keyword.fetch!(opts, :repair_artifact)}
       end
 
     {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}

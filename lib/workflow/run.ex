@@ -10,7 +10,7 @@ defmodule Workflow.Run do
       `{:ok, run_id}`. Read state back with `Workflow.Status.of/1`.
   """
 
-  alias Workflow.{Tree, Run, Journal}
+  alias Workflow.{Tree, Run, Journal, Provider}
 
   @type option ::
           {:run_id, String.t()}
@@ -57,32 +57,39 @@ defmodule Workflow.Run do
   # Claim the write lease and return the idle writer's pid without starting work.
   defp spawn_writer(%Tree{} = tree, opts) do
     run_id = Keyword.get(opts, :run_id) || generate_run_id()
-    provider = Keyword.fetch!(opts, :provider)
     budget = Keyword.get(opts, :budget)
     script_path = Keyword.get(opts, :script_path)
 
-    # Index the run at its creation point so read commands can enumerate it and
-    # select the latest. Idempotent, so a resume of an existing run is a no-op.
-    :ok = Journal.register_run(run_id)
+    with {:ok, provider} <- resolve_provider(opts) do
+      # Index the run at its creation point so read commands can enumerate it and
+      # select the latest. Idempotent, so a resume of an existing run is a no-op.
+      :ok = Journal.register_run(run_id)
 
-    spec =
-      {Run.Writer,
-       run_id: run_id,
-       tree: tree,
-       provider: provider,
-       budget: budget,
-       script_path: script_path,
-       parent: self()}
+      spec =
+        {Run.Writer,
+         run_id: run_id,
+         tree: tree,
+         provider: provider,
+         budget: budget,
+         script_path: script_path,
+         parent: self()}
 
-    case DynamicSupervisor.start_child(Workflow.Run.Supervisor, spec) do
-      {:ok, pid} -> {:ok, run_id, pid}
-      {:error, {:already_started, pid}} -> {:error, {:already_running, pid}}
-      {:error, reason} -> {:error, reason}
+      case DynamicSupervisor.start_child(Workflow.Run.Supervisor, spec) do
+        {:ok, pid} -> {:ok, run_id, pid}
+        {:error, {:already_started, pid}} -> {:error, {:already_running, pid}}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
   defp spawn_writer(module, opts) when is_atom(module),
     do: spawn_writer(module.__workflow__(:tree), opts)
+
+  defp resolve_provider(opts) do
+    opts
+    |> Keyword.get(:provider)
+    |> Provider.resolve()
+  end
 
   defp generate_run_id, do: "run_" <> Base.encode16(:crypto.strong_rand_bytes(8), case: :lower)
 end

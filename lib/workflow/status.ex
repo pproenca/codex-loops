@@ -180,6 +180,34 @@ defmodule Workflow.Status do
     |> tick()
   end
 
+  defp apply_event(%Event{type: :refine_input_invalid, payload: p}, s) do
+    %{
+      s
+      | state: :failed,
+        failure: %{
+          address: p.address,
+          iteration: 0,
+          attempts: 0,
+          reason: {:invalid_refine_input, p.address, p.reason}
+        }
+    }
+    |> tick()
+  end
+
+  defp apply_event(%Event{type: :refine_non_converged, payload: p}, s) do
+    %{
+      s
+      | state: :failed,
+        failure: %{
+          address: p.address,
+          iteration: 0,
+          attempts: 0,
+          reason: {:did_not_converge, p.address, :max_rounds}
+        }
+    }
+    |> tick()
+  end
+
   # Fan-out markers are structural brackets; the branch/lane agent turns they enclose
   # already fold into `agents`/`usage` via `agent_committed`. They advance the event
   # count so the fold stays total over the versioned, additive log.
@@ -188,7 +216,11 @@ defmodule Workflow.Status do
               :parallel_started,
               :parallel_completed,
               :pipeline_started,
-              :pipeline_completed
+              :pipeline_completed,
+              :refine_started,
+              :refine_round_started,
+              :refine_round_decision,
+              :refine_completed
             ],
        do: tick(s)
 

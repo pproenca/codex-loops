@@ -45,6 +45,7 @@ defmodule Workflow.Compiler do
     WhileBudget,
     UntilDry,
     Verify,
+    Refine,
     Judge,
     Synthesize,
     FanOut,
@@ -67,6 +68,7 @@ defmodule Workflow.Compiler do
     :while_budget,
     :until_dry,
     :verify,
+    :refine,
     :judge,
     :synthesize,
     :fan_out
@@ -86,6 +88,40 @@ defmodule Workflow.Compiler do
     "properties" => %{"score" => %{"type" => "number"}},
     "required" => ["score"]
   }
+
+  @artifact_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "properties" => %{"artifact" => %{"type" => "string"}},
+    "required" => ["artifact"]
+  }
+
+  @review_schema %{
+    "type" => "object",
+    "additionalProperties" => false,
+    "properties" => %{
+      "approved" => %{"type" => "boolean"},
+      "findings" => %{
+        "type" => "array",
+        "items" => %{
+          "type" => "object",
+          "additionalProperties" => false,
+          "properties" => %{
+            "id" => %{"type" => "string"},
+            "blocking" => %{"type" => "boolean"},
+            "issue" => %{"type" => "string"},
+            "fix" => %{"type" => "string"}
+          },
+          "required" => ["id", "blocking", "issue", "fix"]
+        }
+      }
+    },
+    "required" => ["approved", "findings"]
+  }
+
+  @refine_required_options [:reviewers, :revise_with, :until, :max_rounds]
+  @refine_optional_options [:on_non_convergence, :max_concurrency]
+  @refine_allowed_options @refine_required_options ++ @refine_optional_options
 
   @pick_strategies [:max_score, :min_score]
 
@@ -176,7 +212,7 @@ defmodule Workflow.Compiler do
     with :ok <- binding_name(name, form, env),
          {:ok, node} <- node(producer, address, env, binding_env),
          :ok <- bindable_producer(node, form, env) do
-      {:ok, node, Map.put(binding_env, name, {:node, address})}
+      {:ok, node, Map.put(binding_env, name, binding_ref(node, address))}
     end
   end
 
@@ -208,11 +244,19 @@ defmodule Workflow.Compiler do
 
   defp bindable_producer(%Agent{}, _form, _env), do: :ok
   defp bindable_producer(%Synthesize{}, _form, _env), do: :ok
+  defp bindable_producer(%Refine{}, _form, _env), do: :ok
 
   defp bindable_producer(_other, form, env) do
     {:error,
-     Finding.at(env, form, "`let` only binds `agent(...)` or `synthesize(...)` producers")}
+     Finding.at(
+       env,
+       form,
+       "`let` only binds `agent(...)`, `synthesize(...)`, or `refine(...)` producers"
+     )}
   end
+
+  defp binding_ref(%Refine{}, address), do: {:refine, address}
+  defp binding_ref(_node, address), do: {:node, address}
 
   defp terminal_name(%Return{}), do: "return"
   defp terminal_name(%Emit{}), do: "emit"
@@ -392,6 +436,33 @@ defmodule Workflow.Compiler do
          mode: mode,
          voters: verify_voters(mode, lit, address),
          threshold: threshold
+       }}
+    end
+  end
+
+  # `refine agent("draft"), reviewers: [reviewer(:a, "..."), reviewer(:b, "...")],
+  # revise_with: agent("fix"), until: :unanimous, max_rounds: N` — V1 inline or
+  # bound artifact input plus a static reviewer panel.
+  defp node({:refine, _meta, [input, opts]} = form, address, env, binding_env) do
+    with :ok <-
+           refine_options(opts, form, env),
+         {:ok, input} <- refine_input(input, binding_env, address ++ [0], form, env),
+         {:ok, reviewers} <- refine_reviewers(opts, address, form, env),
+         {:ok, reviser} <- refine_reviser(opts, address ++ [2], form, env),
+         {:ok, until} <- refine_until(opts, form, env),
+         {:ok, max_rounds} <- refine_max_rounds(opts, form, env),
+         {:ok, on_non_convergence} <- refine_on_non_convergence(opts, form, env),
+         {:ok, max_concurrency} <- refine_max_concurrency(opts, length(reviewers), form, env) do
+      {:ok,
+       %Refine{
+         address: address,
+         input: input,
+         reviewers: reviewers,
+         reviser: reviser,
+         until: until,
+         max_rounds: max_rounds,
+         on_non_convergence: on_non_convergence,
+         max_concurrency: max_concurrency
        }}
     end
   end
@@ -851,6 +922,7 @@ defmodule Workflow.Compiler do
               :pipeline,
               :return,
               :verify,
+              :refine,
               :judge,
               :synthesize,
               :fan_out
@@ -1067,6 +1139,261 @@ defmodule Workflow.Compiler do
         {:text, "answering with a boolean verdict: "},
         {:literal, subject}
       ])
+
+  defp refine_input({:agent, _meta, _args} = input, _binding_env, address, form, env),
+    do: refine_producer(input, address, form, env)
+
+  defp refine_input(name, binding_env, _address, form, env) when is_atom(name) do
+    case Map.fetch(binding_env, name) do
+      {:ok, ref} ->
+        {:ok, {:binding, name, ref}}
+
+      :error ->
+        {:error,
+         Finding.at(env, form, "`refine` input binding #{inspect(name)} is not in scope",
+           hint: "bind it earlier with `let #{inspect(name)} = agent(...)`"
+         )}
+    end
+  end
+
+  defp refine_input(_input, _binding_env, _address, form, env) do
+    {:error,
+     Finding.at(env, form, "`refine` V1 input must be an inline `agent(\"...\")` or binding atom",
+       hint:
+         "use `refine agent(\"Draft.\"), ...` or `let :draft = ...` followed by `refine :draft, ...`"
+     )}
+  end
+
+  defp refine_options(opts, form, env) do
+    cond do
+      not keyword_literal?(opts) or not Keyword.keyword?(opts) ->
+        {:error,
+         Finding.at(env, form, "`refine` options must be a literal keyword list",
+           hint: "allowed options: #{Enum.join(@refine_allowed_options, ", ")}"
+         )}
+
+      unknown = Enum.find(Keyword.keys(opts), &(&1 not in @refine_allowed_options)) ->
+        {:error,
+         Finding.at(env, form, "`refine` option `#{unknown}:` is not allowed",
+           hint: "allowed options: #{Enum.join(@refine_allowed_options, ", ")}"
+         )}
+
+      duplicate_required = Enum.find(@refine_required_options, &(keyword_count(opts, &1) > 1)) ->
+        {:error,
+         Finding.at(
+           env,
+           form,
+           "`refine` option `#{duplicate_required}:` must appear exactly once"
+         )}
+
+      missing_required = Enum.find(@refine_required_options, &(keyword_count(opts, &1) == 0)) ->
+        {:error,
+         Finding.at(
+           env,
+           form,
+           "`refine` option `#{missing_required}:` must appear exactly once"
+         )}
+
+      duplicate_optional = Enum.find(@refine_optional_options, &(keyword_count(opts, &1) > 1)) ->
+        {:error,
+         Finding.at(
+           env,
+           form,
+           "`refine` option `#{duplicate_optional}:` must appear at most once"
+         )}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp keyword_count(opts, key),
+    do: Enum.count(opts, fn {candidate, _value} -> candidate == key end)
+
+  defp refine_producer({:agent, _meta, [prompt]} = form, address, _refine_form, env)
+       when is_binary(prompt) do
+    with {:ok, prompt} <- prompt_text(prompt, form, env, "refine producer prompt") do
+      {:ok,
+       {:producer,
+        %Agent{
+          address: address,
+          prompt: prompt,
+          schema: @artifact_schema,
+          retries: @default_retries
+        }}}
+    end
+  end
+
+  defp refine_producer({:agent, _meta, [{:<<>>, _, _parts}]} = form, _address, _refine_form, env),
+    do: {:error, interpolation_finding(form, env, "refine producer prompt")}
+
+  defp refine_producer(_input, _address, form, env) do
+    {:error,
+     Finding.at(env, form, "`refine` inline input must be `agent(\"...\")`",
+       hint: "bound input must be passed as a binding atom, e.g. `refine :draft, ...`"
+     )}
+  end
+
+  defp refine_reviewer_name(name, form, env) when is_atom(name) do
+    if String.match?(Atom.to_string(name), ~r/^[a-z_][a-zA-Z0-9_]*$/) do
+      {:ok, name}
+    else
+      {:error,
+       Finding.at(env, form, "inadmissible reviewer name #{inspect(name)}",
+         hint: "reviewer names must look like `:spec` or `:runtime`"
+       )}
+    end
+  end
+
+  defp refine_reviewer_name(_name, form, env),
+    do: {:error, Finding.at(env, form, "`reviewer/2` name must be an atom literal")}
+
+  defp refine_reviewers(opts, address, form, env) do
+    case Keyword.fetch(opts, :reviewers) do
+      {:ok, reviewers} when is_list(reviewers) ->
+        reviewers
+        |> Enum.with_index()
+        |> Enum.reduce_while({:ok, []}, fn {reviewer, index}, {:ok, acc} ->
+          case refine_reviewer(reviewer, address, index, env) do
+            {:ok, reviewer} -> {:cont, {:ok, [reviewer | acc]}}
+            {:error, _} = err -> {:halt, err}
+          end
+        end)
+        |> case do
+          {:ok, parsed} ->
+            parsed = Enum.reverse(parsed)
+
+            cond do
+              length(parsed) < 2 ->
+                {:error, Finding.at(env, form, "`refine` requires at least two reviewers")}
+
+              duplicate_reviewer_name?(parsed) ->
+                {:error, Finding.at(env, form, "`refine` reviewer names must be unique")}
+
+              true ->
+                {:ok, parsed}
+            end
+
+          {:error, _} = err ->
+            err
+        end
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`refine` reviewers must be a literal reviewer list")}
+
+      :error ->
+        {:error, Finding.at(env, form, "`refine` requires `reviewers:`")}
+    end
+  end
+
+  defp refine_reviewer({:reviewer, _meta, [name, prompt]} = form, address, index, env)
+       when is_binary(prompt) do
+    with {:ok, name} <- refine_reviewer_name(name, form, env),
+         {:ok, prompt} <- prompt_text(prompt, form, env, "reviewer prompt") do
+      agent = %Agent{
+        address: address ++ [1, index],
+        prompt: prompt,
+        label: Atom.to_string(name),
+        schema: @review_schema,
+        retries: 0
+      }
+
+      {:ok, %{index: index, name: name, prompt: prompt, agent: agent}}
+    end
+  end
+
+  defp refine_reviewer(
+         {:reviewer, _meta, [_name, {:<<>>, _, _parts}]} = form,
+         _address,
+         _index,
+         env
+       ),
+       do: {:error, interpolation_finding(form, env, "reviewer prompt")}
+
+  defp refine_reviewer(_reviewer, _address, _index, env),
+    do:
+      {:error, Finding.at(env, nil, "`reviewers:` entries must be `reviewer(:name, \"prompt\")`")}
+
+  defp duplicate_reviewer_name?(reviewers) do
+    names = Enum.map(reviewers, & &1.name)
+    Enum.uniq(names) != names
+  end
+
+  defp refine_reviser(opts, address, form, env) do
+    case Keyword.fetch(opts, :revise_with) do
+      {:ok, {:agent, _meta, [prompt]} = agent_form} when is_binary(prompt) ->
+        with {:ok, prompt} <- prompt_text(prompt, agent_form, env, "refine reviser prompt") do
+          {:ok,
+           %Agent{
+             address: address,
+             prompt: prompt,
+             schema: @artifact_schema,
+             retries: @default_retries
+           }}
+        end
+
+      {:ok, {:agent, _meta, [{:<<>>, _, _parts}]} = agent_form} ->
+        {:error, interpolation_finding(agent_form, env, "refine reviser prompt")}
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`refine` `revise_with:` must be `agent(\"...\")`")}
+
+      :error ->
+        {:error, Finding.at(env, form, "`refine` requires `revise_with:`")}
+    end
+  end
+
+  defp refine_until(opts, form, env) do
+    case Keyword.fetch(opts, :until) do
+      {:ok, :unanimous} -> {:ok, :unanimous}
+      {:ok, _} -> {:error, Finding.at(env, form, "`refine` `until:` must be `:unanimous`")}
+      :error -> {:error, Finding.at(env, form, "`refine` requires `until: :unanimous`")}
+    end
+  end
+
+  defp refine_max_rounds(opts, form, env) do
+    case Keyword.fetch(opts, :max_rounds) do
+      {:ok, n} when is_integer(n) and n > 0 ->
+        {:ok, n}
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`refine` `max_rounds:` must be a positive integer")}
+
+      :error ->
+        {:error, Finding.at(env, form, "`refine` requires `max_rounds:`")}
+    end
+  end
+
+  defp refine_on_non_convergence(opts, form, env) do
+    case Keyword.fetch(opts, :on_non_convergence) do
+      :error ->
+        {:ok, :fail}
+
+      {:ok, value} when value in [:fail, :accept_current] ->
+        {:ok, value}
+
+      {:ok, _} ->
+        {:error,
+         Finding.at(
+           env,
+           form,
+           "`refine` `on_non_convergence:` must be `:fail` or `:accept_current`"
+         )}
+    end
+  end
+
+  defp refine_max_concurrency(opts, reviewer_count, form, env) do
+    case Keyword.fetch(opts, :max_concurrency) do
+      :error ->
+        {:ok, reviewer_count}
+
+      {:ok, n} when is_integer(n) and n > 0 ->
+        {:ok, n}
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`refine` `max_concurrency:` must be a positive integer")}
+    end
+  end
 
   defp judge_candidates(candidates, form, env) do
     if is_list(candidates) and Macro.quoted_literal?(candidates) do

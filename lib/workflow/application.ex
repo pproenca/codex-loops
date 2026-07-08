@@ -8,6 +8,8 @@ defmodule Workflow.Application do
       released the instant it dies (no heartbeat, no pid polling).
     * `Workflow.PubSub` — post-commit broadcast bus for live read surfaces.
     * `Workflow.Journal` — owner of the append-only event-log ETS table.
+    * `Workflow.TaskSupervisor` — supervised, unlinked worker tasks for
+      failure-isolated concurrent regions such as `refine` reviewer panels.
     * `Workflow.Run.Supervisor` — dynamic supervisor for per-run writer processes.
     * `Workflow.Web.Endpoint` — the Phoenix endpoint serving the scheduler-snapshot
       LiveView. Started after `Workflow.PubSub` (its `pubsub_server`), and holding no
@@ -21,6 +23,7 @@ defmodule Workflow.Application do
       {Registry, keys: :unique, name: Workflow.Run.Registry},
       {Phoenix.PubSub, name: Workflow.PubSub},
       Workflow.Journal,
+      {Task.Supervisor, name: Workflow.TaskSupervisor},
       {DynamicSupervisor, name: Workflow.Run.Supervisor, strategy: :one_for_one},
       Workflow.Web.Endpoint
     ]

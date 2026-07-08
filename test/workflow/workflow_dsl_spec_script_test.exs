@@ -1,9 +1,7 @@
 defmodule Workflow.WorkflowDslSpecScriptTest do
   use ExUnit.Case, async: true
 
-  alias Workflow.Node.{Agent, FanOut, Parallel, Pipeline, UntilDry, WhileBudget}
-  alias Workflow.Node.Collect
-  alias Workflow.Predicate.{Compare, Count}
+  alias Workflow.Node.{Agent, FanOut, Parallel, Pipeline, Refine, UntilDry, WhileBudget}
   alias Workflow.Script
   alias Workflow.Tree
 
@@ -26,6 +24,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     assert prompts =~ ~s|Extract GROUND TRUTH for the "spec-structure" area|
     assert prompts =~ "SURGICAL EDIT — DO NOT REWRITE SPEC.md"
     assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
+    assert prompts =~ "The adversarial refine panel found blocking defects"
     assert prompts =~ "Resolve these final cold-read defects with TARGETED edits to §10 only"
 
     assert prompts =~
@@ -39,49 +38,54 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
              "read:spec-structure",
              "read:dataflow",
              "draft:spec",
-             "review:spec-completeness",
-             "review:implementation-fidelity",
-             "review:invariants",
-             "review:teachability",
-             "review:structural-lint",
-             "review:non-destructiveness",
-             "gate:consensus",
-             "revise:open-defects",
+             "spec_completeness",
+             "implementation_fidelity",
+             "invariants",
+             "teachability",
+             "structural_lint",
+             "non_destructiveness",
              "review:cold-read",
              "revise:cold-read",
              "verify:final"
            ]
   end
 
-  test "convergence loop stops when the panel reaches consensus" do
+  test "convergence loop uses refine until the panel reaches consensus" do
     assert {:ok, %Tree{nodes: nodes}} = Script.load_tree(@script_path)
 
-    assert %WhileBudget{
-             until: %Compare{op: :>=, left: %Count{acc: :consensus}, right: 1},
-             max_iterations: 5,
-             body: body
-           } = Enum.find(nodes, &match?(%WhileBudget{}, &1))
+    assert %Refine{
+             input: {:binding, :draft, {:node, _draft_address}},
+             until: :unanimous,
+             max_rounds: 5,
+             on_non_convergence: :accept_current,
+             reviewers: reviewers
+           } = Enum.find(nodes, &match?(%Refine{}, &1))
 
-    assert Enum.any?(body, &match?(%Collect{into: :consensus}, &1))
+    assert Enum.map(reviewers, & &1.name) == [
+             :spec_completeness,
+             :implementation_fidelity,
+             :invariants,
+             :teachability,
+             :structural_lint,
+             :non_destructiveness
+           ]
 
-    prompts = body |> agent_prompts() |> Enum.join("\n---PROMPT---\n")
-    assert prompts =~ "CONSENSUS GATE"
+    prompts = reviewers |> Enum.map(& &1.prompt) |> Enum.join("\n---PROMPT---\n")
+    assert prompts =~ "Return approved=false with blocking findings"
+    assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
+  end
 
-    assert %Agent{schema: schema, retries: 0} =
-             Enum.find(body, &match?(%Agent{label: "gate:consensus"}, &1))
+  test "final cold-read revision receives the bound cold-read output" do
+    assert {:ok, %Tree{} = tree} = Script.load_tree(@script_path)
 
-    assert schema == %{
-             "type" => "array",
-             "items" => %{
-               "type" => "object",
-               "properties" => %{
-                 "id" => %{"type" => "string", "const" => "unanimous"},
-                 "verdict" => %{"type" => "string", "const" => "pass"}
-               },
-               "required" => ["id", "verdict"],
-               "additionalProperties" => false
-             }
-           }
+    assert %Agent{
+             prompt: %Workflow.Template{assigns: ["cold_read"], segments: segments},
+             bindings: %{cold_read: {:node, _address}}
+           } = Enum.find(agents(tree), &match?(%Agent{label: "revise:cold-read"}, &1))
+
+    prompt = Enum.join(segments, "<cold_read>")
+    assert prompt =~ "COLD-READ OUTPUT:"
+    assert prompt =~ "<cold_read>"
   end
 
   defp phase_names(nodes) do
@@ -95,7 +99,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_prompts(nodes) when is_list(nodes),
     do: nodes |> Enum.flat_map(&agent_prompts/1)
 
-  defp agent_prompts(%Agent{prompt: prompt}), do: [prompt]
+  defp agent_prompts(%Agent{prompt: prompt}), do: [prompt_text(prompt)]
 
   defp agent_prompts(%Parallel{branches: branches}), do: agent_prompts(branches)
 
@@ -108,7 +112,23 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_prompts(%FanOut{body: body}), do: agent_prompts(body)
   defp agent_prompts(%UntilDry{body: body}), do: agent_prompts(body)
   defp agent_prompts(%WhileBudget{body: body}), do: agent_prompts(body)
+
+  defp agent_prompts(%Refine{
+         input: {:producer, producer},
+         reviewers: reviewers,
+         reviser: reviser
+       }),
+       do: agent_prompts([producer, reviser | Enum.map(reviewers, & &1.agent)])
+
+  defp agent_prompts(%Refine{reviewers: reviewers, reviser: reviser}),
+    do: agent_prompts([reviser | Enum.map(reviewers, & &1.agent)])
+
   defp agent_prompts(_node), do: []
+
+  defp prompt_text(prompt) when is_binary(prompt), do: prompt
+
+  defp prompt_text(%Workflow.Template{segments: segments}),
+    do: Enum.join(segments, "<template-hole>")
 
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
@@ -128,6 +148,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_labels(nodes) when is_list(nodes),
     do: nodes |> Enum.flat_map(&agent_labels/1)
 
+  defp agent_labels(%Agent{label: nil}), do: []
   defp agent_labels(%Agent{label: label}), do: [label]
   defp agent_labels(%Parallel{branches: branches}), do: agent_labels(branches)
 
@@ -140,5 +161,42 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_labels(%FanOut{body: body}), do: agent_labels(body)
   defp agent_labels(%UntilDry{body: body}), do: agent_labels(body)
   defp agent_labels(%WhileBudget{body: body}), do: agent_labels(body)
+
+  defp agent_labels(%Refine{
+         input: {:producer, producer},
+         reviewers: reviewers,
+         reviser: reviser
+       }),
+       do: agent_labels([producer, reviser | Enum.map(reviewers, & &1.agent)])
+
+  defp agent_labels(%Refine{reviewers: reviewers, reviser: reviser}),
+    do: agent_labels([reviser | Enum.map(reviewers, & &1.agent)])
+
   defp agent_labels(_node), do: []
+
+  defp agents(%Tree{nodes: nodes}), do: agents(nodes)
+
+  defp agents(nodes) when is_list(nodes),
+    do: nodes |> Enum.flat_map(&agents/1)
+
+  defp agents(%Agent{} = agent), do: [agent]
+  defp agents(%Parallel{branches: branches}), do: agents(branches)
+
+  defp agents(%Pipeline{lanes: lanes}) do
+    lanes
+    |> List.flatten()
+    |> agents()
+  end
+
+  defp agents(%FanOut{body: body}), do: agents(body)
+  defp agents(%UntilDry{body: body}), do: agents(body)
+  defp agents(%WhileBudget{body: body}), do: agents(body)
+
+  defp agents(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser}),
+    do: agents([producer, reviser | Enum.map(reviewers, & &1.agent)])
+
+  defp agents(%Refine{reviewers: reviewers, reviser: reviser}),
+    do: agents([reviser | Enum.map(reviewers, & &1.agent)])
+
+  defp agents(_node), do: []
 end

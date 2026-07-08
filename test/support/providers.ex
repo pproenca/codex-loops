@@ -330,3 +330,57 @@ defmodule Workflow.Test.PanelProvider do
     {:ok, %{"score" => score}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
   end
 end
+
+defmodule Workflow.Test.RefineProvider do
+  @moduledoc """
+  Deterministic provider for refine V1 tests.
+
+  Producer/reviser role calls return role-owned artifact envelopes, while reviewer
+  calls return approval envelopes keyed by reviewer index. Every call reports the
+  prompt and key to the sink so tests can prove the reviser was not invoked.
+  """
+  @behaviour Workflow.Provider
+
+  alias Workflow.Provider.Usage
+
+  @impl true
+  def run_agent(prompt, _schema, key, opts) do
+    if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt, key})
+    activity_sink = Keyword.get(opts, :activity_sink, fn _entry -> :ok end)
+
+    opts
+    |> Keyword.get(:activity_entries, [])
+    |> Enum.each(fn entry -> activity_sink.(entry) end)
+
+    output =
+      case key.node_path do
+        [_refine_index, 0] ->
+          %{"artifact" => Keyword.fetch!(opts, :artifact)}
+
+        [_refine_index, 1, reviewer_index] ->
+          reviews =
+            case Keyword.fetch(opts, :review_rounds) do
+              {:ok, rounds} -> Enum.at(rounds, key.iteration)
+              :error -> Keyword.fetch!(opts, :reviews)
+            end
+
+          review = Enum.at(reviews, reviewer_index)
+
+          %{
+            "approved" => Keyword.fetch!(review, :approved),
+            "findings" => Keyword.get(review, :findings, [])
+          }
+
+        [_refine_index, 2] ->
+          artifact =
+            case Keyword.fetch(opts, :revised_artifacts) do
+              {:ok, artifacts} -> Enum.at(artifacts, key.iteration)
+              :error -> Keyword.get(opts, :revised_artifact, "SHOULD NOT REVISE")
+            end
+
+          %{"artifact" => artifact}
+      end
+
+    {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+  end
+end

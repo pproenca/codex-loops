@@ -115,5 +115,6 @@ defmodule Workflow.Template do
   end
 
   defp binding_part({:node, _address} = ref), do: {:bound_value, ref}
+  defp binding_part({:refine, _address} = ref), do: {:bound_value, ref}
   defp binding_part({:map, _address} = ref), do: {:bound_list, ref}
 end

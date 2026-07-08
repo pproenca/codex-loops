@@ -21,7 +21,7 @@ cleanup() {
       CODEX_LOOPS_PORT="$port" \
       PORT="$port" \
       CODEX_LOOPS_JOURNAL_PATH="$journal" \
-      RELEASE_DISTRIBUTION=sname \
+      RELEASE_DISTRIBUTION=none \
       RELEASE_NODE="$release_node" \
       RELEASE_TMP="$release_tmp" \
       "$release_ctl" stop >/dev/null 2>&1 || true
@@ -117,7 +117,7 @@ CODEX_LOOPS_SERVER=1 \
   CODEX_LOOPS_PORT="$port" \
   PORT="$port" \
   CODEX_LOOPS_JOURNAL_PATH="$journal" \
-  RELEASE_DISTRIBUTION=sname \
+  RELEASE_DISTRIBUTION=none \
   RELEASE_NODE="$release_node" \
   RELEASE_TMP="$release_tmp" \
   "$release_ctl" start >"$server_log" 2>&1 &

@@ -178,7 +178,7 @@ defmodule Workflow.MCP.Lifecycle do
         {"CODEX_LOOPS_HOST", config.host},
         {"CODEX_LOOPS_PORT", Integer.to_string(config.port)},
         {"PORT", Integer.to_string(config.port)},
-        {"RELEASE_DISTRIBUTION", "sname"},
+        {"RELEASE_DISTRIBUTION", "none"},
         {"RELEASE_NODE", release_node},
         {"RELEASE_TMP", release_tmp}
       ]

@@ -8,8 +8,9 @@ defmodule Workflow.LoopRunTest do
   process internals.
 
   Covers the slice-#7 acceptance criteria: the loop-until-budget and loop-until-dry
-  catalog workflows terminate; killing a run mid-loop and resuming rebuilds the
-  accumulator exactly; and the predicate sub-vocabulary drives a real loop.
+  catalog workflows terminate through the generic loop core; killing a run
+  mid-loop and resuming rebuilds the accumulator exactly; and the predicate
+  sub-vocabulary drives a real loop.
   """
   use ExUnit.Case, async: true
 
@@ -49,7 +50,7 @@ defmodule Workflow.LoopRunTest do
     id = run_id()
 
     # Budget 40, reserve 8, each turn bills 8: 40 -> 32 -> 24 -> 16 -> 8 (four turns),
-    # then remaining is not > reserve, so the loop stops.
+    # then remaining is <= reserve, so the loop stops.
     assert {:ok, ^id} =
              Run.run(LoopUntilBudget,
                run_id: id,

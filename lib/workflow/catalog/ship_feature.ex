@@ -10,13 +10,12 @@ defmodule Workflow.Catalog.ShipFeature do
 
     * `parallel` — fan investigation across independent lanes, then barrier.
     * `pipeline` — drive the implementation through ordered layers, per item.
-    * `while_budget` — harden against failing tests until the budget runs low.
-    * `until_dry` + `collect` — harvest edge cases into a declared accumulator
-      until two rounds surface nothing new (deduped by `:id`).
+    * generic `loop` + closed predicates — harden until the budget runs low, and
+      harvest edge cases until two rounds surface nothing new (deduped by `:id`).
     * `verify` — submit the result to a perspective-diverse review panel; it
       survives only when a majority of lenses confirm.
     * `judge` — score the integration strategies and pick the lowest-risk.
-    * `fan_out width: budget_slices(per:)` — scale the acceptance suite across
+    * `fanout width: budget_slices(per:)` — scale the acceptance suite across
       whatever budget remains.
     * `synthesize` — fold the phases into a ship report.
     * `let` + `refine` + `emit_result` — bind the ship report, run a gated
@@ -35,7 +34,8 @@ defmodule Workflow.Catalog.ShipFeature do
   outputs, `~P` renders them deterministically, and `refine`/`emit_result` preserve
   the final review record as structured public data. Declarative equivalents carry
   the rest of the intent — a fail-closed `verify` panel stands in for "reject on
-  violation", and a bounded `until_dry` loop stands in for "repair until settled".
+  violation", and a bounded dry predicate loop stands in for "repair until
+  settled".
   """
   use Workflow
 
@@ -130,7 +130,7 @@ defmodule Workflow.Catalog.ShipFeature do
 
     phase("harden")
 
-    while_budget reserve: 10 do
+    loop max_iterations: 1000, until: budget_remaining() <= 10 do
       agent("""
       <task>
       Reproduce and fix exactly one failing acceptance test for this slice, then
@@ -148,7 +148,7 @@ defmodule Workflow.Catalog.ShipFeature do
 
     phase("harvest-edge-cases")
 
-    until_dry rounds: 2, seen_by: [:id] do
+    loop max_iterations: 1000, until: dry(rounds: 2, seen_by: [:id]) do
       agent(
         """
         <task>
@@ -201,7 +201,7 @@ defmodule Workflow.Catalog.ShipFeature do
 
     phase("scale-out")
 
-    fan_out width: budget_slices(per: 50) do
+    fanout width: budget_slices(per: 50) do
       agent("""
       <task>
       Run one shard of the full acceptance suite for the shipped slice and report

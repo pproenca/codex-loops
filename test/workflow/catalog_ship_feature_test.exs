@@ -39,11 +39,10 @@ defmodule Workflow.Catalog.ShipFeatureTest do
           Workflow.Node.Phase,
           Workflow.Node.Parallel,
           Workflow.Node.Pipeline,
-          Workflow.Node.WhileBudget,
-          Workflow.Node.UntilDry,
+          Workflow.Node.Loop,
           Workflow.Node.Verify,
           Workflow.Node.Judge,
-          Workflow.Node.FanOut,
+          Workflow.Node.GenericFanout,
           Workflow.Node.Synthesize,
           Workflow.Node.Refine,
           Workflow.Node.EmitResult

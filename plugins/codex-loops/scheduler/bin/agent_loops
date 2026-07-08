@@ -26,7 +26,13 @@ export RELEASE_PROG
 REL_VSN_DIR="$RELEASE_ROOT/releases/$RELEASE_VSN"
 . "$REL_VSN_DIR/env.sh"
 
-RELEASE_COOKIE="${RELEASE_COOKIE:-"$(cat "$RELEASE_ROOT/releases/COOKIE")"}"
+if [ -z "${RELEASE_COOKIE+x}" ]; then
+  if [ -f "$RELEASE_ROOT/releases/COOKIE" ]; then
+    RELEASE_COOKIE="$(cat "$RELEASE_ROOT/releases/COOKIE")"
+  else
+    RELEASE_COOKIE="$(dd count=1 bs=16 if=/dev/urandom 2> /dev/null | od -An -tx1 | tr -d ' \n')"
+  fi
+fi
 export RELEASE_COOKIE
 RELEASE_MODE="${RELEASE_MODE:-"embedded"}"
 export RELEASE_MODE
@@ -38,7 +44,7 @@ RELEASE_VM_ARGS="${RELEASE_VM_ARGS:-"$REL_VSN_DIR/vm.args"}"
 export RELEASE_VM_ARGS
 RELEASE_REMOTE_VM_ARGS="${RELEASE_REMOTE_VM_ARGS:-"$REL_VSN_DIR/remote.vm.args"}"
 export RELEASE_REMOTE_VM_ARGS
-RELEASE_DISTRIBUTION="${RELEASE_DISTRIBUTION:-"sname"}"
+RELEASE_DISTRIBUTION="${RELEASE_DISTRIBUTION:-"none"}"
 export RELEASE_DISTRIBUTION
 RELEASE_BOOT_SCRIPT="${RELEASE_BOOT_SCRIPT:-"start"}"
 export RELEASE_BOOT_SCRIPT

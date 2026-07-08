@@ -47,8 +47,8 @@ The following are deliberately **out of scope** and MUST NOT be expressible:
 - **General computation.** A workflow cannot compute values at runtime, bind variables,
   branch on agent output, or perform arithmetic. There is no value-binding construct.
   *(Dataflow §10 addendum: the implemented core narrows this bullet by reopening exactly one
-  binding form — `let` over already-journaled `agent`/`synthesize` outputs — while keeping the
-  arithmetic and branch-on-output bans intact; see §10.)*
+  binding form — `let` over already-journaled `agent`/`synthesize`/`refine` outputs — while
+  keeping the arithmetic and branch-on-output bans intact; see §10.)*
 - **Non-determinism.** No node reads a clock, a random source, the environment, the
   filesystem, or any external module. Wall-clock and randomness are *unrepresentable*.
 - **Side effects outside the vocabulary.** No spawning shells, no I/O, no network calls,
@@ -61,7 +61,7 @@ The following are deliberately **out of scope** and MUST NOT be expressible:
 These principles resolve every ambiguity this document does not foresee. When two
 readings are possible, the reading that upholds these principles is correct.
 
-1. **Closed vocabulary.** The DSL has exactly **13** top-level combinators (§2.4). Any
+1. **Closed vocabulary.** The DSL has exactly **14** combinators (§2.4). Any
    form outside the vocabulary is a compile error. New capability is added by adding a
    combinator to the closed set, never by allowing arbitrary Elixir. *Pre-resolves:* any
    unrecognized call, operator, literal, or closure is rejected, not interpreted.
@@ -95,9 +95,9 @@ readings are possible, the reading that upholds these principles is correct.
    a `verify` subject, `judge` candidates, `pipeline` items, and every prompt MUST be a
    compile-time literal. *Pre-resolves:* a workflow cannot "capture" or "reference" a
    runtime result except through the fixed data-flow of accumulators and panel folds.
-   *(Dataflow §10 addendum: Principle 6′ is presented there as the proposed reconciliation for
-   the implemented `let`/`~P`/`emit` core — journaled-values-only, deterministic-render-only —
-   while §1–§8 remain the frozen base body.)*
+   *(Dataflow §10 addendum: Principle 6′ is the reconciliation for the implemented
+   `let`/`~P`/`emit` core — journaled-values-only, deterministic-render-only — while §1–§8
+   remain the frozen base body.)*
 
 7. **Inert tree.** The compiled `%Tree{}` is pure, serializable data containing zero
    closures. It is `Macro.escape`-d into a compile-time constant and can be reconstructed
@@ -184,11 +184,11 @@ reference or a function call is **not** a literal and is rejected.
 
 ### 2.4 The closed combinator vocabulary
 
-The DSL recognizes exactly these **13** combinator names as top-level statements:
+The DSL recognizes exactly these **14** combinator names:
 
 ```
 agent  log  phase  parallel  pipeline  return  collect
-while_budget  until_dry  verify  judge  synthesize  fan_out
+while_budget  until_dry  verify  judge  synthesize  fan_out  refine
 ```
 
 > *(Dataflow §10 addendum: the implemented core recognizes `let` and `emit` alongside the base
@@ -197,9 +197,9 @@ while_budget  until_dry  verify  judge  synthesize  fan_out
 
 Two names are contextual, not standalone combinators:
 
-- `collect` is in the 13 but is **body-only**: valid only inside a loop body (§3.7). A
+- `collect` is in the 14 but is **body-only**: valid only inside a loop body (§3.7). A
   top-level `collect` is a compile error.
-- `budget_slices(per: N)` is **not** one of the 13. It appears only as the value of
+- `budget_slices(per: N)` is **not** one of the 14. It appears only as the value of
   `fan_out`'s `width:` option (§3.9).
 
 Inside a loop body the vocabulary narrows to the **body vocabulary** — exactly
@@ -232,6 +232,7 @@ Statement :
   - WhileBudgetStmt
   - UntilDryStmt
   - FanOutStmt
+  - RefineStmt
 ```
 
 `collect` is not in `Statement`: it appears only in `BodyStatement` (§3.7). A top-level
@@ -2403,6 +2404,12 @@ types (the log is versioned and additive).
 | `:verify_started` / `:verify_settled` | `address, mode, voter_count, threshold` / `address, confirmations, total, threshold, survived` |
 | `:judge_started` / `:judge_settled` | `address, candidates, criteria` / `address, scores, pick, winner` |
 | `:fan_out_started` / `:fan_out_completed` | `address, per, width` / `address` |
+| `:refine_started` | `address, input, max_rounds, until, on_non_convergence, max_concurrency, reviewer_timeout_ms, reviewers, reviser, artifact_schema_version, review_schema_version` |
+| `:refine_round_started` | `address, round, artifact` |
+| `:refine_round_decision` | `address, round, consensus, approval_count, total, reviewer_decisions, artifact, open_findings` |
+| `:refine_completed` | `address, converged, final_round, rounds, artifact, open_findings` |
+| `:refine_non_converged` | `address, reason, final_round, rounds, artifact, open_findings` |
+| `:refine_input_invalid` | `address, input, reason` |
 | `:run_completed` | `value` (terminal on success path; no address) |
 
 > *(Proposed §10 — dataflow: a proposed extension pins `agent_committed.prompt` and
@@ -2453,7 +2460,8 @@ Payload-value pins (each is observable output, so it is normative):
   index to avoid counting the same streamed/final activity twice, never value-only dedupe.
 
 `run_completed` is the terminal success event; on failure the terminal event is
-`agent_failed` and **no** `run_completed` is written. Control-flow outcomes
+`agent_failed`, `refine_non_converged`, or `refine_input_invalid` and **no**
+`run_completed` is written. Control-flow outcomes
 (`loop_decision`, `fan_out_started` width, `verify_settled`, `judge_settled`) are journaled
 so that resume replays rather than recomputes them. A canonical minimal run journals, in
 order: `run_started, phase_entered, log_emitted, agent_committed, run_completed` with
@@ -2466,7 +2474,9 @@ over the journal (it consults no process state). `state` transitions:
 
 ```
 :pending --run_started--> :running --run_completed--> :completed
-                                    --agent_failed---> :failed
+                                    --agent_failed-----------> :failed
+                                    --refine_non_converged---> :failed
+                                    --refine_input_invalid---> :failed
 ```
 
 The fold accumulates `logs`, `agents`, `rejected`, `accumulators`, `verifications`,
@@ -2506,11 +2516,16 @@ projections) for the same journal.
 
 **Failure projection (last-wins, pinned).** On **every** `agent_failed` the fold sets
 `failure = %{address, attempts, reason}` and `state = :failed` **unconditionally** — there
-is **no** state guard, so a later `agent_failed` **overwrites** an earlier one. The folded
-`failure` is therefore the **last** `agent_failed` in `seq` order. In the common case — a
-single `agent_failed` (a top-level fail-closed node, or a concurrent region with exactly one
-failing lane) — last equals first, so the folded `failure` matches the halt reason `run`
-returned (§6.2) and what `status`/`inspect`/`resume` report.
+is **no** state guard, so a later `agent_failed` **overwrites** an earlier one. On
+`refine_non_converged`, the fold sets
+`failure = %{address: address, attempts: 0, reason: {:did_not_converge, address, :max_rounds}}`;
+on `refine_input_invalid`, it sets
+`failure = %{address: address, attempts: 0, reason: {:invalid_refine_input, address, reason}}`.
+The folded `failure` is therefore the **last** terminal failure event in `seq` order. In the
+common case — a single `agent_failed` (a top-level fail-closed node, or a concurrent region
+with exactly one failing lane) or one terminal refine failure — last equals first, so the
+folded `failure` matches the halt reason `run` returned (§6.2) and what
+`status`/`inspect`/`resume` report.
 
 **Note (multi-failure divergence, and its C4 consequence).** In a concurrent region where
 **2+ lanes** commit `agent_failed` (§6.1), the two projections differ deliberately: the
@@ -2675,7 +2690,7 @@ or in parallel — the journal MUST be the same either way.
 
 Normative requirements a conforming implementation MUST satisfy:
 
-- **C1 (closed vocabulary).** It MUST reject, at compile time, any form outside the 13-way
+- **C1 (closed vocabulary).** It MUST reject, at compile time, any form outside the 14-way
   vocabulary (and the body vocabulary inside loops), per §5.
   *(Dataflow §10 addendum: the implemented core recognizes `let` and `emit`; `gather`/`map`
   remain DEFER and `reduce`/`select` remain REJECT.)*
@@ -2710,9 +2725,9 @@ Normative requirements a conforming implementation MUST satisfy:
 - **C9 (no value binding).** It MUST require compile-time literals for prompts, names,
   `return` values, `verify` subjects, `judge` candidates, `pipeline` items, `synthesize`
   inputs, and schema maps.
-  *(Dataflow §10 addendum: C9′ is the proposed reconciliation for the implemented core — a
-  flowed value must be journaled by a lexically-preceding node and rendered by deterministic,
-  closure-free `RenderText`; see §10.)*
+  *(Dataflow §10 addendum: C9′ is the reconciliation for the implemented core — a flowed value
+  must be journaled by a lexically-preceding node and rendered by deterministic, closure-free
+  `RenderText`; see §10.)*
 
 An implementation MAY add new node kinds and new event types (the log is additive), but it
 MUST preserve existing addresses (§4.2) and MUST keep folds total over unknown types. It
@@ -2720,157 +2735,610 @@ MUST NOT weaken C1–C9.
 
 ---
 
-## 9. Proposed extensions — `refine` (NOT YET IMPLEMENTED)
+## 9. `refine` V1
 
-> **Status: Proposed / design-stage.** The `refine` combinator described here is **not**
-> part of the closed vocabulary; it is **not** in `@combinators`, the compiler does not
-> parse it, and no conforming implementation of §1–§8 includes it. This section is a design
-> for a future combinator and is **non-normative** with respect to the implemented
-> language. When implemented, it would become the 14th combinator and the rules below would
-> move into §3–§7.
+> **Status: Implemented / normative.** `refine` is the 14th combinator in the closed
+> vocabulary. The compiler parses it into an inert `%Workflow.Node.Refine{}` with pre-addressed
+> role agents, and the runtime executes it by ordinary journaled events and paid-effect
+> idempotency keys. This section is the normative home for the V1 surface, validation,
+> semantics, events, and binding behavior.
 
 ### 9.1 Purpose
 
-Iterative adversarial refinement: a **producer** agent's work is checked by a parallel
-**panel of reviewers** that return structured findings; a **fixer** revises the work using
-those findings; repeat until the panel reaches consensus or a round bound is hit.
+`refine` is a top-level, bindable combinator for one bounded adversarial convergence loop.
+It accepts either an inline artifact-producing `agent` or an existing binding, runs a static
+panel of reviewers in parallel, revises when any reviewer is non-clear, and terminates by
+unanimous clearance, accepted non-convergence, failed non-convergence, or invalid input.
 
-### 9.2 Proposed surface grammar
+The goal is to express the recurring Claude-style pattern:
 
-`verify`/`judge`-style positional subject plus keyword options:
+1. produce or resolve a draft artifact,
+2. run adversarial reviewers in parallel,
+3. feed blocking findings to a reviser,
+4. repeat until every reviewer agrees or the round bound is reached.
+
+`refine` V1 deliberately does **not** add arbitrary JS-style control flow, dynamic reviewer
+generation, child workflows, worktree isolation, large collection fan-out, or custom
+consensus predicates.
+
+### 9.2 Surface grammar
+
+Both Elixir call forms are accepted and MUST lower to the same two-argument AST shape
+`{:refine, meta, [input_ast, opts_ast]}`:
+
+```elixir
+refine(agent("Draft."), reviewers: [...], revise_with: agent("Fix."), until: :unanimous, max_rounds: 5)
+
+refine agent("Draft."),
+  reviewers: [...],
+  revise_with: agent("Fix."),
+  until: :unanimous,
+  max_rounds: 5
+```
 
 ```
-RefineStmt : `refine` `(` AgentStmt `,` RefineOpts `)`
-RefineOpts : KeywordList   ; reviewers:, revise_with:, until:, max_rounds:, on_stall:?
+Statement :
+  - existing statements...
+  - RefineStmt
+
+LetProducer :
+  - AgentStmt
+  - SynthesizeStmt
+  - RefineStmt
+
+RefineStmt :
+  - `refine` RefineInput `,` RefineOpts
+  - `refine` `(` RefineInput `,` RefineOpts `)`
+
+RefineInput :
+  - AgentStmt
+  - BindingRefAtom
+
+BindingRefAtom :: `:` AtomName
+
+RefineOpts : KeywordList
+  required exactly once: reviewers:, revise_with:, until:, max_rounds:
+  optional at most once: on_non_convergence:, max_concurrency:
+
+ReviewerSpec : `reviewer` `(` Atom `,` StringLiteral `)`
+ReviewerList : `[` ReviewerSpec `,` ReviewerSpec+ `]`
 ```
 
-```
-refine <producer :: agent(literal)>,
-       reviewers: [<lens atoms>+] | <pos-int>,
-       revise_with: <fixer :: agent(literal)>,
-       until: :unanimous | :majority,
-       max_rounds: <pos-int literal>
-       [, on_stall: :fail | :accept]
+`RefineInput` does not accept `SynthesizeStmt` or nested `RefineStmt` directly. Authors bind
+those producers first:
+
+```elixir
+let :draft = synthesize(inputs, "Summarize.")
+
+let :final =
+  refine :draft,
+    reviewers: [
+      reviewer(:spec, "Find implementability gaps."),
+      reviewer(:runtime, "Find replay and journal bugs.")
+    ],
+    revise_with: agent("Revise using the blocking findings."),
+    until: :unanimous,
+    max_rounds: 5
 ```
 
-### 9.3 Proposed validation rules (each with the smallest counter-example)
+### 9.3 Validation rules
 
-**V1 — producer MUST be an `agent()` form.**
+**R1 — `refine` is top-level only.**
+
+It MUST be rejected inside loop bodies, `parallel`, `pipeline`, `fan_out`, `verify`,
+`judge`, or another `refine`.
 
 ```counter-example
-refine "a claim", reviewers: [:a], revise_with: agent("fix"), until: :unanimous, max_rounds: 3
-# a bare literal subject is `verify`, not `refine`
+while_budget reserve: 0, max_iterations: 3 do
+  refine agent("draft"), reviewers: [reviewer(:a, "check"), reviewer(:b, "check")],
+    revise_with: agent("fix"), until: :unanimous, max_rounds: 3
+end
 ```
 
-**V2 — `revise_with:` REQUIRED and an `agent()` form.**
+**R2 — `reviewer/2` is contextual syntax.**
+
+`reviewer/2` is valid only inside the `reviewers:` list and is not a top-level combinator.
 
 ```counter-example
-refine agent("draft"), reviewers: [:a], until: :unanimous, max_rounds: 3
-# a refine with no fixer is just verify
+reviewer(:spec, "check the spec")
 ```
 
-**V3 — `reviewers:` is a non-empty lens list or a positive integer.**
+**R3 — `reviewers:` is a literal list of at least two unique reviewer specs.**
+
+Uniqueness is by reviewer atom name, compared exactly after parsing the atom literal.
+Reviewer names MUST match `AtomName` (the same lexical recognizer used by `let` binding
+names in §10.5.1); dynamic atoms, strings, module aliases, and atoms ending in `?` or `!`
+are rejected. Reviewer prompts MUST be literal strings; templates, interpolated strings,
+variables, and non-string terms are rejected.
 
 ```counter-example
-refine agent("draft"), reviewers: [], revise_with: agent("fix"), until: :unanimous, max_rounds: 3
+refine agent("draft"), reviewers: [reviewer(:a, "check")],
+  revise_with: agent("fix"), until: :unanimous, max_rounds: 3
 ```
-
-**V4 — `until:` in `{:unanimous, :majority}`.**
 
 ```counter-example
-refine agent("draft"), reviewers: [:a], revise_with: agent("fix"), until: :vibes, max_rounds: 3
+refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:a, "y")],
+  revise_with: agent("fix"), until: :unanimous, max_rounds: 3
 ```
 
-**V5 — `:majority` requires `>= 3` reviewers.**
+**R4 — option cardinality is exact and unknown options are rejected.**
+
+Required keys: `reviewers:`, `revise_with:`, `until:`, `max_rounds:`. Optional keys:
+`on_non_convergence:`, `max_concurrency:`. Required keys MUST appear exactly once; optional keys
+MUST appear at most once.
 
 ```counter-example
-refine agent("draft"), reviewers: [:a, :b], revise_with: agent("fix"), until: :majority, max_rounds: 3
-# majority of 2 collapses to unanimous; require >= 3
+refine agent("draft"), reviewers: [], reviewers: [],
+  revise_with: agent("fix"), until: :unanimous, max_rounds: 3
 ```
 
-**V6 — `max_rounds:` is a positive-integer literal `<=` the iteration cap.**
+**R5 — `until:` is exactly `:unanimous`.**
 
 ```counter-example
-refine agent("draft"), reviewers: [:a], revise_with: agent("fix"), until: :unanimous, max_rounds: 0
+refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
+  revise_with: agent("fix"), until: :majority, max_rounds: 3
 ```
 
-**V7 — prompts are literal strings, no interpolation.**
+**R6 — `max_rounds:` is a positive integer literal.**
 
 ```counter-example
-refine agent("fix #{x}"), reviewers: [:a], revise_with: agent("fix"), until: :unanimous, max_rounds: 3
+refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
+  revise_with: agent("fix"), until: :unanimous, max_rounds: 0
 ```
 
-### 9.4 Proposed semantic model
+**R7 — `max_concurrency:` is a positive integer literal when present.**
 
-```
-%Refine{producer :: Agent.t(),
-        reviewers :: [Agent.t()],      # pre-expanded, one template per lens
-        fixer     :: Agent.t(),
-        threshold :: :unanimous | :majority,
-        max_rounds :: pos_integer(),
-        on_stall  :: :fail | :accept}  # default :fail
+When omitted, it defaults to the reviewer count.
+
+```counter-example
+refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
+  revise_with: agent("fix"), until: :unanimous, max_rounds: 3, max_concurrency: "2"
 ```
 
-Reviewer schema (fixed): `{verdict: boolean, findings: [{id, issue, fix}]}`.
+**R8 — `on_non_convergence:` is `:fail | :accept_current`.**
 
-**Addressing:** `refine_addr ++ [round, role, voter_i]` — the reserved idempotency
-`iteration` slot finally carries a nonzero value, set to `round`.
+It defaults to `:fail`.
 
-### 9.5 Proposed execution
-
-```
-ExecuteRefine(node, run_id, provider, prior, ctx):
-  - Let {artifact} be RunProducer(node.producer, run_id, provider, round 0).
-  - For {r} in 0 .. node.max_rounds - 1:
-    - Let {verdicts} be RunReviewers(node.reviewers, artifact, r) — PARALLEL, schema-bound, journaled.
-    - If Consensus(verdicts, node.threshold): Return {:converged, artifact}.
-    - If {r} == node.max_rounds - 1:                          ; STALL
-      - If node.on_stall is :fail:  Raise RefineStalled.       ; default
-      - If node.on_stall is :accept: Return {:stalled, artifact}.  ; journaled converged: false
-    - Else:
-      - Let {findings} be OpenFindings(verdicts).
-      - Let {artifact} be RunFixer(node.fixer, artifact, findings, r + 1).
-
-Consensus(verdicts, :unanimous) = all verdicts are true.
-Consensus(verdicts, :majority)  = count(true) > n / 2   (strict; majority of 2 = 2).
-
-OpenFindings(verdicts):
-  - Take the findings from THIS round's FAILING reviewers only.
-  - Flatten, dedup by finding.id, and order by (reviewer_index, finding.id).
-  - This total order makes the fixer prompt a deterministic function of journaled data (replay-safe).
+```counter-example
+refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
+  revise_with: agent("fix"), until: :unanimous, max_rounds: 3, on_non_convergence: :retry_forever
 ```
 
-> **Sub-algorithm status (non-normative sketch).** `RunProducer`, `RunReviewers`, and
-> `RunFixer` are **not** defined as standalone algorithms because `refine` is design-stage;
-> they are shorthand for reuse of the already-specified agent path, and would be pinned when
-> §9 is promoted into §3–§7:
-> - `RunProducer(producer, …, round r)` and `RunFixer(fixer, artifact, findings, round r)`
->   are ordinary `RunAgent` (§6.4) turns whose `iteration` slot carries `r` (§9.4) — the
->   producer and fixer are `%Agent{}` templates with the normal retry-then-fail path.
-> - `RunReviewers(reviewers, artifact, round r)` is a `verify`-style parallel panel
->   (`RunConcurrently` + `CommitLanes`, §6.9) over the pre-expanded reviewer `%Agent{}`
->   templates (each `retries: 0`, schema-bound to the fixed reviewer schema in §9.4), one
->   lane per lens, keyed at `refine_addr ++ [r, role, voter_i]`.
-> Until §9 is promoted, these three names are intentionally-unspecified placeholders; no
-> conforming implementation of §1–§8 executes `refine`.
+**R9 — inline producer and reviser agents are role-owned.**
 
-**Error model.** A **reviewer** malformed output is a **hard fail-closed** (no retry —
-reviewers are `retries: 0`). A **producer/fixer** malformed output follows the existing
-agent retry-then-fail path.
+Inline producer and reviser agents MUST use literal string prompts only. Their `schema:`
+option is rejected because `refine` owns the role schemas and normalization rules. Template
+or dataflow setup is supported by binding first and passing the binding:
 
-### 9.6 Proposed output
+```elixir
+let :draft = agent(~P"Draft from <%= @notes %>")
+let :final = refine :draft, reviewers: [...], revise_with: agent("Fix."),
+  until: :unanimous, max_rounds: 5
+```
 
-Events: `refine_round_started{r}`, `refine_produced` / `refine_revised{r}`,
-`refine_verdict{voter, verdict, findings}`, and a terminal `refine_converged{r}` or
-`refine_stalled{rounds}`. A stalled `:fail` surfaces a **distinct** `:did_not_converge`
-error — RECOMMENDED a new exit code distinct from `malformed-output` (exit 8), e.g. exit 9
-— so a non-convergence is never confused with a validation failure.
+`revise_with:` MUST be exactly a bare `agent("literal prompt")` form. V1 rejects reviser
+options, `schema:`, template prompts, and interpolation; refine owns the reviser schema,
+retry policy, prompt materialization, and normalization.
 
-### 9.7 Proposed conformance
+```counter-example
+refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
+  revise_with: agent(~P"Fix <%= @draft %>"), until: :unanimous, max_rounds: 3
+```
 
-Reviewers MAY run in any order or in parallel, since `Consensus` and `OpenFindings` are
-order-independent (the fixer prompt is composed from a total order over journaled
-findings). Scheduling MUST NOT affect the verdict or the fixer's composed prompt.
+### 9.4 Semantic model
+
+```
+%Workflow.Node.Refine{
+  address: address(),
+  input: {:producer, Agent.t()} | {:binding, name :: atom(), ref :: BindingRef},
+  reviewers: [%{index: non_neg_integer(), name: atom(), prompt: String.t(), agent: Agent.t()}],
+  reviser: Agent.t(),
+  until: :unanimous,
+  max_rounds: pos_integer(),
+  on_non_convergence: :fail | :accept_current,
+  max_concurrency: pos_integer()
+}
+```
+
+`BindingRef` extends to:
+
+```
+{:node, address()} | {:map, address()} | {:refine, address()}
+```
+
+`let :x = refine ...` records `:x -> {:refine, address}`. `BoundValue({:refine, address})`
+reads `refine_completed.payload.artifact`.
+
+Addresses and paid-effect iteration slots:
+
+```
+inline producer [i, 0],    iteration 0
+reviewer j      [i, 1, j], iteration r
+reviser         [i, 2],    iteration r, produces artifact for round r + 1
+refine node     [i]
+```
+
+### 9.5 Role normalization
+
+`refine` owns two closed role schemas. These schemas are applied before the role-specific
+normalizers below, and authored `schema:` options are rejected by Rule R9.
+
+Artifact schema version 1 is exactly:
+
+```elixir
+%{
+  "type" => "object",
+  "required" => ["artifact"],
+  "additionalProperties" => false,
+  "properties" => %{
+    "artifact" => %{"type" => "string"}
+  }
+}
+```
+
+Review schema version 1 is exactly:
+
+```elixir
+%{
+  "type" => "object",
+  "required" => ["approved", "findings"],
+  "additionalProperties" => false,
+  "properties" => %{
+    "approved" => %{"type" => "boolean"},
+    "findings" => %{
+      "type" => "array",
+      "items" => %{
+        "type" => "object",
+        "required" => ["id", "blocking", "issue", "fix"],
+        "additionalProperties" => false,
+        "properties" => %{
+          "id" => %{"type" => "string"},
+          "blocking" => %{"type" => "boolean"},
+          "issue" => %{"type" => "string"},
+          "fix" => %{"type" => "string"}
+        }
+      }
+    }
+  }
+}
+```
+
+#### 9.5.1 Artifact normalization
+
+Inline producer and reviser provider output MUST normalize before `agent_committed` is
+journaled. Accepted provider output is exactly `%{"artifact" => binary}` with no extra
+fields and `String.valid?(binary) == true`. The committed `agent_committed.result` is the
+artifact binary itself, not the object.
+
+Bound input accepts either a valid UTF-8 binary or exactly `%{"artifact" =>
+valid_utf8_binary}`. All other bound values are invalid, including `{:map, address}`
+bindings, unbound refs, invalid UTF-8 binaries, maps with extra or missing keys, and
+structured non-artifact values.
+
+Invalid bound input commits the terminal event `refine_input_invalid` and fails the run. It
+is not an unjournaled crash.
+
+Pinned invalid-input reasons:
+
+```
+:unsupported_map_binding
+:unbound_binding
+:artifact_not_binary
+:artifact_invalid_utf8
+:artifact_object_unexpected_shape
+:artifact_value_unsupported
+```
+
+#### 9.5.2 Reviewer normalization
+
+Reviewer committed result is exactly:
+
+```elixir
+%{
+  "approved" => boolean(),
+  "findings" => [
+    %{"id" => binary(), "blocking" => boolean(), "issue" => binary(), "fix" => binary()}
+  ]
+}
+```
+
+Extra fields are rejected. `id`, `issue`, and `fix` MUST be non-empty valid UTF-8 binaries.
+Reviewer normalization failure is treated like schema failure: journal
+`agent_attempt_rejected`; because reviewers use `retries: 0`, then journal `agent_failed`.
+
+A review is clear iff `approved == true` and no finding has `blocking == true`.
+
+Open findings have this exact event shape:
+
+```elixir
+%{reviewer: atom(), reviewer_index: non_neg_integer(), id: binary(), issue: binary(), fix: binary()}
+```
+
+Only blocking findings from non-clear reviewers are open findings. Duplicate IDs within one
+reviewer are deduped by exact binary `id`; first occurrence wins. Open findings are ordered
+by reviewer index ascending, then `id` bytewise ascending.
+
+If a reviewer is non-clear but has no blocking finding, insert:
+
+```elixir
+%{
+  reviewer: name,
+  reviewer_index: index,
+  id: "__codex_loops_no_blocking_finding__",
+  issue: "Reviewer did not approve but returned no blocking finding.",
+  fix: "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
+}
+```
+
+Reviewer decisions have this exact shape, in reviewer index order:
+
+```elixir
+%{reviewer: atom(), reviewer_index: non_neg_integer(), approved: boolean(), clear: boolean()}
+```
+
+### 9.6 Prompt construction
+
+Materialized prompt strings are the strings passed to the provider and journaled in ordinary
+`agent_*` events.
+
+`ReviewerPrompt(base, round, artifact)` is exactly:
+
+```text
+base
+"\n\n--- CODEX LOOPS REFINE REVIEW INPUT ---\n"
+"round: " <> Integer.to_string(round) <> "\n"
+"artifact-bytes: " <> Integer.to_string(byte_size(artifact)) <> "\n"
+"artifact:\n"
+artifact
+"\n--- END CODEX LOOPS REFINE REVIEW INPUT ---"
+```
+
+`ReviserPrompt(base, round, artifact, open_findings)` is exactly:
+
+```text
+base
+"\n\n--- CODEX LOOPS REFINE REVISION INPUT ---\n"
+"round: " <> Integer.to_string(round) <> "\n"
+"current-artifact-bytes: " <> Integer.to_string(byte_size(artifact)) <> "\n"
+"current-artifact:\n"
+artifact
+"\nblocking-finding-count: " <> Integer.to_string(length(open_findings)) <> "\n"
+SerializeFindings(open_findings)
+"--- END CODEX LOOPS REFINE REVISION INPUT ---"
+```
+
+`SerializeFindings` concatenates entries in order. Index is 1-based decimal with no leading
+zeroes:
+
+```text
+"finding " <> Integer.to_string(index) <> ":\n"
+"reviewer: " <> Atom.to_string(f.reviewer) <> "\n"
+"reviewer-index: " <> Integer.to_string(f.reviewer_index) <> "\n"
+"id-bytes: " <> Integer.to_string(byte_size(f.id)) <> "\n"
+"id:\n" <> f.id <> "\n"
+"issue-bytes: " <> Integer.to_string(byte_size(f.issue)) <> "\n"
+"issue:\n" <> f.issue <> "\n"
+"fix-bytes: " <> Integer.to_string(byte_size(f.fix)) <> "\n"
+"fix:\n" <> f.fix <> "\n"
+```
+
+### 9.7 Execution
+
+For `max_rounds = N`, review rounds are `0..N-1`. Reviser runs only for rounds `0..N-2`.
+
+```
+RunRefine(node):
+  - Capture runtime reviewer_timeout_ms and commit/replay refine_started.
+  - Resolve artifact:
+    - producer input: RunRoleAgent([i,0], iteration 0, ArtifactSchemaV1, ArtifactNormalizer)
+      If the role agent returns an agent failure, halt with that `agent_failed` result and do
+      not write `refine_round_started`, `refine_round_decision`, or any terminal refine event.
+    - binding input: BoundArtifact(ref); on error commit refine_input_invalid and halt.
+  - For r in 0..N-1:
+    - Commit/replay refine_round_started(address, r, artifact).
+    - Run reviewers [i,1,j] at iteration r concurrently, cap max_concurrency, bounded by
+      reviewer_timeout_ms from refine_started.payload.
+    - Commit reviewer lane events in reviewer index order.
+      If any reviewer role agent returns an agent failure, halt with the first failing
+      reviewer in reviewer-index order and do not write `refine_round_decision`,
+      `refine_non_converged`, or `refine_completed`.
+    - Compute/replay refine_round_decision.
+    - If consensus: commit refine_completed(converged: true, open_findings: []) and return artifact.
+    - If r == N-1:
+      - :fail commits refine_non_converged and halts with {:did_not_converge, address, :max_rounds}.
+      - :accept_current commits refine_completed(converged: false) and returns artifact.
+    - Run reviser [i,2] at iteration r with ArtifactSchemaV1 and ArtifactNormalizer.
+      If the reviser role agent returns an agent failure, halt with that `agent_failed`
+      result and do not write a later `refine_round_started`, `refine_non_converged`,
+      or `refine_completed`.
+    - Set artifact to reviser committed result.
+```
+
+`RunRoleAgent` wraps normal agent attempt handling: provider output is schema-validated against
+the role-owned schema (`ArtifactSchemaV1` for producer/reviser, `ReviewSchemaV1` for reviewers),
+then role-normalized, then committed. Schema or normalization failure journals
+`agent_attempt_rejected`; after retries are exhausted it journals `agent_failed` exactly like
+existing fail-closed agents. Inline producer and reviser retries MUST journal each rejected
+attempt before the next paid retry is attempted, so a crash between attempts resumes at the first
+unjournaled attempt and never loses a paid failed attempt. Committed role results are normalized
+only.
+
+Reviewer fanout uses the existing concurrent-region lane discipline (§6.9): workers run
+off-thread and MUST NOT write the journal directly; the single writer commits lane events in
+reviewer index order; each paid effect uses `ResolveIdempotency`; and first-failure semantics are
+computed from reviewer index order even if another worker finishes first. Completed lane events
+that exist before the halt are still journaled in that order, matching existing parallel behavior.
+Reviewer lanes MUST be bounded by an explicit finite timeout. The timeout is an operational
+runtime constant, not a DSL author option: the writer captures it as `reviewer_timeout_ms` in
+`refine_started.payload`, then execution and resume use that journaled value. A reviewer lane that
+exits or times out before producing a schema-valid review is converted into an `agent_failed` event
+at that reviewer's address and iteration, committed in reviewer-index order. The reference
+implementation uses matchable reasons `{:reviewer_timeout, timeout_ms}` and
+`{:reviewer_crashed, reason}`.
+
+`refine_started` is authoritative after it is journaled. On resume, role prompts, retries,
+labels, reviewers, input descriptor, `max_concurrency`, and `reviewer_timeout_ms` MUST be read from
+`refine_started.payload`, not from recompiled source at the same address.
+
+`ReplayDecision(address, round)` is replay-idempotent:
+
+- If a `refine_round_decision` event exists at key `(type, address, round)`, return that payload
+  verbatim, including `artifact`, `reviewer_decisions`, `open_findings`, and `consensus`. Do not
+  re-run reviewers, re-normalize reviewer results, recompute findings, or re-render a reviser
+  prompt from the recompiled source.
+- If no decision exists, compute it only from already-journaled reviewer `agent_committed` events
+  for `(address ++ [1, reviewer_index], iteration = round)` after any missing reviewer lanes have
+  been run and committed. A partial reviewer set is not enough to compute a decision.
+
+### 9.8 Output and event payloads
+
+Payload descriptors store plain maps, never Agent structs.
+
+```elixir
+input =
+  %{kind: :producer, address: [i, 0], prompt: binary(), retries: non_neg_integer(), label: binary() | nil}
+  | %{kind: :binding, name: atom(), ref: BindingRef}
+
+reviewer_descriptor =
+  %{index: non_neg_integer(), name: atom(), address: [i, 1, j], prompt: binary(), retries: 0, label: binary() | nil}
+
+reviser_descriptor =
+  %{address: [i, 2], prompt: binary(), retries: non_neg_integer(), label: binary() | nil}
+```
+
+```
+refine_started
+  key: (type, address)
+  payload:
+    %{address, input, max_rounds, until: :unanimous, on_non_convergence,
+      max_concurrency, reviewer_timeout_ms, reviewers: [reviewer_descriptor],
+      reviser: reviser_descriptor, artifact_schema_version: 1, review_schema_version: 1}
+
+refine_round_started
+  key: (type, address, round)
+  payload: %{address, round, artifact}
+
+refine_round_decision
+  key: (type, address, round)
+  payload:
+    %{address, round, consensus, approval_count, total,
+      reviewer_decisions: [reviewer_decision], artifact, open_findings: [open_finding]}
+
+refine_completed
+  key: (type, address)
+  payload:
+    %{address, converged, final_round, rounds, artifact, open_findings: [open_finding]}
+
+refine_non_converged
+  key: (type, address)
+  payload:
+    %{address, reason: :max_rounds, final_round, rounds, artifact, open_findings: [open_finding]}
+
+refine_input_invalid
+  key: (type, address)
+  payload: %{address, input, reason}
+```
+
+`open_findings` is always present, including `[]`.
+
+`refine_non_converged` folds to failed status; resume returns
+`{:error, {:did_not_converge, address, :max_rounds}}`.
+
+`refine_input_invalid` folds to failed status; resume returns
+`{:error, {:invalid_refine_input, address, reason}}`.
+
+`refine_completed` folds as successful refine output. `BoundValue({:refine, address})`
+returns `payload.artifact`, whether `converged` is true or false.
+
+### 9.9 §7 run-model integration
+
+§7.2 directly includes the six event constructors listed in §9.8. Two of them are terminal
+failure events: `refine_non_converged` and `refine_input_invalid`. They are terminal in the same
+sense as `agent_failed`: no `run_completed` is written after them.
+
+§7.3 state transitions become:
+
+```
+:pending --run_started----------> :running --run_completed----------> :completed
+                                            --agent_failed-----------> :failed
+                                            --refine_non_converged---> :failed
+                                            --refine_input_invalid---> :failed
+```
+
+Failure projection remains the single `%{address, attempts, reason}` map:
+
+- On `agent_failed`, keep the existing `%{address, attempts, reason}` projection.
+- On `refine_non_converged`, set
+  `failure = %{address: address, attempts: 0, reason: {:did_not_converge, address, :max_rounds}}`.
+- On `refine_input_invalid`, set
+  `failure = %{address: address, attempts: 0, reason: {:invalid_refine_input, address, reason}}`.
+
+§7.4 run API return values add:
+
+- `{:error, {:did_not_converge, address, :max_rounds}}` when `on_non_convergence: :fail`
+  reaches `max_rounds`.
+- `{:error, {:invalid_refine_input, address, reason}}` when a bound input cannot normalize to
+  an artifact.
+
+§6.2 resume uses the folded failure projection for both new terminal events, so resuming a run
+failed by `refine_non_converged` returns `{:error, {:did_not_converge, address, :max_rounds}}`,
+and resuming a run failed by `refine_input_invalid` returns
+`{:error, {:invalid_refine_input, address, reason}}`. The JSON failure envelope remains the §7.5
+shape; both new failures serialize with `"attempts": 0` and `"reason": inspect(reason)`.
+
+§7.5 adds two CLI mappings:
+
+| internal code | JSON `code` | exit code |
+|---|---|---|
+| `:did_not_converge` | `did-not-converge` | 9 |
+| `:invalid_refine_input` | `invalid-refine-input` | 10 |
+
+### 9.10 Migration guidance
+
+| Claude workflow pattern | `refine` V1 support | Migration |
+|---|---:|---|
+| Static producer plus parallel adversarial reviewers plus reviser loop | Supported | `let :x = refine agent(...), reviewers: [...], revise_with: agent(...), until: :unanimous, max_rounds: N` |
+| Bound draft from earlier dataflow | Supported | `let :draft = ...`; then `let :final = refine :draft, ...` if the bound value is a valid artifact |
+| Consensus gate checking every reviewer approval | Supported | Built into `until: :unanimous` |
+| Blocking findings drive reviser prompt | Supported | Built-in normalized `open_findings` and `ReviserPrompt` |
+| Direct `synthesize(...)` as refine input | Unsupported | Bind first, then `refine :draft` |
+| Direct nested `refine(...)` as refine input | Unsupported | Bind first, then `refine :previous` |
+| Dynamic reviewer list from runtime data | Unsupported | Keep orchestration outside V1; future collection dataflow may address this |
+| Large collection fan-out over files/issues | Unsupported by `refine` | Use existing `parallel`/`pipeline`/`fan_out`; dataflow `map` remains deferred |
+| Arbitrary JS loop condition or majority threshold | Unsupported | V1 is `max_rounds` plus unanimous consensus only |
+
+### 9.11 §10 dataflow integration
+
+§10.5 `Producer` includes `RefineStmt` as a bindable producer. `let :x = refine ...` inserts
+the refine node at address `[i]`, records
+`BindingEnv[:x] = {:refine, [i]}`, commits no `let` event, and resolves the value by folding
+the `refine_completed` event at `[i]`. `BoundValue({:refine, address})` returns
+`refine_completed.payload.artifact`.
+
+The §10.11 `BindingRef` union extends from
+`{:node, address} | {:map, address} | {:element, over_ref}` to
+`{:node, address} | {:map, address} | {:refine, address} | {:element, over_ref}`. `ResolveRef`
+adds:
+
+```
+ResolveRef(ref, run_id, lane):
+  - If ref is {:refine, address}: Return BoundRefineArtifact(run_id, address).
+
+BoundRefineArtifact(run_id, address):
+  - Fold the journal for the refine_completed event at address.
+  - Return that event's payload.artifact.
+```
+
+`{:refine, address}` is valid only after `refine_completed`; a terminal
+`refine_non_converged` or `refine_input_invalid` produces no bound value because the run is
+failed and no downstream node executes. `on_non_convergence: :accept_current` still writes
+`refine_completed`, so it is bindable.
+
+### 9.12 Conformance
+
+Reviewers MAY run in any order or in parallel, since all observable reviewer events commit in
+reviewer index order and `OpenFindings` is totally ordered. Scheduling MUST NOT affect the
+verdict, the revision prompt, the terminal event, or the bound artifact.
 
 ---
 
@@ -2878,8 +3346,8 @@ findings). Scheduling MUST NOT affect the verdict or the fixer's composed prompt
 
 > **Status: dataflow core implemented; remaining surface proposed/deferred.** The reference
 > implementation has shipped the zero-new-event dataflow core: `let :name = agent(...)`,
-> `let :name = synthesize(...)`, top-level `agent(~P"...")` prompt injection over previous
-> `let` bindings, and terminal `emit(~P"...")`. This section is the normative home for that
+> `let :name = synthesize(...)`, `let :name = refine(...)`, top-level `agent(~P"...")`
+> prompt injection over previous `let` bindings, and terminal `emit(~P"...")`. This section is the normative home for that
 > dataflow addendum going forward while §1–§8 remain the frozen base specification, carrying
 > only forward-reference notes to this section. `SPEC-DATAFLOW-PROPOSAL.md` remains design
 > provenance, not the primary spec.
@@ -2944,7 +3412,7 @@ outside the implemented core.
 | Idiom | Verdict | One-line reason |
 |---|---|---|
 | **Template layer** (§10.4) | **ADOPT / IMPLEMENTED** — foundation | Nothing flows without it; inert struct + compile-time binary scanner + the render §4.4 already defines. Closure-free by construction. |
-| **`let`** (§10.5) | **ADOPT / IMPLEMENTED CORE** | The keystone; currently binds `agent(...)` and `synthesize(...)`. No new effect/event/key — a bound value is a fold over the producer's existing `agent_committed`. |
+| **`let`** (§10.5) | **ADOPT / IMPLEMENTED CORE** | The keystone; currently binds `agent(...)`, `synthesize(...)`, and `refine(...)`. No new `let` effect/event/key — a bound value is a fold over the producer's journaled output (`agent_committed` or `refine_completed.payload.artifact`). |
 | **prompt injection** (§10.6) | **ADOPT / IMPLEMENTED CORE** | The edge authors want ("improve this draft"); top-level `agent(~P"...")` renders previous `let` bindings and rides the existing `agent_committed.prompt`. |
 | **`emit`** (§10.7) | **ADOPT / IMPLEMENTED CORE** | Pure render, no paid effect; makes "flow N results into one document" a first-class terminal. |
 | **pipeline-with-dataflow** (§10.8) | **ADOPT / IMPLEMENTED by composition** | Falls out of `let` + injection + sequencing — no new combinator. |
@@ -2953,10 +3421,11 @@ outside the implemented core.
 | **`reduce`** (§10.10) | **REJECT** (Tier 1) | Drifts toward in-language computation; `gather` + accumulators cover real needs. |
 | **`select` / `when`** (§10.10) | **REJECT** | It is **control** flow, not data flow — violates Principle 8 and the thesis. |
 
-**Build order.** (1) **Complete:** dataflow core = Template + `let` over `agent`/`synthesize` +
+**Build order.** (1) **Complete:** dataflow core = Template + `let` over `agent`/`synthesize`/`refine` +
 top-level injection + `emit`, one coherent slice (unlocks pipeline-with-dataflow for free, adds
 **zero** new events). (2) **DEFER:** `gather`. (3) **DEFER:** `map`. (4) **Never, absent a hard
-wall:** `reduce`, `select`/`when`. §9 `refine` remains an independent proposed extension.
+wall:** `reduce`, `select`/`when`. §9 `refine` is an implemented independent combinator whose
+completed artifact is bindable by the same `let` machinery.
 
 ### 10.3 Reconciliation — Principle 6 → 6′ and the proposed amendments
 
@@ -3021,17 +3490,14 @@ carry only the one-line forward-reference notes that point here.
   terminal result is (a) committed to the journal by a lexically-preceding node and resolved by a
   pure fold, and (b) rendered by the deterministic, closure-free `RenderText`. Interpolation,
   closures, arithmetic-in-prompts, and computed values remain rejected.
-- **The closed-vocabulary cluster → 17-way.** Five shipped clauses that fix the top-level
-  combinator *count* widen in lockstep: **Principle 1 → 1′** ("exactly **17** top-level
-  combinators — the shipped 13 (or **14** if §9's `refine` is also promoted, making the vocabulary
-  **18-way**) plus `let`, `map`, `gather`, `emit`"); **§2.4 → §2.4′** (recognized names 13 → 17,
-  or 14 → 18 with `refine`); **§8 C1 → C1′** (reject any form outside this widened vocabulary — the
-  17-way set, or the 18-way set that counts `refine` in when §9 also promotes); **Rule 5.1.3**'s
-  vocabulary set widened (so the four names are not "unknown bare calls" — each gets its own
-  `parse/2` clause); **§11.2** at-a-glance table gains four rows. `collect` remains **body-only**.
-  This count amendment is stated **relative to the live baseline**: §9 (`refine`) and §10 are
-  independent proposals, so an implementation promoting both MUST count `refine` inside the closed
-  vocabulary (18-way) rather than reject it under a literal "17-way" reading of Principle 1′/C1′.
+- **The closed-vocabulary cluster → 18-way when all §10 deferred forms ship.** Five shipped
+  clauses that fix the combinator *count* widen in lockstep from the live **14-way** baseline:
+  **Principle 1 → 1′** ("exactly **18** combinators — the shipped 14 plus `let`, `map`,
+  `gather`, `emit`"); **§2.4 → §2.4′** (recognized names 14 → 18); **§8 C1 → C1′** (reject any
+  form outside this widened vocabulary); **Rule 5.1.3**'s vocabulary set widened (so the four §10
+  names are not "unknown bare calls" — each gets its own `parse/2` clause); **§11.2** at-a-glance
+  table gains four rows. `collect` remains **body-only**. The implemented dataflow core currently
+  recognizes the live 14 plus `let` and `emit`; `gather` and `map` remain DEFER.
 - **Separately (terminal-value amendment): §5.10.2** ("a workflow MUST contain a `return`") is
   widened by `emit` to "a `return` **or** an `emit`" (§10.7 / DF-E2).
 
@@ -3239,8 +3705,9 @@ RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.C
 ### 10.5 `let` — name a journaled output — Verdict: ADOPT
 
 `let` binds a compile-time **name to an address**; the value is always fetched by folding the
-journal (`BoundValue`). It creates no new value, no new paid effect, no new event, and no key —
-the producer's own `agent_committed` is the binding's sole record.
+journal (`BoundValue`). It creates no new value, no new paid effect, no new event, and no key.
+For `agent` and `synthesize` producers, the producer's own `agent_committed` is the binding's
+sole record. For `refine` producers, `refine_completed` is the sole binding record.
 
 **10.5.1 Surface (syntactic) grammar.**
 
@@ -3251,16 +3718,18 @@ AtomName :: (`a`–`z` | `_`) (Letter | Digit | `_`)*   ; implemented binding-na
 Producer :
   - AgentStmt                 ; binds the agent's journaled result ({:node, addr})
   - SynthesizeStmt            ; synthesize's output is an ordinary agent output
+  - RefineStmt                ; binds refine_completed artifact ({:refine, addr})
   - GatherStmt                ; DEFER, §10.9 (when adopted) — binds one agent_committed
   - `(` MapStmt `)`           ; DEFER, §10.9 — binds the ORDERED LIST of the map's lane results ({:map, addr})
 ```
 
-The implemented core accepts only `AgentStmt` and `SynthesizeStmt`. `GatherStmt` and `MapStmt`
-are listed here to keep the future extension closed and explicit, but both remain **DEFER** and
-MUST be rejected by the current compiler. `AgentStmt`/`SynthesizeStmt`/future `GatherStmt` are
-paren-call forms that need no extra parentheses. Future `MapStmt` is the **only** block-bearing
-producer and MUST be parenthesized — `let :xs = (map … do … end)` — because without parens the
-`do…end` attaches to `let` (the outermost paren-less call), leaving `map` bodyless.
+The implemented core accepts `AgentStmt`, `SynthesizeStmt`, and `RefineStmt`. `GatherStmt` and
+`MapStmt` are listed here to keep the future extension closed and explicit, but both remain
+**DEFER** and MUST be rejected by the current compiler. `AgentStmt`/`SynthesizeStmt`/`RefineStmt`/
+future `GatherStmt` are paren-call forms that need no extra parentheses. Future `MapStmt` is the
+**only** block-bearing producer and MUST be parenthesized — `let :xs = (map … do … end)` —
+because without parens the `do…end` attaches to `let` (the outermost paren-less call), leaving
+`map` bodyless.
 `parse/2` matches the uniform one-arg shape
 `{:let, meta, [{:=, _, [name_ast, producer_ast]}]}`, requires `name_ast` to be an atom literal,
 and dispatches `producer_ast` back through the ordinary per-form entry under the in-scope
@@ -3274,7 +3743,8 @@ The implemented core has **no `%Workflow.Node.Let{}` struct**. `let` is compile-
 syntax: the producer node is inserted into the top-level node list at address `[i]`, exactly where
 an unbound producer would have appeared, and `BindingEnv` records `name → {:node, [i]}`. `let`
 therefore introduces **no key** of its own; the producer keys exactly as any agent/synthesize
-turn. The bound value is **not** part of any key (keys stay value-free, Principle 2). Future
+turn. The bound value is **not** part of any key (keys stay value-free, Principle 2). A `refine`
+binding records `name → {:refine, [i]}` and resolves through the `refine_completed` event; future
 deferred `map` binding would record `name → {:map, [i]}`.
 
 **10.5.3 Validation rules (smallest counter-examples).**
@@ -3307,27 +3777,32 @@ RunLet(producer, run_id, provider, prior, ctx):
 Determinism, exactly-once, and replay-safety are inherited verbatim. For an `agent`/`synthesize`
 producer the producer commits one `agent_committed` at `[i]`, keyed and resumable exactly as any
 agent; on resume the binding is re-derived by `ResolveRef` (`{:node} → BoundValue` folding that
-same event). For a future `gather`, the same one-`agent_committed` rule would apply. For a future
-`map` producer the producer commits its own `map_started`/`map_completed` (§10.9.2) and its lanes' per-lane
-`agent_committed`s; the binding is re-derived by `ResolveRef` (`{:map} → BoundList`, DF-M4) — `let`
-itself still commits nothing. `let` adds no effect and no non-determinism, and runs exactly one node
-(it does not iterate).
+same event). For `refine`, the producer commits its own refine events and the binding is
+re-derived by `ResolveRef` (`{:refine} → BoundRefineArtifact` folding `refine_completed`). For
+a future `gather`, the same one-`agent_committed` rule would apply. For a future `map` producer
+the producer commits its own `map_started`/`map_completed` (§10.9.2) and its lanes' per-lane
+`agent_committed`s; the binding is re-derived by `ResolveRef` (`{:map} → BoundList`, DF-M4) —
+`let` itself still commits nothing. `let` adds no effect and no non-determinism, and runs exactly
+one node (it does not iterate).
 
-**10.5.5 Journal events. None new** — the producer's `agent_committed` is the binding's sole
-record (a `let_bound{…}` marker would be pure redundancy; omitted per Principle 3).
+**10.5.5 Journal events. None new** — the producer's journaled output is the binding's sole
+record: `agent_committed` for `agent`/`synthesize`, and `refine_completed` for `RefineStmt`.
+A `let_bound{…}` marker would be pure redundancy; omitted per
+Principle 3.
 
 **10.5.6 Conformance.**
 
 - **DF-L1.** A `let` MUST bind a literal-atom name to a single producer node and MUST introduce
-  **no** journal event or key of its own. In the implemented core, `agent` and `synthesize` are the
-  only bindable producers, and the binding is the producer's own `agent_committed` (no new event).
-  Future `gather` would follow the same rule; future `map` would bind the ordered lane list
+  **no** journal event or key of its own. In the implemented core, `agent`, `synthesize`, and
+  `refine` are bindable producers; the binding is the producer's own `agent_committed` or
+  `refine_completed` event. Future `gather`
+  would follow the one-`agent_committed` rule; future `map` would bind the ordered lane list
   resolved via `BoundList` per DF-M4, and the `map`'s `map_started`/`map_completed` would be the
   **producer's** events, not `let`'s. `let` is the sole value-binding construct admitted by the
   narrowed Non-goal §1.2′.
 - **DF-L2.** A bound value MUST be resolvable **only** by a pure fold over the journal via
-  `ResolveRef` (`{:node} → BoundValue`, `{:map} → BoundList`); an implementation MUST NOT cache the
-  value in process state.
+  `ResolveRef` (`{:node} → BoundValue`, `{:refine} → BoundRefineArtifact`, `{:map} →
+  BoundList`); an implementation MUST NOT cache the value in process state.
 - **DF-L3.** Binding names are top-level only in Tier 1; a bound reference MUST resolve at
   `iteration = 0`. If a name is rebound, subsequent consumers MUST resolve to the latest
   lexically-preceding binding, while earlier consumers keep the address captured when they were
@@ -3749,14 +4224,15 @@ reduce(:n, over: :items, with: :count)   # an in-language reducer — REJECTED (
 
 ### 10.11 Shared machinery, output & error format
 
-**Binding resolution (shared by every idiom).** `BindingRef` is `{:node, address}` | `{:map,
-address}` | `{:element, over_ref}`. `BindingEnv` is a compile-time ordered map `name(atom) →
-BindingRef` threaded through parsing so only lexically-preceding bindings are in scope (Rule T.5);
-there is **no** runtime name→value map. The implemented core emits only `{:node, address}` refs;
-`{:map, address}` is support for the deferred `map` producer's ordered result list, and
-`{:element, over_ref}` belongs only to the deferred `map` lane scope. At runtime a reference is
-resolved by the pure journal fold `ResolveAssign → ResolveRef`, defined for **all three**
-`BindingRef` shapes:
+**Binding resolution (shared by every idiom).** `BindingRef` is `{:node, address}` |
+`{:refine, address}` | `{:map, address}` | `{:element, over_ref}`.
+`BindingEnv` is a compile-time ordered map `name(atom) → BindingRef` threaded through parsing so
+only lexically-preceding bindings are in scope (Rule T.5); there is **no** runtime name→value map.
+The implemented core emits `{:node, address}` refs for `agent`/`synthesize` producers and
+`{:refine, address}` refs for `refine` producers. `{:map, address}` is support for the deferred
+`map` producer's ordered result list, and `{:element, over_ref}` belongs only to the deferred
+`map` lane scope. At runtime a reference is resolved by the pure journal fold
+`ResolveAssign → ResolveRef`, defined for these `BindingRef` shapes:
 
 ```
 ResolveAssign(name, bindings, run_id, lane):   ; bindings :: %{atom() => BindingRef} (the node's field)
@@ -3765,6 +4241,7 @@ ResolveAssign(name, bindings, run_id, lane):   ; bindings :: %{atom() => Binding
 
 ResolveRef(ref, run_id, lane):
   - If ref is {:node, address}: Return BoundValue(run_id, address).
+  - If ref is {:refine, address}: Return BoundRefineArtifact(run_id, address).
   - If ref is {:map, address}:  Return BoundList(run_id, address).
   - If ref is {:element, over}:                ; a map lane's element; lane is %{index: e}, e a 0-based lane index
     - Let list be ResolveRef(over, run_id, lane).   ; over is {:node, _} (list-valued) or {:map, _}
@@ -3774,19 +4251,24 @@ BoundValue(run_id, address):                   ; the single-agent producer fold 
   - Fold the journal for the agent_committed at address with iteration == 0.
   - Return that event's payload.result.        ; exactly one such event exists once the producer has committed
 
+BoundRefineArtifact(run_id, address):          ; refine producer fold
+  - Fold the journal for the refine_completed at address.
+  - Return that event's payload.artifact.
+
 BoundList(run_id, address):                    ; a map's ordered lane-result list
   - Let width be the width of the map_started at address (payload.width).
   - Return the List [ BoundValue(run_id, address ++ [e, 0]) for e in 0..(width - 1) ], in ascending e order.
 ```
 
-`BoundValue` and `BoundList` are pure folds over already-committed events; `{:element, over}` never
-folds directly but indexes the resolved list zero-based, so a `map`-lane agent template resolving
-`@element_name` (env `{:element, over}`, §10.9.2; `lane = %{index: e}`, §10.6.4) yields the `e`-th
-element of `over`'s resolved collection. Top-level bindings resolve at `iteration = 0`. Every
-per-form compile step (the recursive compile entry `parse/2` delegates to per form, §5) threads an
-additional in-scope `binding_env` — a trailing-argument extension, not an overload: the in-scope
-`binding_env` at top level, the **empty** env `%{}` at the four nested positions (where templates
-are actively rejected), and the element-extended env at the `map` lane.
+`BoundValue`, `BoundRefineArtifact`, and `BoundList` are pure folds over
+already-committed events; `{:element, over}` never folds directly but indexes the resolved list
+zero-based, so a `map`-lane agent template resolving `@element_name` (env `{:element, over}`,
+§10.9.2; `lane = %{index: e}`, §10.6.4) yields the `e`-th element of `over`'s resolved
+collection. Top-level bindings resolve at `iteration = 0`. Every per-form compile step (the
+recursive compile entry `parse/2` delegates to per form, §5) threads an additional in-scope
+`binding_env` — a trailing-argument extension, not an overload: the in-scope `binding_env` at top
+level, the **empty** env `%{}` at the four nested positions (where templates are actively
+rejected), and the element-extended env at the `map` lane.
 
 **Journal events.** The dataflow **core** (Template + `let` + injection + `emit`) adds **zero** new
 event types: `let` rides the producer's existing `agent_committed`; injection rides

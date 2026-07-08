@@ -23,6 +23,13 @@ defmodule Workflow.BoundValue do
     end
   end
 
+  def fold(events, {:refine, address} = ref) do
+    case Enum.reduce(events, nil, &apply_refine_event(&1, &2, address)) do
+      nil -> {:error, {:unbound, ref}}
+      result -> {:ok, result}
+    end
+  end
+
   def fold(_events, {:map, _address} = ref), do: {:error, {:unbound, ref}}
 
   defp apply_event(
@@ -33,4 +40,13 @@ defmodule Workflow.BoundValue do
        do: result
 
   defp apply_event(%Event{}, acc, _address), do: acc
+
+  defp apply_refine_event(
+         %Event{type: :refine_completed, payload: %{address: address, artifact: artifact}},
+         _acc,
+         address
+       ),
+       do: artifact
+
+  defp apply_refine_event(%Event{}, acc, _address), do: acc
 end

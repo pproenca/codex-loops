@@ -275,6 +275,117 @@ defmodule Workflow.Event do
   defp verify_mode_tag({:lenses, _lenses}), do: :lenses
 
   @doc """
+  Refine markers. `refine_started` records the static role descriptors, each
+  round records the reviewed artifact, `refine_round_decision` records the folded
+  reviewer outcome, and `refine_completed` exposes the bindable final artifact.
+  """
+  def refine_started(%Workflow.Node.Refine{} = node) do
+    %__MODULE__{
+      type: :refine_started,
+      payload: %{
+        address: node.address,
+        input: refine_input_descriptor(node.input),
+        max_rounds: node.max_rounds,
+        until: node.until,
+        on_non_convergence: node.on_non_convergence,
+        max_concurrency: node.max_concurrency || length(node.reviewers),
+        reviewer_timeout_ms: node.reviewer_timeout_ms,
+        reviewers: Enum.map(node.reviewers, &reviewer_descriptor/1),
+        reviser: agent_descriptor(node.reviser),
+        artifact_schema_version: 1,
+        review_schema_version: 1
+      }
+    }
+  end
+
+  def refine_round_started(%Workflow.Node.Refine{} = node, round, artifact) do
+    %__MODULE__{
+      type: :refine_round_started,
+      payload: %{address: node.address, round: round, artifact: artifact}
+    }
+  end
+
+  def refine_round_decision(%Workflow.Node.Refine{} = node, round, decision) do
+    %__MODULE__{
+      type: :refine_round_decision,
+      payload:
+        Map.merge(
+          %{address: node.address, round: round},
+          Map.take(decision, [
+            :consensus,
+            :approval_count,
+            :total,
+            :reviewer_decisions,
+            :artifact,
+            :open_findings
+          ])
+        )
+    }
+  end
+
+  def refine_completed(%Workflow.Node.Refine{} = node, attrs) do
+    %__MODULE__{
+      type: :refine_completed,
+      payload:
+        Map.merge(
+          %{address: node.address},
+          Map.take(attrs, [
+            :converged,
+            :final_round,
+            :rounds,
+            :artifact,
+            :open_findings
+          ])
+        )
+    }
+  end
+
+  def refine_non_converged(%Workflow.Node.Refine{} = node, attrs) do
+    %__MODULE__{
+      type: :refine_non_converged,
+      payload:
+        Map.merge(
+          %{address: node.address, reason: :max_rounds},
+          Map.take(attrs, [
+            :final_round,
+            :rounds,
+            :artifact,
+            :open_findings
+          ])
+        )
+    }
+  end
+
+  def refine_input_invalid(%Workflow.Node.Refine{} = node, input, reason) do
+    %__MODULE__{
+      type: :refine_input_invalid,
+      payload: %{address: node.address, input: input, reason: reason}
+    }
+  end
+
+  defp refine_input_descriptor({:producer, %Workflow.Node.Agent{} = agent}) do
+    agent_descriptor(agent) |> Map.put(:kind, :producer)
+  end
+
+  defp refine_input_descriptor({:binding, name, ref}) do
+    %{kind: :binding, name: name, ref: ref}
+  end
+
+  defp agent_descriptor(%Workflow.Node.Agent{} = agent) do
+    %{
+      address: agent.address,
+      prompt: agent.prompt,
+      retries: agent.retries,
+      label: agent.label
+    }
+  end
+
+  defp reviewer_descriptor(%{index: index, name: name, agent: agent}) do
+    agent_descriptor(agent)
+    |> Map.merge(%{index: index, name: name})
+  end
+
+  @doc """
   Judge-panel markers. `judge_started` records the candidate list and criteria;
   `judge_settled` records the **journal-folded outcome**: the total `scores` per
   candidate, the `pick` strategy, and the `winner`. Each per-criterion score is

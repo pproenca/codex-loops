@@ -1,0 +1,1571 @@
+defmodule Workflow.RefineRunTest do
+  use ExUnit.Case, async: false
+
+  @moduletag :capture_log
+
+  alias Workflow.{Journal, Run, Status}
+  alias Workflow.Test.{ExplodingProvider, RefineProvider}
+
+  defmodule ReplayStartedProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, key, opts) do
+      sink = Keyword.fetch!(opts, :sink)
+      send(sink, {:agent_called, prompt, key})
+
+      output =
+        case key.node_path do
+          [0, 0] ->
+            if key.attempt == 0 do
+              %{"artifact" => 123}
+            else
+              %{"artifact" => "draft-v1"}
+            end
+
+          [0, 1, reviewer_index] ->
+            send(sink, {:reviewer_entered, prompt, key, self()})
+
+            receive do
+              :release_reviewer -> :ok
+            after
+              5_000 -> raise "reviewer #{inspect(key.node_path)} was not released"
+            end
+
+            review_for(key.iteration, reviewer_index)
+
+          [0, 2] ->
+            if key.attempt == 0 do
+              %{"artifact" => 123}
+            else
+              %{"artifact" => "draft-v2"}
+            end
+        end
+
+      {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+    end
+
+    defp review_for(0, 0) do
+      %{
+        "approved" => false,
+        "findings" => [
+          %{
+            "id" => "spec-gap",
+            "blocking" => true,
+            "issue" => "Spec is ambiguous.",
+            "fix" => "Pin the behavior."
+          }
+        ]
+      }
+    end
+
+    defp review_for(_iteration, _reviewer_index), do: %{"approved" => true, "findings" => []}
+  end
+
+  defmodule ProducerRetryCrashProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, key, opts) do
+      sink = Keyword.fetch!(opts, :sink)
+      send(sink, {:agent_called, prompt, key})
+
+      output =
+        case key.node_path do
+          [0, 0] when key.attempt == 0 ->
+            %{"artifact" => 123}
+
+          [0, 0] ->
+            raise "producer crashed after a rejected attempt"
+        end
+
+      {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+    end
+  end
+
+  defmodule ReviserRetryCrashProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, key, opts) do
+      sink = Keyword.fetch!(opts, :sink)
+      send(sink, {:agent_called, prompt, key})
+
+      output =
+        case key.node_path do
+          [0, 0] ->
+            %{"artifact" => "draft-v1"}
+
+          [0, 1, 0] ->
+            %{
+              "approved" => false,
+              "findings" => [
+                %{
+                  "id" => "spec-gap",
+                  "blocking" => true,
+                  "issue" => "Spec is ambiguous.",
+                  "fix" => "Pin the behavior."
+                }
+              ]
+            }
+
+          [0, 1, 1] ->
+            %{"approved" => true, "findings" => []}
+
+          [0, 2] when key.attempt == 0 ->
+            %{"artifact" => 123}
+
+          [0, 2] ->
+            raise "reviser crashed after a rejected attempt"
+        end
+
+      {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+    end
+  end
+
+  defmodule SlowReviewerProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, key, opts) do
+      if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt, key})
+
+      output =
+        case key.node_path do
+          [0, 0] ->
+            %{"artifact" => "draft-v1"}
+
+          [0, 1, 0] ->
+            Process.sleep(100)
+            %{"approved" => true, "findings" => []}
+
+          [0, 1, 1] ->
+            %{"approved" => true, "findings" => []}
+        end
+
+      {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+    end
+  end
+
+  defmodule KilledReviewerProvider do
+    @behaviour Workflow.Provider
+
+    alias Workflow.Provider.Usage
+
+    @impl true
+    def run_agent(prompt, _schema, key, opts) do
+      if sink = Keyword.get(opts, :sink), do: send(sink, {:agent_called, prompt, key})
+
+      output =
+        case key.node_path do
+          [0, 0] ->
+            %{"artifact" => "draft-v1"}
+
+          [0, 1, 0] ->
+            Process.exit(self(), :kill)
+
+          [0, 1, 1] ->
+            %{"approved" => true, "findings" => []}
+        end
+
+      {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+    end
+  end
+
+  defmodule InlineConverges do
+    use Workflow
+
+    workflow "inline-converges" do
+      refine(agent("Draft."),
+        reviewers: [
+          reviewer(:spec, "Check the spec."),
+          reviewer(:runtime, "Check the runtime.")
+        ],
+        revise_with: agent("Fix."),
+        until: :unanimous,
+        max_rounds: 3
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule ChangedInlineConverges do
+    use Workflow
+
+    workflow "changed-inline-converges" do
+      refine(agent("Changed draft."),
+        reviewers: [
+          reviewer(:changed_spec, "Changed spec."),
+          reviewer(:changed_runtime, "Changed runtime."),
+          reviewer(:changed_extra, "Changed extra.")
+        ],
+        revise_with: agent("Changed fix."),
+        until: :unanimous,
+        max_rounds: 3,
+        max_concurrency: 3
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule BoundConverges do
+    use Workflow
+
+    workflow "bound-converges" do
+      let(:draft = agent("Draft."))
+
+      refine(:draft,
+        reviewers: [
+          reviewer(:spec, "Check the spec."),
+          reviewer(:runtime, "Check the runtime.")
+        ],
+        revise_with: agent("Fix."),
+        until: :unanimous,
+        max_rounds: 3
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule BoundInvalidObject do
+    use Workflow
+
+    workflow "bound-invalid-object" do
+      let(:draft = agent("Draft.", schema: %{"type" => "object", "required" => ["not_artifact"]}))
+
+      refine(:draft,
+        reviewers: [
+          reviewer(:spec, "Check the spec."),
+          reviewer(:runtime, "Check the runtime.")
+        ],
+        revise_with: agent("Fix."),
+        until: :unanimous,
+        max_rounds: 3
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule BoundArtifactObjectConverges do
+    use Workflow
+
+    workflow "bound-artifact-object-converges" do
+      let(:draft = agent("Draft.", schema: %{"type" => "object", "required" => ["artifact"]}))
+
+      refine(:draft,
+        reviewers: [
+          reviewer(:spec, "Check the spec."),
+          reviewer(:runtime, "Check the runtime.")
+        ],
+        revise_with: agent("Fix."),
+        until: :unanimous,
+        max_rounds: 3
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule NonConvergesFail do
+    use Workflow
+
+    workflow "non-converges-fail" do
+      refine(agent("Draft."),
+        reviewers: [
+          reviewer(:spec, "Check the spec."),
+          reviewer(:runtime, "Check the runtime.")
+        ],
+        revise_with: agent("Fix."),
+        until: :unanimous,
+        max_rounds: 1
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule NonConvergesAccept do
+    use Workflow
+
+    workflow "non-converges-accept" do
+      refine(agent("Draft."),
+        reviewers: [
+          reviewer(:spec, "Check the spec."),
+          reviewer(:runtime, "Check the runtime.")
+        ],
+        revise_with: agent("Fix."),
+        until: :unanimous,
+        max_rounds: 1,
+        on_non_convergence: :accept_current
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule AcceptCurrentEmit do
+    use Workflow
+
+    workflow "accept-current-emit" do
+      let(
+        :final =
+          refine(agent("Draft."),
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 1,
+            on_non_convergence: :accept_current
+          )
+      )
+
+      emit(~P"Final: <%= @final %>")
+    end
+  end
+
+  defp run_id, do: "run_#{System.unique_integer([:positive])}"
+  defp events(id), do: Journal.fold(id)
+  defp types(id), do: events(id) |> Enum.map(& &1.type)
+
+  defp await_lease_released(run_id, tries \\ 200) do
+    cond do
+      Registry.lookup(Workflow.Run.Registry, run_id) == [] ->
+        :ok
+
+      tries == 0 ->
+        flunk("lease for #{run_id} was never released")
+
+      true ->
+        Process.sleep(5)
+        await_lease_released(run_id, tries - 1)
+    end
+  end
+
+  defp flush_agent_calls do
+    receive do
+      {:agent_called, _, _} -> flush_agent_calls()
+      {:agent_called, _} -> flush_agent_calls()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp stable_refine_started_event(node) do
+    event = Workflow.Event.refine_started(node)
+
+    reviewers =
+      Enum.map(event.payload.reviewers, fn reviewer ->
+        %{reviewer | label: "stable-#{reviewer.name}"}
+      end)
+
+    %{
+      event
+      | payload: %{
+          event.payload
+          | input: %{event.payload.input | retries: 1, label: "stable-producer"},
+            reviewers: reviewers,
+            reviser: %{event.payload.reviser | retries: 1, label: "stable-reviser"},
+            max_concurrency: 1
+        }
+    }
+  end
+
+  defp append_events(id, journal_events) do
+    Enum.reduce(journal_events, 0, fn event, seq ->
+      assert :ok = Journal.append(id, seq, event)
+      seq + 1
+    end)
+
+    :ok
+  end
+
+  defp key(run_id, address, iteration, attempt \\ 0) do
+    %Workflow.IdempotencyKey{
+      run_id: run_id,
+      node_path: address,
+      iteration: iteration,
+      attempt: attempt
+    }
+  end
+
+  defp assert_next_reviewer(address, iteration) do
+    assert_receive {:reviewer_entered, prompt, key, pid}
+    assert key.node_path == address
+    assert key.iteration == iteration
+    refute_receive {:reviewer_entered, _, _, _}, 50
+    send(pid, :release_reviewer)
+    prompt
+  end
+
+  test "inline producer converges in round 0 without invoking the reviser" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  reviews: [
+                    [approved: true, findings: []],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    assert_received {:agent_called, "Draft.", %{node_path: [0, 0], iteration: 0}}
+    assert_received {:agent_called, spec_prompt, %{node_path: [0, 1, 0], iteration: 0}}
+    assert_received {:agent_called, runtime_prompt, %{node_path: [0, 1, 1], iteration: 0}}
+    refute_received {:agent_called, "Fix.", _}
+
+    assert spec_prompt =~ "Check the spec."
+    assert spec_prompt =~ "artifact:\ndraft-v1"
+    assert runtime_prompt =~ "Check the runtime."
+    assert runtime_prompt =~ "artifact:\ndraft-v1"
+
+    assert types(id) ==
+             [
+               :run_started,
+               :refine_started,
+               :agent_committed,
+               :refine_round_started,
+               :agent_committed,
+               :agent_committed,
+               :refine_round_decision,
+               :refine_completed,
+               :run_completed
+             ]
+
+    committed =
+      events(id)
+      |> Enum.filter(&(&1.type == :agent_committed))
+
+    assert [
+             %{payload: %{address: [0, 0], iteration: 0, result: "draft-v1"}},
+             %{
+               payload: %{
+                 address: [0, 1, 0],
+                 iteration: 0,
+                 result: %{"approved" => true, "findings" => []}
+               }
+             },
+             %{
+               payload: %{
+                 address: [0, 1, 1],
+                 iteration: 0,
+                 result: %{"approved" => true, "findings" => []}
+               }
+             }
+           ] = committed
+
+    decision = Enum.find(events(id), &(&1.type == :refine_round_decision)).payload
+
+    assert decision == %{
+             address: [0],
+             round: 0,
+             consensus: true,
+             approval_count: 2,
+             total: 2,
+             artifact: "draft-v1",
+             open_findings: [],
+             reviewer_decisions: [
+               %{reviewer: :spec, reviewer_index: 0, approved: true, clear: true},
+               %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+             ]
+           }
+
+    completed = Enum.find(events(id), &(&1.type == :refine_completed)).payload
+    assert completed.artifact == "draft-v1"
+    assert completed.converged == true
+    assert completed.open_findings == []
+
+    status = Status.of(id)
+    assert status.state == :completed
+    assert status.result == :ok
+  end
+
+  test "blocking findings drive one reviser round before reviewers converge" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  revised_artifacts: ["draft-v2"],
+                  review_rounds: [
+                    [
+                      [
+                        approved: false,
+                        findings: [
+                          %{
+                            "id" => "spec-gap",
+                            "blocking" => true,
+                            "issue" => "Spec is ambiguous.",
+                            "fix" => "Pin the behavior."
+                          }
+                        ]
+                      ],
+                      [approved: true, findings: []]
+                    ],
+                    [
+                      [approved: true, findings: []],
+                      [approved: true, findings: []]
+                    ]
+                  ],
+                  sink: self()}
+             )
+
+    assert_received {:agent_called, "Draft.", %{node_path: [0, 0], iteration: 0}}
+    assert_received {:agent_called, _round0_spec_prompt, %{node_path: [0, 1, 0], iteration: 0}}
+    assert_received {:agent_called, _round0_runtime_prompt, %{node_path: [0, 1, 1], iteration: 0}}
+    assert_received {:agent_called, reviser_prompt, %{node_path: [0, 2], iteration: 0}}
+    assert_received {:agent_called, round1_spec_prompt, %{node_path: [0, 1, 0], iteration: 1}}
+    assert_received {:agent_called, round1_runtime_prompt, %{node_path: [0, 1, 1], iteration: 1}}
+    refute_received {:agent_called, _, _}
+
+    assert reviser_prompt =~ "Fix."
+    assert reviser_prompt =~ "--- CODEX LOOPS REFINE REVISION INPUT ---"
+    assert reviser_prompt =~ "round: 0"
+    assert reviser_prompt =~ "current-artifact:\ndraft-v1"
+    assert reviser_prompt =~ "blocking-finding-count: 1"
+    assert reviser_prompt =~ "reviewer: spec"
+    assert reviser_prompt =~ "id:\nspec-gap"
+    assert reviser_prompt =~ "issue:\nSpec is ambiguous."
+    assert reviser_prompt =~ "fix:\nPin the behavior."
+    assert round1_spec_prompt =~ "artifact:\ndraft-v2"
+    assert round1_runtime_prompt =~ "artifact:\ndraft-v2"
+
+    assert types(id) ==
+             [
+               :run_started,
+               :refine_started,
+               :agent_committed,
+               :refine_round_started,
+               :agent_committed,
+               :agent_committed,
+               :refine_round_decision,
+               :agent_committed,
+               :refine_round_started,
+               :agent_committed,
+               :agent_committed,
+               :refine_round_decision,
+               :refine_completed,
+               :run_completed
+             ]
+
+    decisions =
+      events(id)
+      |> Enum.filter(&(&1.type == :refine_round_decision))
+      |> Enum.map(& &1.payload)
+
+    assert [
+             %{
+               round: 0,
+               consensus: false,
+               approval_count: 1,
+               total: 2,
+               artifact: "draft-v1",
+               open_findings: [
+                 %{
+                   reviewer: :spec,
+                   reviewer_index: 0,
+                   id: "spec-gap",
+                   issue: "Spec is ambiguous.",
+                   fix: "Pin the behavior."
+                 }
+               ]
+             },
+             %{
+               round: 1,
+               consensus: true,
+               approval_count: 2,
+               total: 2,
+               artifact: "draft-v2",
+               open_findings: []
+             }
+           ] = decisions
+
+    completed = Enum.find(events(id), &(&1.type == :refine_completed)).payload
+    assert completed.final_round == 1
+    assert completed.rounds == 2
+    assert completed.artifact == "draft-v2"
+    assert completed.converged == true
+  end
+
+  test "open findings dedupe duplicate blocking ids per reviewer with first occurrence winning" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(NonConvergesAccept,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  reviews: [
+                    [
+                      approved: false,
+                      findings: [
+                        %{
+                          "id" => "z-repeat",
+                          "blocking" => true,
+                          "issue" => "first repeat issue",
+                          "fix" => "first repeat fix"
+                        },
+                        %{
+                          "id" => "a-first",
+                          "blocking" => true,
+                          "issue" => "first sorted issue",
+                          "fix" => "first sorted fix"
+                        },
+                        %{
+                          "id" => "z-repeat",
+                          "blocking" => true,
+                          "issue" => "second repeat issue",
+                          "fix" => "second repeat fix"
+                        }
+                      ]
+                    ],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    decision = Enum.find(events(id), &(&1.type == :refine_round_decision)).payload
+
+    assert decision.open_findings == [
+             %{
+               reviewer: :spec,
+               reviewer_index: 0,
+               id: "a-first",
+               issue: "first sorted issue",
+               fix: "first sorted fix"
+             },
+             %{
+               reviewer: :spec,
+               reviewer_index: 0,
+               id: "z-repeat",
+               issue: "first repeat issue",
+               fix: "first repeat fix"
+             }
+           ]
+  end
+
+  test "resume after committed reviser reviews the revised artifact without rerunning prior roles" do
+    id = run_id()
+    node = hd(InlineConverges.__workflow__(:tree).nodes)
+
+    key = fn address, iteration ->
+      %Workflow.IdempotencyKey{run_id: id, node_path: address, iteration: iteration, attempt: 0}
+    end
+
+    prior_events = [
+      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+      Workflow.Event.refine_started(node),
+      Workflow.Event.agent_committed(
+        %Workflow.Node.Agent{address: [0, 0], prompt: "Draft."},
+        0,
+        key.([0, 0], 0),
+        "draft-v1",
+        %Workflow.Provider.Usage{}
+      ),
+      Workflow.Event.refine_round_started(node, 0, "draft-v1"),
+      Workflow.Event.agent_committed(
+        %Workflow.Node.Agent{address: [0, 1, 0], prompt: "Check the spec."},
+        0,
+        key.([0, 1, 0], 0),
+        %{
+          "approved" => false,
+          "findings" => [
+            %{
+              "id" => "spec-gap",
+              "blocking" => true,
+              "issue" => "Spec is ambiguous.",
+              "fix" => "Pin the behavior."
+            }
+          ]
+        },
+        %Workflow.Provider.Usage{}
+      ),
+      Workflow.Event.agent_committed(
+        %Workflow.Node.Agent{address: [0, 1, 1], prompt: "Check the runtime."},
+        0,
+        key.([0, 1, 1], 0),
+        %{"approved" => true, "findings" => []},
+        %Workflow.Provider.Usage{}
+      ),
+      Workflow.Event.refine_round_decision(node, 0, %{
+        consensus: false,
+        approval_count: 1,
+        total: 2,
+        reviewer_decisions: [
+          %{reviewer: :spec, reviewer_index: 0, approved: false, clear: false},
+          %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+        ],
+        artifact: "draft-v1",
+        open_findings: [
+          %{
+            reviewer: :spec,
+            reviewer_index: 0,
+            id: "spec-gap",
+            issue: "Spec is ambiguous.",
+            fix: "Pin the behavior."
+          }
+        ]
+      }),
+      Workflow.Event.agent_committed(
+        %Workflow.Node.Agent{address: [0, 2], prompt: "Fix."},
+        0,
+        key.([0, 2], 0),
+        "draft-v2",
+        %Workflow.Provider.Usage{}
+      )
+    ]
+
+    Enum.reduce(prior_events, 0, fn event, seq ->
+      assert :ok = Journal.append(id, seq, event)
+      seq + 1
+    end)
+
+    assert {:ok, ^id} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "unused",
+                  review_rounds: [
+                    [
+                      [approved: false, findings: []],
+                      [approved: true, findings: []]
+                    ],
+                    [
+                      [approved: true, findings: []],
+                      [approved: true, findings: []]
+                    ]
+                  ],
+                  revised_artifacts: ["SHOULD NOT REVISE"],
+                  sink: self()}
+             )
+
+    assert_received {:agent_called, round1_spec_prompt, %{node_path: [0, 1, 0], iteration: 1}}
+
+    assert_received {:agent_called, round1_runtime_prompt, %{node_path: [0, 1, 1], iteration: 1}}
+
+    refute_received {:agent_called, _, _}
+
+    assert round1_spec_prompt =~ "artifact:\ndraft-v2"
+    assert round1_runtime_prompt =~ "artifact:\ndraft-v2"
+
+    committed_addresses =
+      events(id)
+      |> Enum.filter(&(&1.type == :agent_committed))
+      |> Enum.map(& &1.payload.address)
+
+    assert Enum.count(committed_addresses, &(&1 == [0, 0])) == 1
+    assert Enum.count(committed_addresses, &(&1 == [0, 2])) == 1
+    assert Enum.count(types(id), &(&1 == :refine_round_started)) == 2
+    assert Enum.count(types(id), &(&1 == :refine_round_decision)) == 2
+
+    completed = Enum.find(events(id), &(&1.type == :refine_completed)).payload
+    assert completed.final_round == 1
+    assert completed.artifact == "draft-v2"
+    assert completed.converged == true
+  end
+
+  test "resume replays refine_started descriptors instead of changed compiled source" do
+    id = run_id()
+    node = hd(InlineConverges.__workflow__(:tree).nodes)
+
+    prior_events = [
+      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+      stable_refine_started_event(node)
+    ]
+
+    Enum.reduce(prior_events, 0, fn event, seq ->
+      assert :ok = Journal.append(id, seq, event)
+      seq + 1
+    end)
+
+    assert {:ok, ^id, _pid} =
+             Run.start(ChangedInlineConverges,
+               run_id: id,
+               provider: {ReplayStartedProvider, sink: self()}
+             )
+
+    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 0}}
+    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 1}}
+
+    round0_spec_prompt = assert_next_reviewer([0, 1, 0], 0)
+    assert round0_spec_prompt =~ "Check the spec."
+    assert round0_spec_prompt =~ "artifact:\ndraft-v1"
+
+    round0_runtime_prompt = assert_next_reviewer([0, 1, 1], 0)
+    assert round0_runtime_prompt =~ "Check the runtime."
+    assert round0_runtime_prompt =~ "artifact:\ndraft-v1"
+
+    assert_receive {:agent_called, reviser_prompt, %{node_path: [0, 2], attempt: 0}}
+    assert_receive {:agent_called, ^reviser_prompt, %{node_path: [0, 2], attempt: 1}}
+    assert reviser_prompt =~ "Fix."
+    assert reviser_prompt =~ "current-artifact:\ndraft-v1"
+    assert reviser_prompt =~ "id:\nspec-gap"
+
+    round1_spec_prompt = assert_next_reviewer([0, 1, 0], 1)
+    assert round1_spec_prompt =~ "Check the spec."
+    assert round1_spec_prompt =~ "artifact:\ndraft-v2"
+
+    round1_runtime_prompt = assert_next_reviewer([0, 1, 1], 1)
+    assert round1_runtime_prompt =~ "Check the runtime."
+    assert round1_runtime_prompt =~ "artifact:\ndraft-v2"
+
+    await_lease_released(id)
+
+    refute_received {:reviewer_entered, _, %{node_path: [0, 1, 2]}, _}
+
+    committed =
+      events(id)
+      |> Enum.filter(&(&1.type == :agent_committed))
+
+    assert Enum.map(committed, & &1.payload.address) == [
+             [0, 0],
+             [0, 1, 0],
+             [0, 1, 1],
+             [0, 2],
+             [0, 1, 0],
+             [0, 1, 1]
+           ]
+
+    assert Enum.map(committed, & &1.payload.label) == [
+             "stable-producer",
+             "stable-spec",
+             "stable-runtime",
+             "stable-reviser",
+             "stable-spec",
+             "stable-runtime"
+           ]
+
+    assert Enum.count(events(id), &(&1.type == :agent_attempt_rejected)) == 2
+
+    prompts =
+      events(id)
+      |> Enum.filter(&(&1.type in [:agent_committed, :agent_attempt_rejected]))
+      |> Enum.map(& &1.payload.prompt)
+
+    refute Enum.any?(prompts, &String.contains?(&1, "Changed"))
+    assert Status.of(id).state == :completed
+  end
+
+  test "refine reviewer activity is committed only through ordered final role events" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  reviews: [
+                    [approved: true, findings: []],
+                    [approved: true, findings: []]
+                  ],
+                  activity_entries: [%{kind: "note", summary: "reviewing"}],
+                  sink: self()}
+             )
+
+    refute :agent_activity in types(id)
+
+    reviewer_events =
+      events(id)
+      |> Enum.filter(&(&1.type == :agent_committed and match?([0, 1, _], &1.payload.address)))
+
+    assert [
+             %{payload: %{activity: [%{activity_index: 0, kind: "note", summary: "reviewing"}]}},
+             %{payload: %{activity: [%{activity_index: 0, kind: "note", summary: "reviewing"}]}}
+           ] = reviewer_events
+  end
+
+  test "bound binary artifact input skips inline producer and converges" do
+    id = run_id()
+
+    {:ok, script} =
+      Workflow.Test.ScriptedProvider.start([
+        "bound draft",
+        %{"approved" => true, "findings" => []},
+        %{"approved" => true, "findings" => []}
+      ])
+
+    assert {:ok, ^id} =
+             Run.run(BoundConverges,
+               run_id: id,
+               provider: {Workflow.Test.ScriptedProvider, script: script, sink: self()}
+             )
+
+    assert_received {:agent_called, "Draft."}
+    assert_received {:agent_called, spec_prompt}
+    assert_received {:agent_called, runtime_prompt}
+    refute_received {:agent_called, "Fix."}
+    refute_received {:agent_called, _}
+
+    assert spec_prompt =~ "artifact:\nbound draft"
+    assert runtime_prompt =~ "artifact:\nbound draft"
+
+    started = Enum.find(events(id), &(&1.type == :refine_started)).payload
+    assert started.input == %{kind: :binding, name: :draft, ref: {:node, [0]}}
+
+    assert types(id) ==
+             [
+               :run_started,
+               :agent_committed,
+               :refine_started,
+               :refine_round_started,
+               :agent_committed,
+               :agent_committed,
+               :refine_round_decision,
+               :refine_completed,
+               :run_completed
+             ]
+  end
+
+  test "bound artifact-object input reviews the inner artifact binary" do
+    id = run_id()
+
+    {:ok, script} =
+      Workflow.Test.ScriptedProvider.start([
+        %{"artifact" => "object draft"},
+        %{"approved" => true, "findings" => []},
+        %{"approved" => true, "findings" => []}
+      ])
+
+    assert {:ok, ^id} =
+             Run.run(BoundArtifactObjectConverges,
+               run_id: id,
+               provider: {Workflow.Test.ScriptedProvider, script: script, sink: self()}
+             )
+
+    assert_received {:agent_called, "Draft."}
+    assert_received {:agent_called, spec_prompt}
+    assert_received {:agent_called, runtime_prompt}
+    refute_received {:agent_called, "Fix."}
+    refute_received {:agent_called, _}
+
+    assert spec_prompt =~ "artifact:\nobject draft"
+    assert runtime_prompt =~ "artifact:\nobject draft"
+
+    committed_addresses =
+      events(id)
+      |> Enum.filter(&(&1.type == :agent_committed))
+      |> Enum.map(& &1.payload.address)
+
+    assert committed_addresses == [[0], [1, 1, 0], [1, 1, 1]]
+    refute [1, 0] in committed_addresses
+
+    completed = Enum.find(events(id), &(&1.type == :refine_completed)).payload
+    assert completed.artifact == "object draft"
+    assert completed.converged == true
+  end
+
+  test "invalid bound artifact input journals terminal refine failure" do
+    id = run_id()
+
+    {:ok, script} =
+      Workflow.Test.ScriptedProvider.start([
+        %{"not_artifact" => "value"}
+      ])
+
+    assert {:error, {:invalid_refine_input, [1], :artifact_object_unexpected_shape}} =
+             Run.run(BoundInvalidObject,
+               run_id: id,
+               provider: {Workflow.Test.ScriptedProvider, script: script, sink: self()}
+             )
+
+    assert_received {:agent_called, "Draft."}
+    refute_received {:agent_called, _}
+
+    assert types(id) == [
+             :run_started,
+             :agent_committed,
+             :refine_started,
+             :refine_input_invalid
+           ]
+
+    invalid = Enum.find(events(id), &(&1.type == :refine_input_invalid)).payload
+    assert invalid.address == [1]
+    assert invalid.input == %{kind: :binding, name: :draft, ref: {:node, [0]}}
+    assert invalid.reason == :artifact_object_unexpected_shape
+
+    status = Status.of(id)
+    assert status.state == :failed
+
+    assert status.failure.reason ==
+             {:invalid_refine_input, [1], :artifact_object_unexpected_shape}
+
+    assert {:error, {:invalid_refine_input, [1], :artifact_object_unexpected_shape}} =
+             Run.run(BoundInvalidObject,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "unused",
+                  reviews: [
+                    [approved: true, findings: []],
+                    [approved: true, findings: []]
+                  ]}
+             )
+  end
+
+  test "inline producer rejected attempt is journaled before a retry crashes" do
+    id = run_id()
+
+    assert {:error, {:run_crashed, _reason}} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider: {ProducerRetryCrashProvider, sink: self()}
+             )
+
+    rejected =
+      events(id)
+      |> Enum.filter(&(&1.type == :agent_attempt_rejected))
+
+    assert [
+             %{
+               payload: %{
+                 address: [0, 0],
+                 iteration: 0,
+                 attempt: 0
+               }
+             }
+           ] = rejected
+
+    flush_agent_calls()
+
+    assert {:ok, ^id} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  reviews: [
+                    [approved: true, findings: []],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    assert_received {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 1}}
+  end
+
+  test "reviser rejected attempt is journaled before a retry crashes" do
+    id = run_id()
+
+    assert {:error, {:run_crashed, _reason}} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider: {ReviserRetryCrashProvider, sink: self()}
+             )
+
+    rejected =
+      events(id)
+      |> Enum.filter(&(&1.type == :agent_attempt_rejected and &1.payload.address == [0, 2]))
+
+    assert [
+             %{
+               payload: %{
+                 address: [0, 2],
+                 iteration: 0,
+                 attempt: 0
+               }
+             }
+           ] = rejected
+
+    flush_agent_calls()
+
+    assert {:ok, ^id} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "unused",
+                  review_rounds: [
+                    [
+                      [
+                        approved: false,
+                        findings: [
+                          %{
+                            "id" => "spec-gap",
+                            "blocking" => true,
+                            "issue" => "Spec is ambiguous.",
+                            "fix" => "Pin the behavior."
+                          }
+                        ]
+                      ],
+                      [approved: true, findings: []]
+                    ],
+                    [
+                      [approved: true, findings: []],
+                      [approved: true, findings: []]
+                    ]
+                  ],
+                  revised_artifacts: ["draft-v2"],
+                  sink: self()}
+             )
+
+    assert_received {:agent_called, reviser_prompt, %{node_path: [0, 2], attempt: 1}}
+    assert reviser_prompt =~ "current-artifact:\ndraft-v1"
+  end
+
+  test "resume commits producer failure when final rejected attempt was already journaled" do
+    id = run_id()
+    node = hd(InlineConverges.__workflow__(:tree).nodes)
+    {:producer, producer} = node.input
+    final_reason = {:property, "artifact", :artifact_not_binary}
+
+    rejected =
+      for attempt <- 0..2 do
+        reason = if attempt == 2, do: final_reason, else: {:retry, attempt}
+
+        Workflow.Event.agent_attempt_rejected(
+          producer,
+          0,
+          attempt,
+          %{"artifact" => 123},
+          reason,
+          %Workflow.Provider.Usage{}
+        )
+      end
+
+    append_events(
+      id,
+      [
+        Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+        Workflow.Event.refine_started(node)
+        | rejected
+      ]
+    )
+
+    assert {:error, {:malformed_output, [0, 0], ^final_reason}} =
+             Run.run(InlineConverges, run_id: id, provider: {ExplodingProvider, []})
+
+    assert %{
+             payload: %{
+               address: [0, 0],
+               iteration: 0,
+               attempts: 3,
+               reason: ^final_reason
+             }
+           } =
+             events(id)
+             |> Enum.find(&(&1.type == :agent_failed and &1.payload.address == [0, 0]))
+
+    refute :refine_round_started in types(id)
+  end
+
+  test "resume commits reviser failure when final rejected attempt was already journaled" do
+    id = run_id()
+    node = hd(InlineConverges.__workflow__(:tree).nodes)
+    {:producer, producer} = node.input
+    [%{agent: spec_reviewer}, %{agent: runtime_reviewer}] = node.reviewers
+    reviser = node.reviser
+    final_reason = {:property, "artifact", :artifact_not_binary}
+
+    finding = %{
+      "id" => "spec-gap",
+      "blocking" => true,
+      "issue" => "Spec is ambiguous.",
+      "fix" => "Pin the behavior."
+    }
+
+    open_finding = %{
+      reviewer: :spec,
+      reviewer_index: 0,
+      id: "spec-gap",
+      issue: "Spec is ambiguous.",
+      fix: "Pin the behavior."
+    }
+
+    rejected =
+      for attempt <- 0..2 do
+        reason = if attempt == 2, do: final_reason, else: {:retry, attempt}
+
+        Workflow.Event.agent_attempt_rejected(
+          reviser,
+          0,
+          attempt,
+          %{"artifact" => 123},
+          reason,
+          %Workflow.Provider.Usage{}
+        )
+      end
+
+    append_events(
+      id,
+      [
+        Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+        Workflow.Event.refine_started(node),
+        Workflow.Event.agent_committed(
+          producer,
+          0,
+          key(id, [0, 0], 0),
+          "draft-v1",
+          %Workflow.Provider.Usage{}
+        ),
+        Workflow.Event.refine_round_started(node, 0, "draft-v1"),
+        Workflow.Event.agent_committed(
+          spec_reviewer,
+          0,
+          key(id, [0, 1, 0], 0),
+          %{"approved" => false, "findings" => [finding]},
+          %Workflow.Provider.Usage{}
+        ),
+        Workflow.Event.agent_committed(
+          runtime_reviewer,
+          0,
+          key(id, [0, 1, 1], 0),
+          %{"approved" => true, "findings" => []},
+          %Workflow.Provider.Usage{}
+        ),
+        Workflow.Event.refine_round_decision(node, 0, %{
+          consensus: false,
+          approval_count: 1,
+          total: 2,
+          reviewer_decisions: [
+            %{reviewer: :spec, reviewer_index: 0, approved: false, clear: false},
+            %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+          ],
+          artifact: "draft-v1",
+          open_findings: [open_finding]
+        })
+        | rejected
+      ]
+    )
+
+    assert {:error, {:malformed_output, [0, 2], ^final_reason}} =
+             Run.run(InlineConverges, run_id: id, provider: {ExplodingProvider, []})
+
+    assert %{
+             payload: %{
+               address: [0, 2],
+               iteration: 0,
+               attempts: 3,
+               reason: ^final_reason
+             }
+           } =
+             events(id)
+             |> Enum.find(&(&1.type == :agent_failed and &1.payload.address == [0, 2]))
+
+    refute :refine_non_converged in types(id)
+    assert Enum.count(types(id), &(&1 == :refine_round_started)) == 1
+  end
+
+  test "resume uses reviewer timeout captured in refine_started payload" do
+    id = run_id()
+    node = hd(InlineConverges.__workflow__(:tree).nodes)
+
+    started =
+      node
+      |> Workflow.Event.refine_started()
+      |> then(fn event ->
+        %{event | payload: Map.put(event.payload, :reviewer_timeout_ms, 5)}
+      end)
+
+    append_events(id, [
+      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+      started
+    ])
+
+    previous_timeout = Application.get_env(:codex_loops, :refine_reviewer_timeout)
+    Application.put_env(:codex_loops, :refine_reviewer_timeout, 200)
+
+    try do
+      assert {:error, {:malformed_output, [0, 1, 0], {:reviewer_timeout, 5}}} =
+               Run.run(InlineConverges,
+                 run_id: id,
+                 provider: {SlowReviewerProvider, sink: self()}
+               )
+    after
+      if previous_timeout do
+        Application.put_env(:codex_loops, :refine_reviewer_timeout, previous_timeout)
+      else
+        Application.delete_env(:codex_loops, :refine_reviewer_timeout)
+      end
+    end
+
+    assert Enum.find(events(id), &(&1.type == :agent_failed)).payload.reason ==
+             {:reviewer_timeout, 5}
+  end
+
+  test "slow reviewer lane times out into an ordered agent failure" do
+    id = run_id()
+
+    previous_timeout = Application.get_env(:codex_loops, :refine_reviewer_timeout)
+    Application.put_env(:codex_loops, :refine_reviewer_timeout, 10)
+
+    try do
+      assert {:error, {:malformed_output, [0, 1, 0], {:reviewer_timeout, 10}}} =
+               Run.run(InlineConverges,
+                 run_id: id,
+                 provider: {SlowReviewerProvider, sink: self()}
+               )
+    after
+      if previous_timeout do
+        Application.put_env(:codex_loops, :refine_reviewer_timeout, previous_timeout)
+      else
+        Application.delete_env(:codex_loops, :refine_reviewer_timeout)
+      end
+    end
+
+    assert [
+             %{type: :agent_failed, payload: %{address: [0, 1, 0], attempts: 1}},
+             %{type: :agent_committed, payload: %{address: [0, 1, 1]}}
+           ] =
+             events(id)
+             |> Enum.filter(&(&1.type in [:agent_failed, :agent_committed]))
+             |> Enum.filter(&match?([0, 1, _], &1.payload.address))
+
+    assert Enum.find(events(id), &(&1.type == :refine_started)).payload.reviewer_timeout_ms == 10
+    refute :refine_round_decision in types(id)
+    assert Status.of(id).state == :failed
+  end
+
+  test "hard-killed reviewer lane becomes an ordered agent failure without killing the writer" do
+    id = run_id()
+
+    assert {:error, {:malformed_output, [0, 1, 0], {:reviewer_crashed, :killed}}} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider: {KilledReviewerProvider, sink: self()}
+             )
+
+    assert [
+             %{
+               type: :agent_failed,
+               payload: %{address: [0, 1, 0], reason: {:reviewer_crashed, :killed}}
+             },
+             %{type: :agent_committed, payload: %{address: [0, 1, 1]}}
+           ] =
+             events(id)
+             |> Enum.filter(&(&1.type in [:agent_failed, :agent_committed]))
+             |> Enum.filter(&match?([0, 1, _], &1.payload.address))
+
+    refute :refine_round_decision in types(id)
+    assert Status.of(id).state == :failed
+  end
+
+  test "non-convergence fail mode journals terminal refine_non_converged and resumes same error" do
+    id = run_id()
+
+    assert {:error, {:did_not_converge, [0], :max_rounds}} =
+             Run.run(NonConvergesFail,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  reviews: [
+                    [
+                      approved: false,
+                      findings: [
+                        %{
+                          "id" => "still-bad",
+                          "blocking" => true,
+                          "issue" => "Still bad.",
+                          "fix" => "Fix it."
+                        }
+                      ]
+                    ],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    assert :refine_non_converged in types(id)
+    refute :run_completed in types(id)
+    assert Status.of(id).state == :failed
+    assert Status.of(id).failure.reason == {:did_not_converge, [0], :max_rounds}
+    assert Status.of(id).failure.attempts == 0
+
+    flush_agent_calls()
+
+    assert {:error, {:did_not_converge, [0], :max_rounds}} =
+             Run.run(NonConvergesFail,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "unused",
+                  reviews: [
+                    [approved: true, findings: []],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    refute_received {:agent_called, _, _}
+  end
+
+  test "non-convergence accept_current commits unconverged artifact and completes" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(NonConvergesAccept,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  reviews: [
+                    [
+                      approved: false,
+                      findings: [
+                        %{
+                          "id" => "still-bad",
+                          "blocking" => true,
+                          "issue" => "Still bad.",
+                          "fix" => "Fix it."
+                        }
+                      ]
+                    ],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    refute :refine_non_converged in types(id)
+    assert :run_completed in types(id)
+
+    completed = Enum.find(events(id), &(&1.type == :refine_completed)).payload
+    assert completed.converged == false
+    assert completed.artifact == "draft-v1"
+
+    assert completed.open_findings == [
+             %{
+               reviewer: :spec,
+               reviewer_index: 0,
+               id: "still-bad",
+               issue: "Still bad.",
+               fix: "Fix it."
+             }
+           ]
+  end
+
+  test "accept_current refine output is bindable and renderable through emit" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(AcceptCurrentEmit,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "draft-v1",
+                  reviews: [
+                    [
+                      approved: false,
+                      findings: [
+                        %{
+                          "id" => "still-bad",
+                          "blocking" => true,
+                          "issue" => "Still bad.",
+                          "fix" => "Fix it."
+                        }
+                      ]
+                    ],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    assert Enum.find(events(id), &(&1.type == :run_completed)).payload.value == "Final: draft-v1"
+    assert Status.of(id).result == "Final: draft-v1"
+  end
+
+  test "resume reuses journaled refine markers without duplicating structural events" do
+    id = run_id()
+
+    key = fn address ->
+      %Workflow.IdempotencyKey{run_id: id, node_path: address, iteration: 0, attempt: 0}
+    end
+
+    events = [
+      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+      Workflow.Event.refine_started(hd(InlineConverges.__workflow__(:tree).nodes)),
+      Workflow.Event.agent_committed(
+        %Workflow.Node.Agent{address: [0, 0], prompt: "Draft."},
+        0,
+        key.([0, 0]),
+        "draft-v1",
+        %Workflow.Provider.Usage{}
+      ),
+      Workflow.Event.refine_round_started(
+        hd(InlineConverges.__workflow__(:tree).nodes),
+        0,
+        "draft-v1"
+      ),
+      Workflow.Event.agent_committed(
+        %Workflow.Node.Agent{address: [0, 1, 0], prompt: "Check the spec."},
+        0,
+        key.([0, 1, 0]),
+        %{"approved" => true, "findings" => []},
+        %Workflow.Provider.Usage{}
+      ),
+      Workflow.Event.agent_committed(
+        %Workflow.Node.Agent{address: [0, 1, 1], prompt: "Check the runtime."},
+        0,
+        key.([0, 1, 1]),
+        %{"approved" => true, "findings" => []},
+        %Workflow.Provider.Usage{}
+      ),
+      Workflow.Event.refine_round_decision(hd(InlineConverges.__workflow__(:tree).nodes), 0, %{
+        consensus: true,
+        approval_count: 2,
+        total: 2,
+        reviewer_decisions: [
+          %{reviewer: :spec, reviewer_index: 0, approved: true, clear: true},
+          %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+        ],
+        artifact: "draft-v1",
+        open_findings: []
+      }),
+      Workflow.Event.refine_completed(hd(InlineConverges.__workflow__(:tree).nodes), %{
+        converged: true,
+        final_round: 0,
+        rounds: 1,
+        artifact: "draft-v1",
+        open_findings: []
+      })
+    ]
+
+    Enum.reduce(events, 0, fn event, seq ->
+      assert :ok = Journal.append(id, seq, event)
+      seq + 1
+    end)
+
+    assert {:ok, ^id} =
+             Run.run(InlineConverges,
+               run_id: id,
+               provider:
+                 {RefineProvider,
+                  artifact: "unused",
+                  reviews: [
+                    [approved: true, findings: []],
+                    [approved: true, findings: []]
+                  ],
+                  sink: self()}
+             )
+
+    refute_received {:agent_called, _, _}
+
+    assert Enum.count(types(id), &(&1 == :refine_round_started)) == 1
+    assert Enum.count(types(id), &(&1 == :refine_round_decision)) == 1
+    assert Enum.count(types(id), &(&1 == :refine_completed)) == 1
+    assert List.last(types(id)) == :run_completed
+  end
+end

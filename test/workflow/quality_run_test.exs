@@ -15,7 +15,14 @@ defmodule Workflow.QualityRunTest do
 
   alias Workflow.{Run, Journal, Status}
   alias Workflow.Catalog.{AdversarialVerify, JudgePanel}
-  alias Workflow.Test.{VerdictProvider, PanelProvider, EchoProvider, ExplodingProvider}
+
+  alias Workflow.Test.{
+    VerdictProvider,
+    PanelProvider,
+    EchoProvider,
+    ExplodingProvider,
+    ScriptedProvider
+  }
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
@@ -180,6 +187,118 @@ defmodule Workflow.QualityRunTest do
     refute :verify_settled in types(id)
     refute :run_completed in types(id)
     assert Status.of(id).state == :failed
+  end
+
+  # --- refine: inline producer converges when every reviewer clears round 0 ---
+
+  defmodule InlineRefine do
+    use Workflow
+
+    workflow "inline-refine" do
+      refine(agent("Draft artifact."),
+        reviewers: [
+          reviewer(:spec, "Spec reviewer."),
+          reviewer(:runtime, "Runtime reviewer.")
+        ],
+        revise_with: agent("Revise artifact."),
+        until: :unanimous,
+        max_rounds: 3
+      )
+
+      return(:ok)
+    end
+  end
+
+  test "refine runs inline producer and reviewers, then commits a converged round-0 artifact" do
+    id = run_id()
+
+    {:ok, script} =
+      ScriptedProvider.start([
+        %{"artifact" => "draft v1"},
+        %{"approved" => true, "findings" => []},
+        %{"approved" => true, "findings" => []}
+      ])
+
+    assert {:ok, ^id} =
+             Run.run(InlineRefine,
+               run_id: id,
+               provider: {ScriptedProvider, script: script, sink: self()}
+             )
+
+    assert_received {:agent_called, "Draft artifact."}
+    assert_received {:agent_called, reviewer_prompt_1}
+    assert_received {:agent_called, reviewer_prompt_2}
+    refute_received {:agent_called, "Revise artifact."}
+    refute_received {:agent_called, _}
+
+    reviewer_prompts = [reviewer_prompt_1, reviewer_prompt_2]
+    spec_prompt = Enum.find(reviewer_prompts, &String.contains?(&1, "Spec reviewer."))
+    runtime_prompt = Enum.find(reviewer_prompts, &String.contains?(&1, "Runtime reviewer."))
+
+    assert spec_prompt =~ "Spec reviewer."
+    assert spec_prompt =~ "--- CODEX LOOPS REFINE REVIEW INPUT ---"
+    assert spec_prompt =~ "round: 0"
+    assert spec_prompt =~ "artifact:\ndraft v1"
+    assert runtime_prompt =~ "Runtime reviewer."
+    assert runtime_prompt =~ "artifact:\ndraft v1"
+
+    assert types(id) ==
+             [
+               :run_started,
+               :refine_started,
+               :agent_committed,
+               :refine_round_started,
+               :agent_committed,
+               :agent_committed,
+               :refine_round_decision,
+               :refine_completed,
+               :run_completed
+             ]
+
+    committed =
+      Journal.fold(id)
+      |> Enum.filter(&(&1.type == :agent_committed))
+
+    assert [
+             %{payload: %{address: [0, 0], iteration: 0, result: "draft v1"}},
+             %{
+               payload: %{
+                 address: [0, 1, 0],
+                 iteration: 0,
+                 result: %{"approved" => true, "findings" => []}
+               }
+             },
+             %{
+               payload: %{
+                 address: [0, 1, 1],
+                 iteration: 0,
+                 result: %{"approved" => true, "findings" => []}
+               }
+             }
+           ] = committed
+
+    decision = event(id, :refine_round_decision).payload
+    assert decision.address == [0]
+    assert decision.round == 0
+    assert decision.consensus == true
+    assert decision.approval_count == 2
+    assert decision.total == 2
+    assert decision.artifact == "draft v1"
+    assert decision.open_findings == []
+
+    assert decision.reviewer_decisions == [
+             %{reviewer: :spec, reviewer_index: 0, approved: true, clear: true},
+             %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+           ]
+
+    completed = event(id, :refine_completed).payload
+    assert completed.converged == true
+    assert completed.final_round == 0
+    assert completed.rounds == 1
+    assert completed.artifact == "draft v1"
+    assert completed.open_findings == []
+
+    assert Status.of(id).state == :completed
   end
 
   # --- judge: N candidates scored, winner picked, synthesized ---

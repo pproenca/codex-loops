@@ -10,7 +10,7 @@ defmodule Workflow.QualityCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Agent, Verify, Judge, Synthesize, FanOut, BudgetSlices, Return}
+  alias Workflow.Node.{Agent, Verify, Refine, Judge, Synthesize, FanOut, BudgetSlices, Return}
 
   defp env, do: %{__ENV__ | file: "workflows/quality.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
@@ -189,6 +189,54 @@ defmodule Workflow.QualityCompilerTest do
     test "a non-literal prompt is a located finding" do
       assert {:error, %Finding{} = f} = parse(~s|synthesize ["a"], compute()\nreturn(:ok)|)
       assert f.message =~ "literal string"
+    end
+  end
+
+  describe "refine" do
+    test "compiles an inline producer and static reviewer panel into pre-addressed role agents" do
+      {:ok, tree} =
+        parse("""
+        refine agent("Draft."),
+          reviewers: [reviewer(:spec, "Spec review."), reviewer(:runtime, "Runtime review.")],
+          revise_with: agent("Fix it."),
+          until: :unanimous,
+          max_rounds: 3
+        return(:ok)
+        """)
+
+      assert [
+               %Refine{
+                 address: [0],
+                 input:
+                   {:producer, %Agent{address: [0, 0], prompt: "Draft.", schema: artifact_schema}},
+                 reviewers: [
+                   %{
+                     index: 0,
+                     name: :spec,
+                     prompt: "Spec review.",
+                     agent: %Agent{address: [0, 1, 0], schema: review_schema, retries: 0}
+                   },
+                   %{
+                     index: 1,
+                     name: :runtime,
+                     prompt: "Runtime review.",
+                     agent: %Agent{address: [0, 1, 1], retries: 0}
+                   }
+                 ],
+                 reviser: %Agent{address: [0, 2], prompt: "Fix it."},
+                 until: :unanimous,
+                 max_rounds: 3,
+                 max_concurrency: 2
+               },
+               %Return{value: :ok}
+             ] = tree.nodes
+
+      assert artifact_schema["required"] == ["artifact"]
+      assert artifact_schema["additionalProperties"] == false
+      assert review_schema["required"] == ["approved", "findings"]
+      assert review_schema["additionalProperties"] == false
+      assert review_schema["properties"]["findings"]["items"]["additionalProperties"] == false
+      refute contains_function?(tree)
     end
   end
 

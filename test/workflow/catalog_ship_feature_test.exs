@@ -15,6 +15,7 @@ defmodule Workflow.Catalog.ShipFeatureTest do
     do: m |> Map.values() |> Enum.each(&assert_closure_free/1)
 
   defp assert_closure_free(l) when is_list(l), do: Enum.each(l, &assert_closure_free/1)
+
   defp assert_closure_free(t) when is_tuple(t),
     do: t |> Tuple.to_list() |> Enum.each(&assert_closure_free/1)
 

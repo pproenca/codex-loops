@@ -29,6 +29,27 @@ defmodule Workflow.BindingResolutionTest do
              apply(Workflow.BoundValue, :fold, [events, {:node, [3]}])
   end
 
+  test "bound value folds a completed refine artifact from a hand-built journal" do
+    assert Code.ensure_loaded?(Workflow.BoundValue)
+
+    events = [
+      %Event{
+        type: :refine_completed,
+        payload: %{
+          address: [2],
+          converged: true,
+          final_round: 1,
+          rounds: 2,
+          artifact: "accepted spec",
+          open_findings: []
+        }
+      }
+    ]
+
+    assert {:ok, "accepted spec"} =
+             apply(Workflow.BoundValue, :fold, [events, {:refine, [2]}])
+  end
+
   test "bound list folds ordered lane results for a map reference from a hand-built journal" do
     assert Code.ensure_loaded?(Workflow.BoundList)
 

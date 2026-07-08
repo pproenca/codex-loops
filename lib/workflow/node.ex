@@ -10,7 +10,7 @@ defmodule Workflow.Node do
   """
 
   @type address :: [non_neg_integer()]
-  @type binding_ref :: {:node, address()} | {:map, address()}
+  @type binding_ref :: {:node, address()} | {:map, address()} | {:refine, address()}
 end
 
 defmodule Workflow.Node.Emit do
@@ -230,6 +230,48 @@ defmodule Workflow.Node.Verify do
           mode: mode(),
           voters: [Workflow.Node.Agent.t()],
           threshold: :majority | :unanimous | :any | pos_integer()
+        }
+end
+
+defmodule Workflow.Node.Refine do
+  @moduledoc """
+  Bounded adversarial refinement. V1 is intentionally narrow: an inline producer
+  or a bound value supplies an artifact, a static reviewer panel checks it, a
+  reviser handles blocking findings, and a terminal refine event commits or
+  fails the result.
+  """
+  @enforce_keys [:address, :input, :reviewers, :reviser, :until, :max_rounds]
+  defstruct [
+    :address,
+    :input,
+    :reviewers,
+    :reviser,
+    :until,
+    :max_rounds,
+    on_non_convergence: :fail,
+    max_concurrency: nil,
+    reviewer_timeout_ms: nil
+  ]
+
+  @type reviewer :: %{
+          index: non_neg_integer(),
+          name: atom(),
+          prompt: String.t(),
+          agent: Workflow.Node.Agent.t()
+        }
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          input:
+            {:producer, Workflow.Node.Agent.t()}
+            | {:binding, atom(), Workflow.Node.binding_ref()},
+          reviewers: [reviewer()],
+          reviser: Workflow.Node.Agent.t(),
+          until: :unanimous,
+          max_rounds: pos_integer(),
+          on_non_convergence: :fail | :accept_current,
+          max_concurrency: pos_integer() | nil,
+          reviewer_timeout_ms: pos_integer() | nil
         }
 end
 

@@ -29,9 +29,11 @@ functions, no closures, and no captured runtime state. That tree is later execut
 separate interpreter that records every decision and paid effect in an append-only
 journal.
 
-The DSL exists to describe **multi-agent orchestration** — sequencing agent turns,
-fanning out work, running verification/judgement panels, and bounded iterative loops —
-in a form that is **deterministic, serializable, and provably terminating**.
+The DSL exists to describe **generic workflow orchestration** — sequencing paid turns,
+explicitly wiring data edges, fanning out bounded work, and running bounded loops — in a
+form that is **deterministic, serializable, and provably terminating**. Product vocabulary
+such as "review", "cold read", or "repair" is library sugar unless this specification gives
+a proof that it cannot lower to the generic core (§9).
 
 ### 1.1 Shape
 
@@ -44,73 +46,69 @@ escapes the compiled tree into a compile-time constant.
 
 The following are deliberately **out of scope** and MUST NOT be expressible:
 
-- **General computation.** A workflow cannot compute values at runtime, bind variables,
-  branch on agent output, or perform arithmetic. There is no value-binding construct.
-  *(Dataflow §10 addendum: the implemented core narrows this bullet by reopening exactly one
-  binding form — `let` over already-journaled `agent`/`synthesize`/`refine` outputs — while
-  keeping the arithmetic and branch-on-output bans intact; see §10.)*
+- **General computation.** A workflow cannot run arbitrary Elixir, define variables whose
+  values are computed by host code, perform arithmetic, or choose an arbitrary subtree by
+  branching on agent output. The only value-binding form is `let`, which binds a name to a
+  lexically preceding producer's **journaled** output for deterministic rendering or closed
+  projection (§10.5).
 - **Non-determinism.** No node reads a clock, a random source, the environment, the
   filesystem, or any external module. Wall-clock and randomness are *unrepresentable*.
 - **Side effects outside the vocabulary.** No spawning shells, no I/O, no network calls,
   no module imports from inside a workflow body.
 - **Runtime linting.** Determinism is not enforced by a runtime checker; it is a static
-  property of the vocabulary (see principles below).
+  property of the vocabulary and its compile-time validation rules.
 
 ### 1.3 Design principles (the tie-breakers)
 
 These principles resolve every ambiguity this document does not foresee. When two
 readings are possible, the reading that upholds these principles is correct.
 
-1. **Closed vocabulary.** The DSL has exactly **14** combinators (§2.4). Any
-   form outside the vocabulary is a compile error. New capability is added by adding a
-   combinator to the closed set, never by allowing arbitrary Elixir. *Pre-resolves:* any
-   unrecognized call, operator, literal, or closure is rejected, not interpreted.
+1. **Core calculus before product vocabulary.** The normative core is the small set of
+   semantic primitives in §2.4: inert markers, paid `agent` turns, compile-time `let`
+   bindings to journaled producer outputs, terminal values, bounded `loop`, bounded
+   `fanout`, and closed predicates. Product terms (`verify`, `judge`, `refine`,
+   `reviewer`, `cold_read`, `repair`) are library/domain sugar unless a section explicitly
+   proves the term cannot be expressed by those primitives. *Pre-resolves:* a new domain
+   workflow first tries to desugar; it does not earn a primitive by being common.
 
-2. **Determinism by absence.** Determinism is guaranteed by the *absence* of any
-   vocabulary node that can read a clock or randomness, plus compiler rejection of
-   external calls — never by a runtime linter. *Pre-resolves:* if a construct could
-   introduce non-determinism, it is simply not in the vocabulary and cannot be written.
+2. **Explicit data edges, no ambient phase context.** A node may consume data only through a
+   compile-time `BindingRef`, an accumulator name, or an explicit loop/fanout lane binding
+   stored in the compiled tree. `phase` is display/read-model metadata only; it is never an
+   implicit input to a prompt, predicate, key, or provider call. *Pre-resolves:* no node can
+   silently read "the current phase" or "the previous result" except through a named edge.
 
-3. **The journal is the single source of truth.** Every observable decision (loop
-   continue/stop, fan-out width, panel verdicts, agent results) is written to an
-   append-only journal. All read surfaces (status, inspect, resume, live views) are
-   **pure folds** over the journal, never independent state. *Pre-resolves:* resume never
-   recomputes a past decision; it replays the journaled one.
+3. **Runtime decisions inspect only journaled values.** Every observable decision
+   (`loop` continue/stop, `fanout` width, predicate result, convergence/agreement result,
+   terminal success/failure) is either read from a prior journal event or computed by a pure
+   fold over journaled values, then journaled before it can affect execution. *Pre-resolves:*
+   resume never recomputes a past decision from mutable source or live process state.
 
-4. **Fail closed.** A schema-backed agent whose output does not validate is retried
-   on-thread up to its retry budget and then **fails the node and aborts the run**. There
-   is no silent coercion, no default value, no partial acceptance of malformed structured
-   output. *Pre-resolves:* invalid structured output is never treated as success.
+4. **Conditions use a closed, typed predicate vocabulary.** A condition is not Elixir code.
+   It is one of the predicate nodes in §3.8 (`all`, `any`, count/budget comparisons,
+   `agree`, and JSON-path predicates), with pinned truth semantics and no host callbacks.
+   *Pre-resolves:* a truth value is never supplied by a closure, a module call, truthiness, or
+   an implementation-defined predicate.
 
-5. **Bounded termination.** Every loop is provably terminating because a structural
-   `max_iterations` cap (default `1000`) bounds **both** loop types unconditionally,
-   regardless of body behavior. `while_budget`'s reserve condition and `until_dry`'s
-   dryness condition are *early-stop* refinements layered on top of that cap — they may
-   stop a loop sooner, but they are **not** what guarantees termination. In particular a
-   `while_budget` body with no paid `agent` never decreases `remaining` (Rule 5.7.6 does
-   not require an `agent`), so for such a loop only `max_iterations` bounds it.
-   *Pre-resolves:* no workflow can loop forever, even one whose body spends nothing.
+5. **Loops/fanout are bounded and have explicit exhaustion behavior.** Every `loop` has a
+   positive integer `max_iterations`; every runtime-width `fanout` has a positive integer
+   structural cap or a budget-derived width whose zero/unbounded-budget behavior is pinned.
+   A loop that reaches its cap returns the declared `on_exhausted:` result (`:stop`, `:fail`,
+   or `:accept_current`); it never spins or guesses. *Pre-resolves:* non-progressing bodies,
+   zero-width fanouts, and non-convergence all have specified outcomes.
 
-6. **No value binding.** No combinator binds a name to a runtime value. A `return` value,
-   a `verify` subject, `judge` candidates, `pipeline` items, and every prompt MUST be a
-   compile-time literal. *Pre-resolves:* a workflow cannot "capture" or "reference" a
-   runtime result except through the fixed data-flow of accumulators and panel folds.
-   *(Dataflow §10 addendum: Principle 6′ is the reconciliation for the implemented
-   `let`/`~P`/`emit` core — journaled-values-only, deterministic-render-only — while §1–§8
-   remain the frozen base body.)*
+6. **High-level conveniences desugar to the core calculus.** Surface conveniences MAY be
+   offered, but their lowering MUST be stated as an algorithm that produces inert core data,
+   preserves addresses, and defines any library projection events. If the desugaring cannot
+   be written, the spec MUST say why before admitting a new primitive. *Pre-resolves:*
+   `refine`, `reviewer`, `cold_read`, and `repair` are not core merely because they are
+   product features.
 
-7. **Inert tree.** The compiled `%Tree{}` is pure, serializable data containing zero
-   closures. It is `Macro.escape`-d into a compile-time constant and can be reconstructed
-   losslessly from storage. *Pre-resolves:* nothing in a compiled workflow can hold a
-   live function or process reference.
-
-8. **Panels are observational.** `verify` and `judge` journal a verdict/winner but do
-   **not** alter control flow. There is no conditional or branching combinator, and no
-   `until:` predicate or `collect` accumulator can read a panel result (§6.8, §6.6): the
-   only value a body node consumes is the immediately preceding agent's output via
-   `collect`, never a panel outcome. Any reaction to a verdict happens **outside** the
-   workflow, by folding the journal. *Pre-resolves:* a workflow never "branches on" a
-   panel outcome — panels report, they do not gate.
+7. **The Elixir DSL compiles to inert data and validates at compile time.** `use Workflow`
+   exposes declaration syntax only. `Workflow.Compiler.parse/2` lowers the AST to
+   serializable structs, stores no closures or process references, validates every static
+   rule during `mix compile`, and the macro layer only `Macro.escape`s the compiled data into
+   reflection functions. *Pre-resolves:* no validation is deferred to the interpreter, and
+   no hidden macro semantics are required to run the tree.
 
 ---
 
@@ -141,7 +139,8 @@ embedding, which is normative for the reference implementation.
 
 Only a subset of Elixir tokens is meaningful to the DSL. The lexical productions below
 describe that subset. They are Elixir's own productions, restated for completeness; an
-implementation MUST accept exactly the values Elixir's tokenizer produces.
+implementation MUST accept exactly the simple string/number/atom forms below and reject
+other Elixir token shapes in DSL positions.
 
 ```
 StringLiteral :: `"` StringCharacter* `"`
@@ -153,7 +152,7 @@ FloatLiteral :: `-`? Digit+ `.` Digit+ ExponentPart?
 ExponentPart :: (`e` | `E`) (`+` | `-`)? Digit+
 Digit :: one of `0` `1` `2` `3` `4` `5` `6` `7` `8` `9`
 Atom :: `:` AtomName
-AtomName :: Letter (Letter | Digit | `_`)*
+AtomName :: (`a`–`z` | `_`) (Letter | Digit | `_`)*
 BooleanLiteral :: `true`
 BooleanLiteral :: `false`
 NilLiteral :: `nil`
@@ -182,30 +181,54 @@ built only from scalars (integers, floats, booleans, `nil`, atoms, binaries), li
 tuples, and maps whose contents are themselves literals. A form that contains a variable
 reference or a function call is **not** a literal and is rejected.
 
-### 2.4 The closed combinator vocabulary
+### 2.4 Closed surface vocabulary and core primitives
 
-The frozen base DSL recognizes these **14** combinator names:
+The vocabulary is closed, but **surface names are not all primitives**. A parser MUST reject
+any local call outside the sets below (or outside a contextual position named below), yet an
+implementation MUST compile library/domain names by desugaring them to the core calculus.
+
+Core semantic forms:
 
 ```
-agent  log  phase  parallel  pipeline  return  collect
-while_budget  until_dry  verify  judge  synthesize  fan_out  refine
+agent  log  phase  let  return  emit  emit_result  loop  until  fanout  collect
 ```
 
-> *(Dataflow/refine amendments: the implemented core recognizes exactly **17** live
-> combinators — the base 14 plus `let`, `emit`, and `emit_result`. `gather` and `map`
-> remain DEFER and MUST be rejected until their deferred sections are explicitly promoted.
-> `emit_result` is the only structured terminal surface admitted by the refine V2 amendment
-> (§9.13, §10.7a).)*
+Library/domain surface forms that MUST lower to the core forms:
 
-Two names are contextual, not standalone combinators:
+```
+parallel  pipeline  while_budget  until_dry  verify  judge
+synthesize  fan_out  refine
+```
 
-- `collect` is in the 14 but is **body-only**: valid only inside a loop body (§3.7). A
-  top-level `collect` is a compile error.
-- `budget_slices(per: N)` is **not** one of the 14. It appears only as the value of
-  `fan_out`'s `width:` option (§3.9).
+Deferred surface forms:
 
-Inside a loop body the vocabulary narrows to the **body vocabulary** — exactly
-`agent`, `log`, `phase`, `collect`. Every other combinator is rejected in a body (§5.7).
+```
+gather  map
+```
+
+`gather` and `map` are specified in §10.9 but remain **DEFER** and MUST be rejected until
+promoted. `reduce`, `select`, and `when` are explicitly **REJECTED** (§10.10).
+
+Contextual names:
+
+- `collect` is core but **body-only**: valid only inside a `loop` body or a library loop
+  body after desugaring (§3.7). A top-level `collect` is a compile error.
+- `until` is core but **body-only**: it is valid only inside a `loop` body, where it
+  journals a closed predicate decision and can stop that loop before later body nodes run.
+- `budget_slices(per: N)` is not a standalone combinator. It is a `WidthExpr` usable only
+  by `fanout`/`fan_out` width forms (§3.9).
+- `reviewer`, `cold_read`, and `repair` are library-only declarations inside `refine`
+  sugar (§9). They MUST NOT appear as top-level statements and MUST NOT produce core node
+  kinds of their own.
+- Predicate heads (`all`, `any`, `agree`, `all_of`, `any_of`, `count`,
+  `budget_remaining`, `path_exists`, `path_non_empty`, `path_count`, `path_equals`) are
+  valid only inside predicate positions (§3.8). They are not statements.
+
+Inside a loop body the core body vocabulary is exactly `agent`, `log`, `phase`, `until`,
+`fanout`, and `collect`, with the placement restrictions in §5.7. Library forms MAY be
+accepted in a body only when their desugaring is to one of those body forms; the reference
+currently admits only the legacy body subset (`agent`, `log`, `phase`, `collect`) for
+backward compatibility.
 
 ---
 
@@ -225,9 +248,15 @@ Statement :
   - PhaseStmt
   - LogStmt
   - AgentStmt
+  - LetStmt
   - ReturnStmt
   - EmitStmt
   - EmitResultStmt
+  - LoopStmt
+  - FanoutStmt
+  - LibrarySugarStmt
+
+LibrarySugarStmt :
   - ParallelStmt
   - PipelineStmt
   - VerifyStmt
@@ -254,14 +283,26 @@ PhaseStmt  : `phase` `(` StringLiteral `)`
 LogStmt    : `log` `(` StringLiteral `)`
 ReturnStmt : `return` `(` Literal `)`
 EmitResultStmt : `emit_result` `(` BindingRefAtom `)`
+LetStmt    : `let` BindingRefAtom `=` Producer
+BindingRefAtom :: `:` AtomName
+Producer :
+  - AgentStmt
+  - SynthesizeStmt
+  - RefineStmt
+  - GatherStmt
+  - `(` MapStmt `)`
 ```
 
-- `phase` names a milestone. Its `StringLiteral` name MUST be unique within the workflow.
+- `phase` names a milestone. Its `StringLiteral` name MUST be unique within its lexical
+  phase scope (§5.10.1).
 - `log` emits a static message. No interpolation.
 - `return` sets the workflow's terminal value. `Literal` MUST satisfy §2.3. A workflow
   MUST terminate with a final `return`, `emit`, or `emit_result` (§5.10.2, §10.7, §10.7a).
-- `emit_result` emits the structured result of a result-capable binding. In this amendment
-  only `refine` bindings are result-capable (§10.7a).
+- `emit_result` emits the structured result of a result-capable binding. A result-capable
+  binding is one whose producer defines a JSON-encodable public projection (§10.7a).
+- `let` is compile-time binding syntax. It inserts the producer node at the `let`'s address
+  and records the binding name to that producer's journaled output; it creates no runtime
+  node of its own (§10.5).
 
 ### 3.2 Agent
 
@@ -347,93 +388,173 @@ SynthesizeStmt : `synthesize` `(` Literal `,` StringLiteral `)`
 `pick: :max_score | :min_score`. `synthesize` takes a literal `inputs` value and a
 literal string `prompt`.
 
-### 3.7 Loops and loop bodies
+### 3.7 Generic loops and loop bodies
 
 ```
-WhileBudgetStmt : `while_budget` KeywordList `do` LoopBody `end`
-UntilDryStmt    : `until_dry`    KeywordList `do` LoopBody `end`
+LoopStmt : `loop` KeywordList `do` LoopBody `end`
+WhileBudgetStmt : `while_budget` KeywordList `do` LoopBody `end`  ; library sugar
+UntilDryStmt    : `until_dry`    KeywordList `do` LoopBody `end`  ; library sugar
 
 LoopBody      : BodyStatement+
 BodyStatement :
   - AgentStmt
   - LogStmt
   - PhaseStmt
+  - UntilStmt
+  - FanoutStmt
   - CollectStmt
 
 CollectStmt : `collect` `(` `[` `into:` Atom `]` `)`
+UntilStmt   : `until` `(` Predicate `)`
 ```
 
-The `do … end` block is Elixir block sugar: `while_budget reserve: 8 do … end` parses as
-`while_budget([reserve: 8], [do: block])`. A `LoopBody` MUST contain at least one
-`BodyStatement`, and MUST draw only from the body vocabulary (`agent`, `log`, `phase`,
-`collect`). `while_budget` keys are drawn from `reserve:`, `until:`, `max_iterations:`
-(with `reserve:` REQUIRED). `until_dry` keys are drawn from `rounds:`, `seen_by:`,
-`max_iterations:` (with `rounds:` REQUIRED), and its body MUST contain at least one
-`collect`. Because the body vocabulary is `[:agent, :log, :phase, :collect]`, **loops do
-not nest** — a loop body cannot contain another `while_budget`/`until_dry` (Rule 5.7.6).
+The generic `loop` options are:
 
-### 3.8 The `until:` predicate sub-grammar
+- `max_iterations:` REQUIRED, a positive integer literal.
+- `until:` OPTIONAL, a `Predicate` (§3.8). Omitted means the loop stops only by
+  `max_iterations`.
+- `on_exhausted:` OPTIONAL, one of `:stop | :fail | :accept_current`; default `:stop`.
+  Exhaustion means `iteration >= max_iterations` before `until:` has evaluated true.
 
-`while_budget`'s optional `until:` value is drawn from a **closed predicate grammar**
-(tokens to a `%Workflow.Predicate.*{}` struct):
+The `do … end` block is Elixir block sugar. A `LoopBody` MUST contain at least one
+`BodyStatement`. Data consumed inside the body MUST enter through explicit bindings,
+accumulators, or the lane variables of a nested `fanout`; there is no ambient phase context.
+A body `until(P)` evaluates `P` at that point in the body. If true, it stops the current
+loop and skips the remaining body statements for that iteration; if false, execution
+continues with the following body statement. It is not a general branch and cannot select
+between arbitrary subtrees.
+
+Legacy loop forms are library sugar:
+
+- `while_budget reserve: R, until: P?, max_iterations: M? do B end` desugars to
+  `loop max_iterations: (M || 1000), until: any([budget_remaining() <= R, P?]) do B end`,
+  with the `P?` term omitted when no author predicate is supplied.
+- `until_dry rounds: N, seen_by: S?, max_iterations: M? do B end` desugars to
+  `loop max_iterations: (M || 1000), until: dry(rounds: N, seen_by: (S || [])) do B end`.
+
+The reference compiler currently admits the legacy body subset (`agent`, `log`, `phase`,
+`collect`) and rejects nested loops. A conforming core implementation MAY admit the full
+generic body vocabulary above, but MUST still enforce the explicit `max_iterations` cap and
+the predicate semantics in §6.7–§6.8.
+
+### 3.8 The closed predicate sub-grammar
+
+Every `until:`, gate, and agreement condition is drawn from this **closed typed predicate
+grammar**. Predicate names are contextual; they are not statements and cannot call host code.
 
 ```
 Predicate :
   - Comparison
-  - `all_of` `(` `[` Predicate (`,` Predicate)* `]` `)`
-  - `any_of` `(` `[` Predicate (`,` Predicate)* `]` `)`
+  - DryPredicate
+  - AgreePredicate
+  - PathPredicate
+  - `all`    `(` `[` Predicate (`,` Predicate)* `]` `)`
+  - `any`    `(` `[` Predicate (`,` Predicate)* `]` `)`
+  - `all_of` `(` `[` Predicate (`,` Predicate)* `]` `)`  ; legacy alias of `all`
+  - `any_of` `(` `[` Predicate (`,` Predicate)* `]` `)`  ; legacy alias of `any`
 
 Comparison : Operand CompareOp IntegerLiteral
 Operand :
   - `count` `(` Atom `)`
   - `budget_remaining` `(` `)`
+  - `path_count` `(` BindingRefAtom `,` JsonPointerString `)`
+
+DryPredicate : `dry` `(` `[` `rounds:` IntegerLiteral (`,` `seen_by:` AtomList)? `]` `)`
+
+AgreePredicate :
+  `agree` `(` BindingRefAtom `,` `[` `path:` JsonPointerString `,`
+    `equals:` Literal `,` `threshold:` AgreementThreshold `]` `)`
+
+AgreementThreshold :
+  - `:all`
+  - `:any`
+  - IntegerLiteral
+
+PathPredicate :
+  - `path_exists`    `(` BindingRefAtom `,` JsonPointerString `)`
+  - `path_non_empty` `(` BindingRefAtom `,` JsonPointerString `)`
+  - `path_equals`    `(` BindingRefAtom `,` JsonPointerString `,` Literal `)`
+
 CompareOp : one of `>` `<` `>=` `<=` `==`
+AtomList  : `[` Atom (`,` Atom)* `]`
+JsonPointerString :: `"` JsonPointerCharacter* `"`
+JsonPointerCharacter :: SourceCharacter but not `"` or `\`
+JsonPointerCharacter :: `\` (`"` | `\`)
 ```
 
-The left operand MUST be `count(<accumulator-atom>)` or `budget_remaining()`; the right
-operand MUST be a literal integer. Here `<accumulator-atom>` is a **metavariable** — any
-atom — not a literal name: it names the accumulator the loop body writes to via
-`collect(into: <accumulator-atom>)`. `count(:items)`, `count(:findings)`, etc. are all
-legal; the accumulator need not be named `:acc`. `all_of`/`any_of` require at least one
-nested predicate. Any other form is a compile error. No arithmetic, function call, or
-closure is admissible.
+`all`/`any` (and legacy aliases `all_of`/`any_of`) require at least one nested predicate.
+`count(:name)` reads the global accumulator named by `collect(into: :name)`.
+`budget_remaining()` reads the journaled ledger. `path_*` predicates and `agree` resolve a
+compile-time `BindingRefAtom` to an already-journaled value and inspect it with RFC 6901 JSON
+Pointer rules (§6.8). `agree(:reviews, path: "/approved", equals: true, threshold: :all)`
+is true iff the bound value is a list and the required number of elements have a value at
+`/approved` JSON-equal to `true`.
+
+A `loop` whose `until:` predicate contains one or more `dry(...)` predicates derives the
+loop body's `seen_by` list from those predicates. All `dry` predicates in one `until:` tree
+MUST specify the same `seen_by` list (or all omit it, equivalent to `[]`); conflicting
+`seen_by` lists are a compile-time error. A `dry` predicate outside a `loop until:` position
+is invalid; body `until(...)` predicates MUST use non-dry predicates.
+
+No predicate performs arithmetic beyond the single comparison production. No predicate uses
+truthiness: every predicate returns exactly `true` or `false` by the algorithms in §6.8.
 
 > Note (accumulator name must match a `collect`). A `count(<atom>)` operand is meaningful
-> only if the loop body `collect(into: <atom>)`s into that **exact same** atom. This is a
-> name-resolution coupling the compiler does **not** enforce (there is no cross-check
-> between the predicate and the body), so it is a silent footgun: a `count(:items)`
-> predicate whose body forgets `collect(into: :items)` (or misspells the accumulator) still
-> **compiles and runs**, but `count(:items)` resolves to an empty accumulator — size `0`
-> — **forever** (§6.8, `ctx.accumulators[acc] or []`), so the predicate never fires and the
-> loop runs to `max_iterations`/budget. An author using `until: count(:x) …` MUST write
-> `collect(into: :x)` in the body with a matching atom. A conforming implementation MAY emit
-> a SHOULD-level compile warning when an `until:` `count(<atom>)` has no matching
-> `collect(into: <atom>)` in the same body.
+> only if some body `collect(into: <atom>)`s into that **exact same** atom. An unmatched name
+> resolves to an empty accumulator (`0`) and the loop can stop only by another predicate or by
+> exhaustion.
 
-### 3.9 Fan-out (budget-scaled dynamic fan-out)
+### 3.9 Generic fanout and budget-scaled fan-out sugar
 
 ```
-FanOutStmt : `fan_out` KeywordList `do` AgentLane `end`
-AgentLane  : AgentStmt+
-WidthForm  : `budget_slices` `(` `[` `per:` IntegerLiteral `]` `)`
+FanoutStmt : `fanout` KeywordList `do` FanoutBody `end`
+FanOutStmt : `fan_out` KeywordList `do` AgentLane `end`  ; library sugar
+FanoutBody :
+  - AgentLane
+  - LaneList
+LaneList : `lanes` `(` `[` Lane (`,` Lane)* `]` `)`
+Lane : `[` AgentStmt (`,` AgentStmt)* `]`
+AgentLane : AgentStmt+
+
+WidthExpr :
+  - IntegerLiteral
+  - `budget_slices` `(` `[` `per:` IntegerLiteral (`,` `max:` IntegerLiteral)? `]` `)`
+  - `path_count` `(` BindingRefAtom `,` JsonPointerString `,` `[` `max:` IntegerLiteral `]` `)`
 ```
 
-`fan_out` keys are drawn from `width:` (REQUIRED, MUST be exactly a `WidthForm` with a
-positive integer `per`) and `max_concurrency:` (optional positive integer). The body MUST
-be a non-empty lane of `agent(…)` calls. `budget_slices(per: N)` is admissible **only**
-here.
+`fanout` keys are drawn from:
 
-> Note (no per-branch injection). Exactly like a `pipeline` stage (§3.4), a `fan_out` lane
-> receives **no** per-branch content or index. Every branch runs the **byte-identical**
-> literal lane prompt(s); the branch index `i` appears only in the branch **address**
-> (`node.address ++ [i]`, §6.10), **never** in the prompt, and there is no value binding
-> (Principle 6). A `fan_out` therefore launches N **undifferentiated replicas** of the same
-> prompt — it does **not** hand each lane a distinct slice, shard, or index of the work.
-> `budget_slices(per: N)` decides only **how many** replicas run (one per `N` remaining
-> budget tokens), not what each does. An author who writes `fan_out … do agent("Investigate
-> one slice of the search space") end` gets N lanes that all run that identical instruction
-> with no way to tell which "slice" they are; the useful pattern is N **independent
-> replicas** of the same task (e.g. diverse sampling), not a partition of work.
+- `width:` REQUIRED, a `WidthExpr`.
+- `max_concurrency:` OPTIONAL, a positive integer literal.
+- `bind:` OPTIONAL, a literal atom naming the ordered list of lane results for later
+  predicates/templates. If present at top level, it is a compile-time `BindingRef` to this
+  fanout's journaled result list (`{:fanout, address, :global}`) and enters scope **after**
+  the `fanout` node. If present inside a loop body, it is a loop-local `BindingRef`
+  (`{:fanout, address, {:loop_local, loop_address}}`) for the current iteration only and may
+  be referenced only by later body `until(...)` predicates or by the owning loop's
+  post-body/library projection rules. A `fanout` binding is never in scope inside that
+  fanout's own lane prompts.
+- `on_zero:` OPTIONAL, one of `:complete | :fail`; default `:complete`.
+
+The body MUST be either one non-empty lane of `agent(…)` calls, repeated for the decided
+width, or an explicit non-empty `lanes([...])` list of non-empty lanes. An explicit
+`LaneList` is used by library desugarings that need heterogeneous prompts or schemas
+(`parallel`, `verify`, `judge`, `refine`); for a `LaneList`, `width:` MUST be the integer
+literal equal to the lane count. A fixed `IntegerLiteral` width MUST be non-negative; zero
+is valid only for a repeated lane and is handled by `on_zero:`.
+`budget_slices(per: N, max: M?)` is runtime-decided from the ledger; `per` MUST be positive,
+`max` when present MUST be positive, and an unbounded run is a runtime crash unless the
+width decision was already journaled on resume (§6.10). `path_count(:xs, "/items", max: M)`
+is runtime-decided from a lexically preceding binding and MUST use the explicit `max:` cap.
+
+The legacy `fan_out width: budget_slices(per: N) do B end` desugars to
+`fanout width: budget_slices(per: N), on_zero: :complete do B end`.
+
+> Note (no implicit per-branch injection). A `fanout` lane receives per-branch data only
+> through an explicit lane binding supplied by a future `map` promotion (§10.9) or a library
+> desugaring that records such a binding in the tree. The legacy `fan_out` form supplies no
+> lane binding: every branch runs the byte-identical prompt(s), and the branch index appears
+> only in the branch address.
 
 ### 3.10 Operator precedence and associativity — N/A
 
@@ -451,9 +572,14 @@ semantics.
 ## 4. Semantic Model — the inert tree
 
 Parsing a workflow yields a `%Workflow.Tree{}` whose `nodes` field is an ordered list of
-`%Workflow.Node.*{}` structs. These structs are the semantic model: **inert, serializable
-data with zero closures**. The macro escapes the tree into a compile-time constant exposed
-by two reflection functions (introspection surface):
+core `%Workflow.Node.*{}` structs. These structs are the semantic model: **inert,
+serializable data with zero closures**. Surface conveniences MUST be eliminated before or
+during tree construction by `Desugar(form, env)` (§4.3.1): after compilation, no core
+interpreter step may need to know that a node was written with product vocabulary such as
+`reviewer`, `cold_read`, or `repair`.
+
+The macro escapes the tree into a compile-time constant exposed by two reflection functions
+(introspection surface):
 
 - `Module.__workflow__(:tree)` returns the `%Workflow.Tree{}`.
 - `Module.__workflow__(:name)` returns the workflow's name string.
@@ -483,10 +609,11 @@ Addresses are **stable across schema versions**: journal events and idempotency 
 reference nodes by address forever. A conforming implementation MUST NOT renumber or
 reshape existing addresses when adding new node kinds.
 
-### 4.3 Node struct catalog
+### 4.3 Core node struct catalog
 
-Each node's enforced keys and defaults (from `lib/workflow/node.ex`). Every node except
-`BudgetSlices` has `address :: address()`.
+Each core node's enforced keys and defaults. Every node except width/predicate helper
+structs has `address :: address()`. An implementation MAY keep compatibility structs for
+legacy surfaces, but conformance is judged by their specified core desugaring.
 
 | Node | Enforced keys | Defaults / extra fields | Non-address field types |
 |---|---|---|---|
@@ -494,6 +621,11 @@ Each node's enforced keys and defaults (from `lib/workflow/node.ex`). Every node
 | `Log` | `[:address, :message]` | — | `message :: String.t()` |
 | `Agent` | `[:address, :prompt]` | `label: nil, schema: nil, retries: 2` | `prompt :: String.t()`; `label :: String.t() \| nil`; `schema :: map() \| nil`; `retries :: non_neg_integer()` |
 | `Return` | `[:address, :value]` | — | `value :: term()` |
+| `Emit` | `[:address, :template, :bindings]` | — | `template :: Template.t()`; `bindings :: %{atom() => BindingRef}` |
+| `EmitResult` | `[:address, :binding_ref]` | — | `binding_ref :: BindingRef` |
+| `Loop` | `[:address, :body, :max_iterations]` | `until: nil, on_exhausted: :stop` | `body :: [struct()]`; `until :: Predicate.t() \| nil`; `max_iterations :: pos_integer()`; `on_exhausted :: :stop \| :fail \| :accept_current` |
+| `Until` | `[:address, :predicate]` | — | `predicate :: Predicate.t()` |
+| `Fanout` | `[:address, :width, :lanes]` | `bind: nil, max_concurrency: nil, on_zero: :complete, repeated: true` | `width :: WidthExpr.t()`; `lanes :: [[Agent.t()]]`; `repeated :: boolean()`; `bind :: atom() \| nil`; `max_concurrency :: pos_integer() \| nil`; `on_zero :: :complete \| :fail` |
 | `Parallel` | `[:address, :branches]` | `max_concurrency: nil` | `branches :: [Agent.t()]`; `max_concurrency :: pos_integer() \| nil` |
 | `Pipeline` | `[:address, :items, :lanes]` | `max_concurrency: nil` | `items :: [term()]`; `lanes :: [[Agent.t()]]` |
 | `Collect` | `[:address, :into]` | — | `into :: atom()` |
@@ -504,6 +636,52 @@ Each node's enforced keys and defaults (from `lib/workflow/node.ex`). Every node
 | `Synthesize` | `[:address, :inputs, :prompt]` | — | `inputs :: term()`; `prompt :: String.t()` |
 | `BudgetSlices` | `[:per]` | — (no address) | `per :: pos_integer()` |
 | `FanOut` | `[:address, :width, :body]` | `max_concurrency: nil` | `width :: BudgetSlices.t()`; `body :: [Agent.t()]` |
+
+The legacy `Parallel`, `Pipeline`, `WhileBudget`, `UntilDry`, `Verify`, `Judge`,
+`Synthesize`, and `FanOut` rows document the reference implementation's compatibility
+structs. They are **not** additional core primitives. A non-Elixir conforming
+implementation MAY skip these structs and construct only the core `Loop`, `Fanout`, `Agent`,
+`Collect`, marker, binding, and terminal nodes, provided the observable journal and result
+match the desugaring below.
+
+### 4.3.1 Desugaring contract
+
+`Desugar(form, env)` is a compile-time, total function over valid surface forms. It returns
+only inert core nodes and an updated compile-time binding environment.
+
+```
+Desugar(form, env):
+  - If form is a core form: Return CoreLower(form, env).
+  - If form is a library form: Return the core tree specified by that form's section.
+  - If the section gives no desugaring: Raise a compile-time validation error.
+```
+
+`CoreLower(form, env)` is the per-core-form compile algorithm defined by that form's grammar
+and validation rules (§3, §5): it checks the AST shape, constructs only inert structs, and
+returns any binding-environment updates. It does not execute workflow code.
+
+Required library lowerings:
+
+- `while_budget` and `until_dry` lower to `Loop` as specified in §3.7.
+- `fan_out` lowers to `Fanout` as specified in §3.9.
+- `parallel` lowers to `Fanout` with fixed width `length(branches)`, one branch lane per
+  source agent, and no bound result list.
+- `pipeline` lowers to `Fanout` with fixed width `length(items)` and each lane's stages
+  addressed as `address ++ [item_index, stage_index]`; the item list remains journal-label
+  metadata only and is not ambient data.
+- `synthesize(inputs, prompt)` lowers to an ephemeral schemaless `Agent` whose prompt is the
+  pinned literal composition described in §6.3.
+- `verify` and `judge` lower to `Fanout` plus closed result projections whose reducers are
+  the `agree`/score algorithms in §6.10; their verdicts are journaled values, not control
+  flow.
+- `refine` lowers to the generic producer → bounded `Loop` → reviewer `Fanout` →
+  `agree`/path-predicate convergence pattern in §9.0. `reviewer`, `cold_read`, and `repair`
+  are contextual records used only by that lowering.
+
+The lowering MUST preserve stable addresses. If a library surface historically exposed
+library-specific events (for example `refine_*`), those events are library projection events:
+they MAY be emitted in addition to core events, but no core decision may depend on them
+unless they are themselves journaled before the decision that reads them.
 
 ### 4.4 Compile-time template pre-expansion
 
@@ -941,7 +1119,22 @@ until_dry rounds: 1 do
 end
 ```
 
-### 5.7 Loops (`while_budget`, `until_dry`) and body vocabulary
+### 5.7 Loops (`loop`, `while_budget`, `until_dry`) and body vocabulary
+
+**Rule 5.7.0 — Generic `loop` options are closed and bounded.** `loop` MUST parse as
+`[opts, [do: block]]`. `opts` keys MUST be drawn from
+`[:max_iterations, :until, :on_exhausted]`; `max_iterations:` is REQUIRED and MUST be a
+positive integer literal; `until:` when present MUST parse as a `Predicate`; and
+`on_exhausted:` when present MUST be one of `:stop | :fail | :accept_current`. An invalid
+generic loop is a compile-time finding; exhaustion is never left to runtime policy. If the
+`until:` tree contains `dry(...)`, every `dry` node in that tree MUST carry the same
+`seen_by` list after defaulting omitted `seen_by` to `[]`.
+
+```counter-example
+loop until: path_exists(:x, "/done") do
+  agent("go")
+end                          # `loop` requires a literal positive `max_iterations:`
+```
 
 **Rule 5.7.1 — A loop needs options and a `do` block.** The call MUST parse as
 `[opts, [do: block]]` or `[[do: block]]`.
@@ -987,12 +1180,26 @@ end                          # `seen_by` must be a list of field names (atoms)
 ```
 
 **Rule 5.7.6 — A loop body is non-empty and body-vocabulary only.** A body MUST contain at
-least one node, drawn only from `[:agent, :log, :phase, :collect]`. `while_budget`,
-`until_dry`, `parallel`, `pipeline`, `return`, `verify`, `judge`, `synthesize`, and
-`fan_out` are rejected inside a body. **Loops therefore do not nest:** because the body
-vocabulary excludes `while_budget` and `until_dry`, no loop body can contain another loop,
-and there is no such thing as a nested loop body. Every loop is a top-level sibling
-(relevant to phase-scope in Rule 5.10.1).
+least one node. The generic core body vocabulary is
+`[:agent, :log, :phase, :until, :fanout, :collect]`; the reference compatibility subset for
+`while_budget`/`until_dry` remains `[:agent, :log, :phase, :collect]`. `parallel`,
+`pipeline`, `let`, `return`, `verify`, `judge`, `synthesize`, `refine`, `emit`, and `emit_result`
+are rejected inside a body unless a future section gives an explicit core desugaring and
+binding-scope rule. **Loops do not nest in the reference compatibility surface:** because
+the admitted body vocabulary excludes `loop`, `while_budget`, and `until_dry`, no legacy
+loop body can contain another loop. A generic-core implementation MAY admit nested `loop`
+  only if each nested loop has its own literal `max_iterations` and address-isolated
+decision events.
+
+**Rule 5.7.6a — body `until` is closed, ordered, and loop-local.** `until(Predicate)` is
+valid only in a `loop` body. Its predicate MUST satisfy §5.9, MUST NOT contain `dry(...)`,
+and MAY reference only global
+bindings that are lexically in scope before the loop plus loop-local `fanout bind:` names
+declared by earlier body statements in the same loop body. A loop-local name MUST NOT
+shadow a global binding or another loop-local binding. Such names are not visible after the
+loop and are resolved with the current iteration index. A loop MUST NOT combine a header
+`until:` option with a body `until(...)`, and a body MUST contain at most one `until(...)`;
+this keeps each `(loop address, iteration)` decision single-source.
 
 ```counter-example
 while_budget reserve: 8 do
@@ -1009,10 +1216,37 @@ until_dry rounds: 2 do
 end                          # `until_dry` body must `collect` into an accumulator
 ```
 
-### 5.8 `fan_out`
+### 5.8 `fanout` and `fan_out`
 
-**Rule 5.8.1 — `width:` is exactly `budget_slices(per: N)`.** REQUIRED; `N` a positive
-integer. Any other form (arbitrary arithmetic, a bare integer) is rejected.
+**Rule 5.8.0 — Generic `fanout` options are closed and bounded.** `fanout` MUST parse as
+`[opts, [do: block]]`; keys MUST be drawn from
+`[:width, :max_concurrency, :bind, :on_zero]`. `width:` is REQUIRED and MUST be a
+`WidthExpr` (§3.9). `max_concurrency:` when present MUST be a positive integer literal.
+`bind:` when present MUST be a literal atom matching `AtomName` and MUST NOT shadow an
+in-scope global binding or a loop-local binding already declared in the same body.
+`on_zero:` when present MUST be `:complete` or `:fail`.
+The body MUST be either one non-empty `AgentLane` or a non-empty `LaneList`. If it is a
+`LaneList`, `width:` MUST be a positive integer literal equal to the number of lanes. If it
+is a repeated `AgentLane`, an integer width MUST be a non-negative integer literal. Runtime
+width expressions (`budget_slices`, `path_count`) are valid only with a single repeated
+lane; their structural caps (`per:` and `max:` where present/required) MUST be positive
+integer literals. A `path_count` width expression MUST reference a global binding; it MUST
+NOT reference a loop-local `fanout bind:` name.
+
+```counter-example
+fanout width: path_count(:items, "/rows") do
+  agent("go")
+end                          # path-count fanout width requires an explicit `max:`
+```
+
+```counter-example
+fanout width: budget_slices(per: 10) do
+  lanes([[agent("a")], [agent("b")]])
+end                          # heterogeneous lanes require fixed literal width
+```
+
+**Rule 5.8.1 — legacy `fan_out` width is exactly `budget_slices(per: N)`.** REQUIRED;
+`N` a positive integer. Any other form (arbitrary arithmetic, a bare integer) is rejected.
 
 ```counter-example
 fan_out width: 4 do
@@ -1031,13 +1265,17 @@ end                          # `fan_out` body steps must be `agent` turns
 
 ### 5.9 `until:` predicate sub-vocabulary
 
-**Rule 5.9.1 — Predicate operands and thresholds.** The left operand of a comparison MUST
-be `count(<accumulator-atom>)` (where `<accumulator-atom>` is **any** atom, naming the
-accumulator the body collects into — not a literal named `acc`) or `budget_remaining()`;
-the right MUST be a literal integer; the operator MUST be one of `> < >= <= ==`.
-`all_of`/`any_of` require at least one nested predicate. Anything else is rejected. (The
-compiler does not require the accumulator atom to match a `collect(into:)` in the body; an
-unmatched name resolves to an empty accumulator forever — see the note in §3.8.)
+**Rule 5.9.1 — Predicate operands and thresholds are closed and typed.** The left operand
+of a comparison MUST be `count(<accumulator-atom>)`, `budget_remaining()`, or
+`path_count(<binding>, <pointer>)`; the right MUST be a literal integer; the operator MUST
+be one of `> < >= <= ==`. `all`/`any` and legacy `all_of`/`any_of` require at least one
+nested predicate. `dry(rounds: N, seen_by: S?)` requires `N >= 1` and `S` a literal atom
+list when present. `agree(binding, path: pointer, equals: literal, threshold: t)` requires a
+lexically preceding binding, a valid JSON Pointer, a JSON-convertible literal, and
+`threshold` of `:all | :any | positive integer`. Path predicates require the same binding,
+pointer, and JSON-literal checks. Anything else is rejected. (The compiler does not require
+the accumulator atom to match a `collect(into:)` in the body; an unmatched name resolves to
+an empty accumulator forever — see the note in §3.8.)
 
 ```counter-example
 while_budget reserve: 0, until: count(:items) >= size() do
@@ -1046,16 +1284,28 @@ while_budget reserve: 0, until: count(:items) >= size() do
 end                          # a predicate threshold must be a literal integer
 ```
 
+```counter-example
+loop max_iterations: 3, until: agree(:reviews, path: "/ok", equals: true, threshold: :most) do
+  agent("go")
+end                          # agreement threshold is outside the closed vocabulary
+```
+
+```counter-example
+loop max_iterations: 3, until: path_equals(:r, "open", true) do
+  agent("go")
+end                          # JSON Pointer strings must be "" or start with "/"
+```
+
 ### 5.10 Whole-DSL invariants (findings)
 
 **Rule 5.10.1 — Phase names unique *per lexical scope*.** Phase-name uniqueness is
 enforced **independently within each lexical scope**, not globally across the workflow. A
 scope is either the **top-level statement list** or the body of **one individual loop**
-(`while_budget` / `until_dry`). The compiler carries a **separate** seen-set per scope: the
-top-level `build` starts a fresh set, and each loop body's `build_body` starts its own
-fresh set. Because loops do **not** nest (Rule 5.7.6 — a loop body's vocabulary excludes
-`while_budget`/`until_dry`), these scopes are always **siblings**: the single top-level
-statement list plus each individual loop body, never one loop body inside another.
+after desugaring (`loop`, including legacy `while_budget` / `until_dry`). The compiler
+carries a **separate** seen-set per scope: the top-level `build` starts a fresh set, and
+each loop body's `build_body` starts its own fresh set. In the reference compatibility
+surface loops do **not** nest; if a generic-core implementation admits nested `loop`
+statements, each nested loop body creates its own lexical phase scope.
 Consequently two `phase("p")` in the
 **same** scope collide (rejected, located at the second declaration), but the **same** name
 reused across scope boundaries — a top-level `phase("p")` and a loop-body `phase("p")`, or
@@ -1097,7 +1347,9 @@ end
 **Rule 5.10.2a — `emit_result` is a final top-level terminal over one result-capable
 binding.** `emit_result` MUST appear only at top level, MUST be the final top-level node,
 and MUST take exactly one literal binding atom. The binding MUST resolve, at compile time,
-to a result-capable producer. In this amendment only `refine` is result-capable.
+to a result-capable producer: a producer whose section defines a JSON-encodable public
+projection for structured terminal output. In the shipped library surface, only `refine`
+defines such a projection.
 
 Pinned findings:
 
@@ -1382,6 +1634,12 @@ FailureReturn(failure):
     - Return {:did_not_converge, address, reason}.
   - If failure.reason is {:invalid_refine_input, address, reason}:
     - Return {:invalid_refine_input, address, reason}.
+  - If failure.reason is {:loop_exhausted, address, iterations}:
+    - Return {:loop_exhausted, address, iterations}.
+  - If failure.reason is {:fanout_failed, address, iteration, reason}:
+    - Return {:fanout_failed, address, iteration, reason}.
+  - If failure.reason is {:fanout_failed, address, reason}:     ; legacy top-level shape
+    - Return {:fanout_failed, address, nil, reason}.
   - Return {:malformed_output, failure.address, failure.reason}.
 ```
 
@@ -1514,8 +1772,8 @@ Consequences a conforming implementation MUST preserve:
 
 ### 6.3 Per-node dispatch
 
-`RunNode(node, run_id, provider, prior, ctx)` returns `{:cont, ctx}` or
-`{:halt, ctx, reason}`, by node kind:
+`RunNode(node, run_id, provider, prior, ctx)` returns `{:cont, ctx}`, `{:halt, ctx, reason}`,
+or, only inside a loop body, `{:loop_stop, ctx, reason}`, by node kind:
 
 - **`Phase`** — `Let {seq} be CommitMarker(phase_entered, node, prior, ctx.seq)` (payload
   `%{address, name}`); return `{:cont, ctx with seq = seq}`.
@@ -1536,22 +1794,31 @@ Consequences a conforming implementation MUST preserve:
   base last-wins model remains historical context for §1–§8; see §10.7 and §10.7a.)*
 - **`Agent`** — see RunAgent (§6.4).
 - **`Collect`** — see RunCollect (§6.6).
-- **`WhileBudget`** / **`UntilDry`** — Loop (§6.7), entered at `iteration = 0`:
-  `WhileBudget → Loop(node, [], run_id, provider, prior, ctx, 0)` and
-  `UntilDry → Loop(node, node.seen_by, run_id, provider, prior, ctx, 0)`.
-- **`Parallel`** / **`Pipeline`** / **`Verify`** / **`Judge`** / **`FanOut`** — the
-  concurrent-region algorithms (§6.8–6.10).
+- **`Until`** — see RunUntil (§6.7); valid only when `ctx.loop_address` and `ctx.iteration`
+  identify the owning loop pass.
+- **`Loop`** — RunLoop (§6.7).
+- **`Fanout`** — RunFanout (§6.10).
+- **`WhileBudget`** / **`UntilDry`** — compatibility loop sugar (§3.7); desugar to a
+  generic `Loop` and then run `RunLoop`, emitting the generic `loop_decision` payloads.
+- **`Parallel`** / **`Pipeline`** / **`Verify`** / **`Judge`** / **`FanOut`** —
+  compatibility fanout/panel sugar (§6.8–6.10).
 - **`Synthesize`** — construct an ephemeral `%Agent{address: node.address, prompt:
   "<prompt>\n\nInputs: <inspect(inputs)>", schema: nil, retries: 0}` and delegate to
   RunAgent, reusing the ordinary journaled/keyed/resumable agent path.
 
-Structural markers are **positional** — reused verbatim on resume if already journaled,
-otherwise committed. They key on one of two tuples:
+`RunNodes` walks nodes in source order and propagates the first non-`{:cont, ctx}` outcome.
+`{:loop_stop, ctx, reason}` is consumed only by the immediately enclosing `LoopCore`; a
+top-level `RunTree` never receives it because `until` is loop-body-only by validation.
 
-- **Positional markers** (`phase_entered`, `log_emitted`, and every region/boundary marker:
+Structural markers are **positional** — reused verbatim on resume if already journaled,
+otherwise committed. They key on the tuples below:
+
+- **Positional markers** (`phase_entered`, `log_emitted`, and every region/boundary marker
+  except generic `fanout_started`/`fanout_completed` markers, which are handled below:
   `parallel_started`/`parallel_completed`, `pipeline_started`/`pipeline_completed`,
   `verify_started`/`verify_settled`, `judge_started`/`judge_settled`,
-  `fan_out_started`/`fan_out_completed`, `loop_completed`) are keyed by `(type, address)` and
+  `fan_out_started`/`fan_out_completed`,
+  `loop_completed`) are keyed by `(type, address)` and
   are committed **at most once per address**. On resume, if a marker with that
   `(type, address)` is already journaled it is reused verbatim and not re-committed.
 - **The iteration marker** (`iteration_started`) is the **only** body marker keyed by
@@ -1573,14 +1840,20 @@ CommitMarker(type, node, prior, seq):
     Return max(seq, stamped_event.seq + 1).
 ```
 
+Generic `fanout_started`/`fanout_completed` are positional at top level and
+iteration-qualified inside loop bodies. They carry the current `ctx.iteration` in their
+payload and key on `(type, address, iteration_or_nil)` through the specialized helpers in
+§6.10, so replay never recomputes width and one loop iteration never reuses another
+iteration's width/result list.
+
 This is why a region resumed after a mid-region crash (§6.9) reproduces **exactly** the
 crash-free journal: the `*_settled` / `*_completed` marker is written **at most once per
 address**, so a resumed run never appends a duplicate settle event and the Status fold
 (§7.3), which appends a fresh `verifications`/`judgments` entry on each such event, stays
 identical to the crash-free fold (C4, §8). Wherever §6.9–§6.10 say "commit
-Event.`verify_settled`(…)" (or any other start/settle/complete marker) the operation is
-`CommitMarker` — an implementation MUST NOT unconditionally re-commit a region marker on
-resume.
+Event.`verify_settled`(…)" (or any other start/settle/complete marker except the
+specialized generic `fanout_started`/`fanout_completed`) the operation is `CommitMarker` —
+an implementation MUST NOT unconditionally re-commit a region marker on resume.
 
 A consequence of keying `phase_entered`/`log_emitted` by `(type, address)`: a `phase`/`log`
 **inside a loop body** has one fixed address, so it commits **exactly once for the whole
@@ -2047,53 +2320,114 @@ Rules a conforming implementation MUST honor:
 
 ### 6.7 Dynamic loops
 
+Generic `Loop` execution is the normative core algorithm. Legacy `while_budget` and
+`until_dry` first desugar to `Loop` (§3.7), then run this algorithm and emit the generic
+`loop_decision` payload shape in §7.2. There is no second normative loop event format.
+
 ```
-Loop(node, seen_by, run_id, provider, prior, ctx, iteration):
-  - Let {decision, ctx} be Decide(node, run_id, prior, ctx, iteration).
-  - If {decision} is `:stop`:
-    - Commit Event.loop_completed(node, iteration).          ; iterations = iteration
+RunLoop(node, run_id, provider, prior, ctx):
+  - Return LoopCore(node, run_id, provider, prior, ctx, 0).
+
+LoopCore(node, run_id, provider, prior, ctx, iteration):
+  - Let {decision, ctx} be DecideCore(node, run_id, prior, ctx, iteration).
+  - If {decision} is {:stop, reason}:
+    - Commit Event.loop_completed(node, iteration, exhausted: false, reason: reason).
     - Return {:cont, ctx}.
+  - If {decision} is {:exhausted, :stop}:
+    - Commit Event.loop_completed(node, iteration, exhausted: true, reason: :max_iterations).
+    - Return {:cont, ctx}.
+  - If {decision} is {:exhausted, :accept_current}:
+    - Commit Event.loop_completed(node, iteration, exhausted: true, reason: :max_iterations).
+    - Return {:cont, ctx}.       ; library projections may fold last journaled values explicitly
+  - If {decision} is {:exhausted, :fail}:
+    - Commit Event.loop_exhausted(node, iteration, :max_iterations).
+    - Return {:halt, ctx, {:loop_exhausted, node.address, iteration}}.
+  - Otherwise {decision} is :continue.
   - Let {seq} be IterationMarker(run_id, node, iteration, ctx.seq).
-      ; commits iteration_started(node, iteration) unless already journaled for (address, iteration)
-  - Let {body_ctx} be ctx with {seq: seq, iteration: iteration, seen_by: seen_by, last_result: nil}.
+  - Let {body_ctx} be ctx with {seq: seq, iteration: iteration,
+      loop_address: node.address, seen_by: LoopSeenBy(node.until), last_result: nil}.
   - Let {r} be RunNodes(node.body, run_id, provider, prior, body_ctx).
   - If {r} is {:cont, body_ctx'}:
-    - Return Loop(node, seen_by, run_id, provider, prior, ctx with seq = body_ctx'.seq, iteration + 1).
+    - Return LoopCore(node, run_id, provider, prior, ctx with seq = body_ctx'.seq, iteration + 1).
+  - If {r} is {:loop_stop, body_ctx', reason}:
+    - Commit Event.loop_completed(node, iteration + 1, exhausted: false, reason: reason).
+    - Return {:cont, ctx with seq = body_ctx'.seq}.
   - If {r} is {:halt, body_ctx', reason}:
     - Return {:halt, ctx with seq = body_ctx'.seq, reason}.
 ```
 
-Both loop kinds **enter `Loop` with `iteration = 0`** (§6.3 dispatch): `WhileBudget` calls
-`Loop(node, [], run_id, provider, prior, ctx, 0)` (empty `seen_by`); `UntilDry` calls
-`Loop(node, node.seen_by, run_id, provider, prior, ctx, 0)`. `iteration` then strictly
-increases by one on each recursive pass (§6.7 `Loop`), so it seeds the exactly-once key
-(§6.5), the `iteration_started`/`loop_decision`/`accumulate` payloads, and `DryStreak`'s
-backward walk.
-
 ```
-Decide(node, run_id, prior, ctx, iteration):
-  - If a `loop_decision` for (node.address, iteration) is in {prior}:
-    - Return {its decision, ctx}.                            ; replay verbatim
-  - Let {decision} be FreshDecision(node, run_id, iteration).
-  - Commit Event.loop_decision(node, iteration, decision).   ; decision in [:continue, :stop]
-  - Return {decision, ctx}.
-```
-
-```
-FreshDecision(WhileBudget, run_id, iteration):        ; first match wins
-  - If {iteration} >= node.max_iterations: Return `:stop`.
-  - If node.until is set and Predicate.Evaluate(node.until, PredicateContext(run_id)): Return `:stop`.
-  - If Ledger.Remaining(run_id) > node.reserve: Return `:continue`.
-  - Return `:stop`.
-
-FreshDecision(UntilDry, run_id, iteration):
-  - If {iteration} >= node.max_iterations: Return `:stop`.
-  - If DryStreak(run_id, node.address, iteration) >= node.rounds: Return `:stop`.
-  - Return `:continue`.
+DecideCore(node, run_id, prior, ctx, iteration):
+  - If a `loop_decision` for (node.address, iteration, source_address: nil) is in {prior}:
+    - Return {ReplayLoopDecision(payload), ctx}.
+  - If {iteration} >= node.max_iterations:
+    - Let {decision} be {:exhausted, node.on_exhausted}.
+    - Commit Event.loop_decision(node, iteration, decision,
+        predicate_result: nil, exhausted: true, source_address: nil).
+    - Return {decision, ctx}.
+  - If node.until is not nil:
+    - Let {result} be Predicate.Evaluate(node.until,
+        PredicateContext(run_id, node.address, iteration)).
+    - If {result} is true:
+      - Let {decision} be {:stop, :until}.
+      - Commit Event.loop_decision(node, iteration, decision,
+          predicate_result: true, exhausted: false, source_address: nil).
+      - Return {decision, ctx}.
+  - Commit Event.loop_decision(node, iteration, :continue,
+      predicate_result: false, exhausted: false, source_address: nil).
+  - Return {:continue, ctx}.
 ```
 
-`PredicateContext(run_id) = %{accumulators: Accumulator.Of(run_id), remaining:
-Ledger.Remaining(run_id)}`.
+`ReplayLoopDecision(payload)` returns the journaled decision verbatim; it MUST NOT
+re-evaluate `node.until`, even if the source file changed before resume. Thus the
+predicate's truth value is represented by the journaled `loop_decision` event before it
+affects execution.
+
+```
+LoopSeenBy(nil): Return [].
+LoopSeenBy(predicate):
+  - Let {dry_nodes} be every Dry predicate reachable in predicate.
+  - If {dry_nodes} is empty: Return [].
+  - Return the single seen_by list shared by every Dry predicate.
+    ; Validation already rejected conflicting lists (§5.7.0).
+```
+
+`Until` — body-local loop stop:
+
+```
+RunUntil(node, run_id, prior, ctx):
+  - Assert ctx.loop_address is not nil and ctx.iteration is an integer.
+  - If a `loop_decision` for (ctx.loop_address, ctx.iteration, source_address: node.address)
+    is in {prior}:
+    - Let {decision} be ReplayLoopDecision(payload).
+    - If {decision} is {:stop, reason}: Return {:loop_stop, ctx, reason}.
+    - Otherwise Return {:cont, ctx}.
+  - Let {result} be Predicate.Evaluate(node.predicate,
+      PredicateContext(run_id, ctx.loop_address, ctx.iteration)).
+  - If {result} is true:
+    - Let seq' be Commit Event.loop_decision(ctx.loop_address, ctx.iteration, {:stop, :until},
+        predicate_result: true, exhausted: false, source_address: node.address).
+    - Return {:loop_stop, ctx with seq = seq', :until}.
+  - Let seq' be Commit Event.loop_decision(ctx.loop_address, ctx.iteration, :continue,
+      predicate_result: false, exhausted: false, source_address: node.address).
+  - Return {:cont, ctx with seq = seq'}.
+```
+
+A loop may have either a top-level `until:` option, which is evaluated before the pass by
+`DecideCore`, or body `until(...)` statements, which are evaluated at their source position.
+Both use the same closed predicate semantics and the same `loop_decision` event shape; the
+`source_address` distinguishes a body stop point from the loop header.
+
+Historical note: older reference sketches named compatibility structs `WhileBudget` and
+`UntilDry` directly. A conforming implementation MAY keep such structs internally, but it
+MUST lower them to the generic `Loop` decision model before execution or emit byte-equivalent
+generic loop events.
+
+`PredicateContext(run_id, loop_address, iteration) = %{run_id: run_id,
+accumulators: Accumulator.Of(run_id), remaining: Ledger.Remaining(run_id),
+loop_address: loop_address, iteration: iteration}` for loop predicates. Gate/library
+predicates MAY pass the same map without `loop_address` only when they do not contain
+`dry`; a `dry` predicate outside a loop is a compile-time error.
 
 `DryStreak` counts how many consecutive most-recent rounds added **nothing** to any
 accumulator, walking backward from the round just completed. A round is identified by its
@@ -2121,12 +2455,12 @@ prefixed by `loop_address`" restricts the count to `collect` nodes belonging to 
 address-prefix isolation applies to dryness ONLY.** `count(:x)` predicates (§6.8) read the
 **global**, name-keyed accumulator via `Accumulator.Of` (§6.6.1), which has **no** address
 filter, so a `count(:x)` is **not** isolated from a sibling loop that also collected into
-`:x` — see the global-by-name rule in §6.6.1. `UntilDry` stops (§6.7 `FreshDecision`)
+`:x` — see the global-by-name rule in §6.6.1. `until_dry` stops (§6.7 `DecideCore`)
 once `DryStreak(...) >= node.rounds`.
 
 **Termination guarantee.** Termination is delivered **unconditionally** by the
-`max_iterations` cap: `FreshDecision` returns `:stop` the moment `iteration >=
-node.max_iterations` for **both** loop types, and `iteration` strictly increases by one per
+`max_iterations` cap: `DecideCore` returns `{:exhausted, action}` the moment
+`iteration >= node.max_iterations`, and `iteration` strictly increases by one per
 pass, so every loop halts after at most `max_iterations` iterations regardless of body
 behavior. The budget/reserve and dryness conditions are **early-stop refinements**, not the
 termination proof: they may return `:stop` sooner, but they are not required to. In
@@ -2185,11 +2519,31 @@ Pinned rules a conforming implementation MUST honor:
 Predicate.Evaluate(pred, ctx):
   - If {pred} is Compare{op, left, right}:
     - Return ApplyCompare(op, Resolve(left, ctx), right).
+  - If {pred} is Dry{rounds, seen_by}:
+    - Return DryStreak(ctx.run_id, ctx.loop_address, ctx.iteration) >= rounds.
+      ; `seen_by` is stored on the loop/collect events and affects accumulation, not this fold.
+  - If {pred} is PathExists{ref, pointer}:
+    - Return PathResolve(ResolveRef(ref, ctx.run_id,
+        %{loop_address: ctx.loop_address, iteration: ctx.iteration}), pointer) is {:present, _}.
+  - If {pred} is PathNonEmpty{ref, pointer}:
+    - Return PathNonEmpty(PathResolve(ResolveRef(ref, ctx.run_id,
+        %{loop_address: ctx.loop_address, iteration: ctx.iteration}), pointer)).
+  - If {pred} is PathEquals{ref, pointer, literal_json}:
+    - Let {lookup} be PathResolve(ResolveRef(ref, ctx.run_id,
+        %{loop_address: ctx.loop_address, iteration: ctx.iteration}), pointer).
+    - If {lookup} is :missing: Return false.
+    - Otherwise {lookup} is {:present, value}; Return JSONEqual(value, literal_json).
+  - If {pred} is Agree{ref, pointer, literal_json, threshold}:
+    - Return Agree(ResolveRef(ref, ctx.run_id,
+        %{loop_address: ctx.loop_address, iteration: ctx.iteration}), pointer, literal_json, threshold).
   - If {pred} is AllOf{ps}: Return true iff Evaluate holds for every p in ps.
   - If {pred} is AnyOf{ps}: Return true iff Evaluate holds for some p in ps.
 
 Resolve(Count{acc}, ctx)  = length(ctx.accumulators[acc] or []).
 Resolve(BudgetRemaining{}, ctx) = ctx.remaining.
+Resolve(PathCount{ref, pointer}, ctx) =
+  PathCount(PathResolve(ResolveRef(ref, ctx.run_id,
+    %{loop_address: ctx.loop_address, iteration: ctx.iteration}), pointer)).
 
 ApplyCompare(op, a, b):
   - Return the truth value of the comparison `a op b`, where {op} is one of
@@ -2206,6 +2560,76 @@ right operand is always the comparison's literal integer.
 `ctx.remaining` may be the atom `:infinity` (no budget target); it sorts above every
 integer, so `budget_remaining() > n` is `true` under an unbounded run.
 
+Path and agreement helpers:
+
+```
+PathResolve(value, ""):
+  - Return {:present, value}.
+
+PathResolve(value, pointer):
+  - Split {pointer} on "/" after the leading slash; unescape "~1" to "/" and "~0" to "~".
+  - Let {current} be {value}.
+  - For each token:
+    - If {current} is a JSON object/map and contains string key token: set current to current[token].
+    - Else if {current} is a map and has an existing atom key whose Atom.to_string(key) == token:
+      set current to current[key]. Implementations MUST NOT create atoms from pointer tokens.
+    - Else if {current} is a JSON array/list and token is a canonical base-10 array index
+      ("0" or a non-empty digit sequence not starting with "0") whose integer value is less
+      than length(current): set current to that zero-based element.
+    - Else Return :missing.
+  - Return {:present, current}.
+
+PathNonEmpty(:missing): Return false.
+PathNonEmpty({:present, nil}): Return false.
+PathNonEmpty({:present, value}) when value is a binary: Return byte_size(value) > 0.
+PathNonEmpty({:present, value}) when value is a list: Return length(value) > 0.
+PathNonEmpty({:present, value}) when value is a map: Return map_size(value) > 0.
+PathNonEmpty({:present, _scalar}): Return true.   ; false and 0 are non-empty scalars
+
+PathCount(:missing): Return 0.
+PathCount({:present, nil}): Return 0.
+PathCount({:present, value}) when value is a list: Return length(value).
+PathCount({:present, value}) when value is a map: Return map_size(value).
+PathCount({:present, _scalar}): Return 1.
+```
+
+`path_count` counts list elements and object members; it never counts string bytes or
+characters. Missing paths and present `nil` both count as `0`; only present `nil` satisfies
+`path_exists`.
+
+```
+Agree(value, pointer, literal_json, threshold):
+  - If {value} is not a list: Return false.
+  - Let {matches} be 0.
+  - For each {item} in {value}, in list order:
+    - Let {lookup} be PathResolve(item, pointer).
+    - If {lookup} is {:present, v} and JSONEqual(v, literal_json): increment {matches}.
+  - If {threshold} is :all: Return matches == length(value) and length(value) > 0.
+  - If {threshold} is :any: Return matches >= 1.
+  - If {threshold} is integer n: Return matches >= n.
+```
+
+`agree` over an empty list is false for `:all`, false for `:any`, and false for every
+positive integer threshold. This avoids vacuous convergence.
+
+```
+JSONEqual(a, b):
+  - nil equals nil.
+  - booleans equal only the same boolean.
+  - integers equal only the same integer value.
+  - floats equal only the same finite numeric value in hosts that admit floats here.
+  - strings equal only byte-identical strings.
+  - arrays/lists equal iff they have the same length and pairwise JSONEqual elements.
+  - objects/maps equal iff they have the same string-key set and JSONEqual values for every key.
+  - Values of different JSON kinds are not equal.
+```
+
+Predicate literal validation converts atom literals to strings, `nil` to JSON null,
+booleans/integers/floats/strings to the corresponding JSON scalar, lists recursively, and
+maps to string-keyed JSON objects; it rejects functions, tuples, structs, PIDs/references,
+non-finite floats, non-string/non-atom map keys, and duplicate object keys after
+atom-to-string conversion.
+
 ### 6.9 Barrier and per-item fan-out — `parallel`, `pipeline`
 
 `Parallel`:
@@ -2215,7 +2639,7 @@ RunParallel(node, run_id, provider, prior, ctx):
   - Let {seq} be CommitMarker(parallel_started, node, prior, ctx.seq).   ; payload %{address, branch_count}
   - Let {cap} be node.max_concurrency or max(length(node.branches), 1).
   - Let {results} be RunConcurrently(node.branches, cap, fn branch ->
-      BuildAgent(branch, run_id, provider, prior) end).       ; off-thread, no journal writes
+      BuildAgent(branch, run_id, provider, prior, 0) end).     ; off-thread, no journal writes
   - Let {r} be CommitLanes(results, run_id, seq).             ; commit each branch's events in branch order
   - If {r} is {:ok, seq'}:
     - Return {:cont, ctx with seq = CommitMarker(parallel_completed, node, prior, seq')}.
@@ -2224,7 +2648,8 @@ RunParallel(node, run_id, provider, prior, ctx):
 
 `Pipeline` is identical except: it commits `pipeline_started` (payload `%{address, items,
 item_count, stage_count}`), fans out over `node.lanes` (each lane runs its stages
-**sequentially** via `RunLane`), joins with no barrier, and commits `pipeline_completed`.
+**sequentially** via `RunLane(stages, run_id, provider, prior, 0)`), joins with no barrier,
+and commits `pipeline_completed`.
 
 `RunConcurrently(inputs, cap, fun)` runs `fun` over `inputs` with at most `cap` in flight,
 **ordered** (results in input order), with no timeout. Because results are gathered in
@@ -2300,8 +2725,10 @@ directly. Crucially, it is **resume-aware**: like RunAgent (§6.4) it MUST first
 without re-committing already-journaled branch events:
 
 ```
-BuildAgent(node, run_id, provider, prior):
-  - Let {iteration} be the agent's iteration (0 outside a loop).
+BuildAgent(node, run_id, provider, prior, iteration):
+  - Let {iteration} be a non-negative integer supplied by the owning traversal; top-level,
+    panel, pipeline, and legacy fan-out lanes pass 0, while a generic fanout inside a loop
+    passes the current loop iteration.
   - Let {outcome} be ResolveIdempotency(prior, node.address, iteration).
   - If {outcome} is {:committed, result, _usage}:
     - Return {:ok, [], result}.               ; already journaled — NO events to re-commit
@@ -2327,10 +2754,11 @@ events for `CommitLanes` to commit in input order, so lanes never touch the jour
 directly:
 
 ```
-RunLane(stages, run_id, provider, prior):
+RunLane(stages, run_id, provider, prior, lane_iteration):
   - Let {events} be an empty List and {result} be nil.
   - For each {stage} in stages, in order:
-    - Let {r} be BuildAgent(stage, run_id, provider, prior).   ; each stage re-addressed at compile time (§4.4)
+    - Let {r} be BuildAgent(stage, run_id, provider, prior, lane_iteration).
+      ; each stage re-addressed at compile time (§4.4)
     - If {r} is {:ok, stage_events, stage_result}:
       - Append {stage_events} to {events}; set {result} to {stage_result}.
     - If {r} is {:failed, stage_events, reason}:
@@ -2359,7 +2787,7 @@ RunVerify(node, run_id, provider, prior, ctx):
       ; `mode` is the atom TAG :voters or :lenses (ModeTag(node.mode)), NOT the node's mode tuple.
       ; voter_count and threshold carry the arity, so the tuple's payload is fully recoverable.
   - Let {results} be RunConcurrently(node.voters, max(length(node.voters),1),
-      fn voter -> BuildAgent(voter, run_id, provider, prior) end).
+      fn voter -> BuildAgent(voter, run_id, provider, prior, 0) end).
   - Let {r} be CommitLanesWithResults(results, run_id, seq).   ; §6.9, voter (input) order
   - If {r} is {:halt, seq', reason}: Return {:halt, ctx with seq = seq', reason}.
       ; a failed vote fails the panel — no verify_settled is committed
@@ -2411,7 +2839,7 @@ RunJudge(node, run_id, provider, prior, ctx):
 ScoreLane(criteria, run_id, provider, prior):                  ; one candidate's criterion scorers
   - Let {events} be an empty List and {total} be 0.
   - For each {scorer} in {criteria}, in criterion order:
-    - Let {r} be BuildAgent(scorer, run_id, provider, prior).   ; resume-aware (§6.9), addr node.address ++ [c,k]
+    - Let {r} be BuildAgent(scorer, run_id, provider, prior, 0). ; resume-aware (§6.9), addr node.address ++ [c,k]
     - If {r} is {:ok, scorer_events, result}:
       - Append {scorer_events} to {events}.
       - Set {total} to {total} + Number(result, "score").      ; Number(map, "score") = the value if a number, else 0
@@ -2462,7 +2890,74 @@ candidates repeat, and `PickWinner` sees only the collapsed key. This is the pin
 observable behavior; an author who needs one score per position MUST make candidate literals
 distinct.
 
-`FanOut` — the only runtime-decided width:
+`Fanout` — the generic core fan-out region:
+
+```
+RunFanout(node, run_id, provider, prior, ctx):
+  - Let {fanout_iteration} be ctx.iteration when ctx.loop_address is not nil, otherwise nil.
+  - Let {lane_iteration} be fanout_iteration when not nil, otherwise 0.
+  - Let {width, seq} be DecideFanoutWidth(node, run_id, prior, ctx.seq, fanout_iteration).
+  - If {width} is 0 and node.on_zero is :fail:
+    - Let seq' be Commit Event.fanout_failed(node, :zero_width, fanout_iteration).
+    - Let reason be {:fanout_failed, node.address, fanout_iteration, :zero_width}.
+    - Return {:halt, ctx with seq = seq', reason}.
+  - Let {branches} be MaterializeFanoutBranches(node, width).
+  - Let {cap} be node.max_concurrency or max(width, 1).
+  - Let {results} be RunConcurrently(branches, cap,
+      fn branch -> RunLane(branch, run_id, provider, prior, lane_iteration) end).
+  - Let {r} be CommitLanes(results, run_id, seq).
+  - If {r} is {:ok, seq'}:
+    - Return {:cont, ctx with seq = CommitFanoutCompleted(node, prior, seq', fanout_iteration)}.
+  - If {r} is {:halt, seq', reason}: Return {:halt, ctx with seq = seq', reason}.
+
+DecideFanoutWidth(node, run_id, prior, seq, fanout_iteration):
+  - If a `fanout_started` for (node.address, fanout_iteration) is in {prior}:
+    - Return {that event's payload.width, seq}.
+  - Else width = ComputeFanoutWidth(node.width, run_id).
+  - Let seq' be CommitFanoutStarted(node, width, prior, seq, fanout_iteration).
+  - Return {width, seq'}.
+
+CommitFanoutStarted(node, width, prior, seq, fanout_iteration):
+  - If a `fanout_started` for (node.address, fanout_iteration) is in {prior}: Return seq.
+  - Commit Event.fanout_started(node, width, node.bind, fanout_iteration) through the serialized append boundary.
+    ; payload %{address, iteration: fanout_iteration, width_expr, width, bind}
+  - Return the advanced seq.
+
+CommitFanoutCompleted(node, prior, seq, fanout_iteration):
+  - If a `fanout_completed` for (node.address, fanout_iteration) is in {prior}: Return seq.
+  - Commit Event.fanout_completed(node, fanout_iteration) through the serialized append boundary.
+    ; payload %{address, iteration: fanout_iteration}
+  - Return the advanced seq.
+
+MaterializeFanoutBranches(node, width):
+  - If width == 0: Return [].
+  - If node.repeated is true:
+    - Let lane_template be the single lane in node.lanes.
+    - Return the List [RebaseBody(lane_template, node.address ++ [i]) for i in 0..(width - 1)].
+  - Otherwise node.repeated is false:
+    - Assert length(node.lanes) == width.      ; guaranteed by validation (§5.8.0)
+    - Return the List [RebaseBody(node.lanes[i], node.address ++ [i]) for i in 0..(width - 1)].
+```
+
+`ComputeFanoutWidth`:
+
+- For an integer literal width `N`, return `N`.
+- For `budget_slices(per: P, max: M?)`, if `Ledger.Remaining(run_id)` is `:infinity`,
+  raise `ArgumentError("budget_slices requires a bounded run (no budget target set)")`;
+  otherwise return `div(max(remaining, 0), P)` capped to `M` when `M` is present.
+- For `path_count(ref, pointer, max: M)`, resolve the global `ref` by `ResolveRef(ref,
+  run_id, nil)`, compute `PathCount(PathResolve(value, pointer))`, and return
+  `min(count, M)`. Validation rejects loop-local refs in width expressions (§5.8.0).
+
+The width decision is journaled in `fanout_started.width` before any branch runs. Resume
+MUST replay the journaled width and MUST NOT re-read budget or bound values for that fanout.
+Zero width with `on_zero: :complete` commits start/completed markers, runs no lanes, and
+leaves `ctx.last_result` unchanged.
+Top-level generic fanout markers use `iteration: nil`, but their lane agents run at
+iteration `0`; loop-body generic fanout markers and lane agents both use the owning loop
+iteration.
+
+`FanOut` — the legacy budget-scaled surface:
 
 ```
 RunFanOut(node, run_id, provider, prior, ctx):
@@ -2477,7 +2972,8 @@ RunFanOut(node, run_id, provider, prior, ctx):
       RebaseBody(node.body, node.address ++ [i]); if {width} is 0, {branches} is [].
       ; RebaseBody re-addresses stage s to branch_address ++ [s]
   - Let {cap} be node.max_concurrency or max(width, 1).
-  - RunConcurrently(branches, cap, RunLane…); CommitLanes.
+  - RunConcurrently(branches, cap,
+      fn branch -> RunLane(branch, run_id, provider, prior, 0) end); CommitLanes.
   - On {:ok, seq'}: Return {:cont, ctx with seq = CommitMarker(fan_out_completed, node, prior, seq')}.
 ```
 
@@ -2493,31 +2989,32 @@ fabricate a branch at a negative index).
 An unbounded run raises when it reaches a `fan_out` (there is no budget to slice) — this is
 the one execution-time raise that is not a validation failure; it surfaces as a run crash.
 
-**Panels are observational (no gating).** `RunVerify` and `RunJudge` set `ctx.last_result`
-to `%{survived, …}` / `%{winner, …}` and journal `verify_settled` / `judge_settled`, but a
-panel verdict has **zero** control-flow effect (Principle 8). At top level nothing consumes
-`ctx.last_result`: `collect` is the only consumer and is body-only (§6.6), panels are
-forbidden inside loop bodies (Rule 5.7.6), and the `until:` predicate grammar (§3.8) can
-reference only `count(:acc)` and `budget_remaining()` — never a verdict. **The language has
-no conditional or branching combinator.** A verdict or winner therefore cannot alter what
-runs next; it is journaled output only. Any reaction to a panel outcome (e.g. "stop if the
-verification failed") happens **outside** the workflow, by folding the journal
-(`Status.verifications` / `Status.judgments`, §7.3) after the run. Authors MUST NOT attempt
-to gate a workflow on a panel result — a review-gated pipeline is not expressible in this
-vocabulary.
+**Panels are observational unless explicitly bound.** Legacy `verify` and `judge` journal
+`verify_settled` / `judge_settled` projections but do not implicitly alter control flow.
+No node may read `ctx.last_result` as ambient panel context. A predicate may inspect a panel
+or fanout outcome only when that outcome has an explicit compile-time binding (`let` or
+`fanout bind:`) and the predicate is one of the closed forms in §3.8/§6.8 (`agree`,
+`path_exists`, `path_non_empty`, `path_count`, `path_equals`, `all`, `any`, or the
+count/budget comparisons). **The language still has no arbitrary conditional or branching
+combinator:** predicates can stop bounded loops or gates with pinned exhaustion behavior,
+but cannot select an arbitrary subtree. A legacy verdict or winner therefore cannot alter
+what runs next by itself; a reaction must be expressed as an explicit journaled data edge or
+outside the workflow by folding the journal (`Status.verifications` / `Status.judgments`,
+§7.3).
 
 ### 6.11 Concurrency: what is parallel vs serial
 
-- `parallel` branches, `pipeline` lanes, `verify` voters, `judge` **candidate lanes**, and
-  `fan_out` branches MAY run concurrently up to their `cap`. The `cap` sources are:
-  `parallel`/`pipeline`/`fan_out` take `node.max_concurrency` (default = all at once);
+- `fanout` branches, `parallel` branches, `pipeline` lanes, `verify` voters, `judge`
+  **candidate lanes**, and `fan_out` branches MAY run concurrently up to their `cap`. The
+  `cap` sources are:
+  `fanout`/`parallel`/`pipeline`/`fan_out` take `node.max_concurrency` (default = all at once);
   `verify` and `judge` have **no** `max_concurrency` option, so their cap is fixed at "all at
   once" (`max(length(node.voters), 1)` and `max(length(node.scorers), 1)` respectively).
   Because every region gathers results in input order and commits in input order, **the
   observable journal is independent of scheduling**. A conforming implementation MAY use any
   scheduling strategy (including fully sequential) as long as commit order matches input
   order.
-- Within a `pipeline` lane, a `fan_out` branch, or a `judge` candidate lane, the constituent
+- Within a `fanout` lane, a `pipeline` lane, a `fan_out` branch, or a `judge` candidate lane, the constituent
   agents (stages / criterion scorers) run **sequentially**.
 - Top-level statements run **sequentially** in source order.
 
@@ -2556,12 +3053,15 @@ types (the log is versioned and additive).
 | `:parallel_started` / `:parallel_completed` | `address, branch_count` / `address` |
 | `:pipeline_started` / `:pipeline_completed` | `address, items, item_count, stage_count` / `address` |
 | `:iteration_started` | `address, iteration` |
-| `:loop_decision` | `address, iteration, decision` (`:continue` \| `:stop`) |
-| `:loop_completed` | `address, iterations` |
+| `:loop_decision` | `address, iteration, decision` (`:continue` \| `{:stop, reason}` \| `{:exhausted, action}`), `predicate_result, exhausted, source_address?` |
+| `:loop_completed` | `address, iterations, exhausted?, reason?` |
+| `:loop_exhausted` | `address, iterations, reason` (terminal failure for generic `loop on_exhausted: :fail`) |
 | `:accumulate` | `address, into, iteration, seen_by, added, size` |
 | `:verify_started` / `:verify_settled` | `address, mode, voter_count, threshold` / `address, confirmations, total, threshold, survived` |
 | `:judge_started` / `:judge_settled` | `address, candidates, criteria` / `address, scores, pick, winner` |
-| `:fan_out_started` / `:fan_out_completed` | `address, per, width` / `address` |
+| `:fanout_started` / `:fanout_completed` | `address, iteration?, width_expr, width, bind` / `address, iteration?` |
+| `:fanout_failed` | `address, iteration?, reason` (terminal failure for `fanout on_zero: :fail`) |
+| `:fan_out_started` / `:fan_out_completed` | `address, per, width` / `address` (legacy sugar payload) |
 | `:refine_started` | `address, input, max_rounds, until, on_non_convergence, max_concurrency, reviewer_timeout_ms, gates, reviewers, reviser, artifact_schema_version, review_adapter_versions` |
 | `:refine_round_started` | `address, round, artifact` |
 | `:refine_role_failed` | `address, role, role_address, round, reviewer, reviewer_index, attempts, reason, detail, usage, activity` |
@@ -2625,9 +3125,11 @@ Payload-value pins (each is observable output, so it is normative):
   remain visible in token/tool accounting.
 
 `run_completed` is the terminal success event; on failure the terminal event is
-`agent_failed`, `refine_non_converged`, or `refine_input_invalid` and **no**
+`agent_failed`, `loop_exhausted`, `fanout_failed`, `refine_non_converged`, or
+`refine_input_invalid` and **no**
 `run_completed` is written. Control-flow outcomes
-(`loop_decision`, `fan_out_started` width, `verify_settled`, `judge_settled`) are journaled
+(`loop_decision`, `fanout_started` width keyed by address plus optional iteration,
+`fan_out_started` width, `verify_settled`, `judge_settled`) are journaled
 so that resume replays rather than recomputes them. A canonical minimal run journals, in
 order: `run_started, phase_entered, log_emitted, agent_committed, run_completed` with
 contiguous `seq` `0..4`.
@@ -2638,10 +3140,12 @@ contiguous `seq` `0..4`.
 over the journal (it consults no process state). `state` transitions:
 
 ```
-:pending --run_started--> :running --run_completed--> :completed
-                                    --agent_failed-----------> :failed
-                                    --refine_non_converged---> :failed
-                                    --refine_input_invalid---> :failed
+:pending --run_started--> :running --run_completed---------> :completed
+                                    --agent_failed----------> :failed
+                                    --loop_exhausted--------> :failed
+                                    --fanout_failed---------> :failed
+                                    --refine_non_converged--> :failed
+                                    --refine_input_invalid--> :failed
 ```
 
 The fold accumulates `logs`, `agents`, `rejected`, `accumulators`, `verifications`,
@@ -2716,6 +3220,10 @@ is **no** state guard, so a later `agent_failed` **overwrites** an earlier one. 
 where `reason` is `refine_non_converged.payload.reason`;
 on `refine_input_invalid`, it sets
 `failure = %{address: address, attempts: 0, reason: {:invalid_refine_input, address, reason}}`.
+On `loop_exhausted`, it sets
+`failure = %{address: address, attempts: 0, reason: {:loop_exhausted, address, iterations}}`.
+On `fanout_failed`, it sets
+`failure = %{address: address, attempts: 0, reason: {:fanout_failed, address, iteration, reason}}`.
 The folded `failure` is therefore the **last** terminal failure event in `seq` order. In the
 common case — a single `agent_failed` (a top-level fail-closed node, or a concurrent region
 with exactly one failing lane) or one terminal refine failure — last equals first, so the
@@ -2767,6 +3275,11 @@ Run API return values:
 - `{:error, {:provider_failure, address, kind, detail}}` when a provider returns an
   expected failure (`kind` = `:quota_exceeded | :model_limit | :timeout | :unavailable`) for
   an ordinary agent turn.
+- `{:error, {:loop_exhausted, address, iterations}}` when a generic loop reaches
+  `max_iterations` with `on_exhausted: :fail`.
+- `{:error, {:fanout_failed, address, iteration, reason}}` when a generic fanout reaches a
+  declared terminal failure such as `on_zero: :fail`; `iteration` is `nil` for top-level
+  fanouts.
 - `{:error, {:already_running, pid}}` when a live writer holds the lease.
 - `{:error, {:run_crashed, reason}}` on writer crash.
 
@@ -2792,6 +3305,8 @@ JSON `code`:
 | `:malformed_output` | `malformed-output` | 8 |
 | `:did_not_converge` | `did-not-converge` | 9 |
 | `:invalid_refine_input` | `invalid-refine-input` | 10 |
+| `:loop_exhausted` | `loop-exhausted` | 11 |
+| `:fanout_failed` | `fanout-failed` | 12 |
 | `:killed` | `killed` | 130 |
 | `:runtime` | `runtime` | 1 |
 
@@ -2801,6 +3316,7 @@ configured or resolved (a module that does not export `run_agent/4`, or a `valid
 that returns `{:error, reason}` because required configuration is absent) → exit 4;
 `{:provider_failure, …}` → exit 7; `{:malformed_output, …}` → exit 8;
 `{:did_not_converge, …}` → exit 9; `{:invalid_refine_input, …}` → exit 10;
+`{:loop_exhausted, …}` → exit 11; `{:fanout_failed, …}` → exit 12;
 `{:run_crashed, :killed}` → exit 130; `{:run_crashed, _}` and `{:already_running, _}` → exit
 1; a compile/validation failure of the workflow script → exit 6; a missing script file, a
 bad option, an **absent/`nil` `:provider`** option
@@ -2917,16 +3433,22 @@ or in parallel — the journal MUST be the same either way.
 
 Normative requirements a conforming implementation MUST satisfy:
 
-- **C1 (closed vocabulary).** It MUST reject, at compile time, any form outside the 14-way
-  vocabulary (and the body vocabulary inside loops), per §5.
-  *(Dataflow/refine addendum: the implemented core recognizes `let`, `emit`, and
-  `emit_result`; `gather`/`map` remain DEFER and `reduce`/`select` remain REJECT.)*
+- **C1 (core calculus before product vocabulary).** It MUST reject, at compile time, any
+  form outside the closed vocabulary in §2.4. It MUST treat library/domain surface forms as
+  desugaring targets, not as implicit semantic primitives. `gather`/`map` remain DEFER and
+  `reduce`/`select` remain REJECT.
 - **C2 (determinism by absence).** It MUST NOT provide any workflow-body construct that
   reads a clock, randomness, environment, filesystem, or external module. Determinism
   MUST be a property of the vocabulary, not a runtime linter.
 - **C3 (inert tree).** The compiled tree MUST be closure-free, serializable data.
+- **C3b (explicit data edges).** A node MUST consume runtime data only through compiled
+  `BindingRef`s, accumulator names, or explicit loop/fanout lane bindings. It MUST NOT read
+  ambient phase, process state, prior provider conversations, or a hidden "last result"
+  except where a core algorithm names that edge (`collect` over the immediately preceding
+  body result).
 - **C4 (journal as truth).** All read surfaces (status/inspect/resume/live views) MUST be
-  pure folds over the journal. Resume MUST replay journaled decisions, not recompute them.
+  pure folds over the journal. Runtime decisions MUST inspect only journaled values, and
+  resume MUST replay journaled decisions, not recompute them.
   Resume recompiles the tree from the (mutable) journaled `script_path` and trusts it as-is;
   the reference does **not** journal a tree fingerprint or verify tree identity on resume
   (§6.2, §7.6). (A structural tree-identity check is a possible future hardening, not a
@@ -2942,37 +3464,77 @@ Normative requirements a conforming implementation MUST satisfy:
 - **C6 (fail closed).** A schema-backed agent whose output fails validation MUST retry
   on-thread up to its retry budget and then fail the node and abort the run with exit 8;
   it MUST NOT coerce, default, or accept malformed structured output.
-- **C7 (bounded termination).** Every loop MUST terminate. Termination MUST be guaranteed
-  by the structural `max_iterations` cap alone (§6.7), which bounds both loop types
-  unconditionally; an implementation MUST NOT rely on the `while_budget` reserve or
-  `until_dry` dryness condition to terminate a loop — those are early-stop refinements that
-  MAY halt a loop sooner.
+- **C7 (bounded termination and exhaustion).** Every loop and runtime-width fanout MUST be
+  structurally bounded. Termination MUST be guaranteed by literal caps (`max_iterations`,
+  `max:`) or by the pinned budget width algorithm; an implementation MUST honor the declared
+  exhaustion behavior (`:stop`, `:fail`, `:accept_current`, zero-width completion/failure)
+  and MUST NOT rely on body progress to terminate.
 - **C8 (located errors).** Every validation failure MUST be reported as a compile-time
   error located at the offending declaration in the author's source.
-- **C9 (no value binding).** It MUST require compile-time literals for prompts, names,
-  `return` values, `verify` subjects, `judge` candidates, `pipeline` items, `synthesize`
-  inputs, and schema maps.
-  *(Dataflow §10 addendum: C9′ is the reconciliation for the implemented core — a flowed value
-  must be journaled by a lexically-preceding node and rendered by deterministic, closure-free
-  `RenderText`; see §10.)*
+- **C9 (closed typed predicates).** Every condition MUST be one of the predicate forms in
+  §3.8 and MUST evaluate by §6.8. An implementation MUST NOT admit arbitrary functions,
+  closures, host expressions, truthiness, or implementation-defined predicates.
+- **C10 (journaled value binding only).** Every flowed value MUST be journaled by a
+  lexically preceding producer and resolved by a pure fold. Rendering MUST use inert
+  templates and deterministic projections; an implementation MUST NOT cache values in live
+  process state or include values in idempotency keys.
+- **C11 (compile-time Elixir DSL).** For the Elixir embedding, validation MUST happen in
+  `Workflow.Compiler.parse/2` / declaration macros during `mix compile`; `use Workflow`
+  MUST inject only declaration setup and reflection, and generated workflow accessors MUST
+  return `Macro.escape`-able inert data.
 
 An implementation MAY add new node kinds and new event types (the log is additive), but it
 MUST preserve existing addresses (§4.2) and MUST keep folds total over unknown types. It
-MUST NOT weaken C1–C9.
+MUST NOT weaken C1–C11.
 
 ---
 
 ## 9. `refine` V1
 
-> **Status: Implemented / normative.** `refine` is the 14th combinator in the closed
-> vocabulary. The compiler parses it into an inert `%Workflow.Node.Refine{}` with pre-addressed
-> role agents, and the runtime executes it by ordinary journaled events and paid-effect
-> idempotency keys. This section is the normative home for the V1 surface, validation,
-> semantics, events, and binding behavior.
+> **Status: Implemented library sugar / normative desugaring.** `refine` is an accepted
+> surface convenience, not a core primitive. The compiler MAY carry an inert
+> `%Workflow.Node.Refine{}` compatibility struct, but its required semantics are the
+> desugaring in §9.0 to the generic producer, bounded `loop`, reviewer `fanout`, closed
+> `agree`/path predicates, and terminal projection rules. `reviewer`, `cold_read`, and
+> `repair` are contextual declarations used by this sugar only; they MUST NOT become core
+> nodes.
+
+### 9.0 Desugaring to the core calculus
+
+`refine` expresses a bounded convergence loop. It is admissible as library sugar because it
+can be expressed by generic core constructs plus library-owned schemas and projections.
+
+```
+DesugarRefine(node, env):
+  - Lower the input producer or binding to an explicit artifact binding.
+  - Build a Loop with max_iterations = node.max_rounds and
+    on_exhausted = node.on_non_convergence (:fail -> :fail, :accept_current -> :accept_current).
+  - In each loop iteration:
+    - Build a reviewer Fanout whose width is the literal reviewer count and whose lane
+      agents are the pre-addressed reviewer agents, with `bind:` set to a loop-local
+      reviewer-results name.
+    - Insert a body `until(...)` node whose predicate is
+      `agree(reviewer_results, path: "/approved", equals: true, threshold: :all)` combined
+      with the absence of blocking findings by the path predicates in §6.8. If it evaluates
+      true, the loop stops before the reviser and exposes the current artifact.
+    - Otherwise run the reviser Agent over the current artifact, open findings, and role
+      failures, and use its journaled result as the next iteration's artifact.
+  - If configured, run cold-read and repair gates as post-loop library fanouts/agents whose
+    predicates are the generic path predicates in §3.8/§6.8.
+  - Expose two pure journal folds: artifact projection for template rendering and structured
+    result projection for `emit_result`.
+```
+
+The desugaring is conceptual: a conforming implementation does not have to materialize a
+textual `loop` form, but it MUST produce the same addresses, journal decisions, role
+idempotency keys, terminal success/failure behavior, and public projection. Any
+`refine_*` events in this section are library projection/replay events. They are allowed
+because they are journaled before downstream decisions read them; they are not evidence that
+`refine`, `reviewer`, `cold_read`, or `repair` are core primitives.
 
 ### 9.1 Purpose
 
-`refine` is a top-level, bindable combinator for one bounded adversarial convergence loop.
+`refine` is a top-level, bindable library convenience for one bounded adversarial convergence loop.
 It accepts either an inline artifact-producing `agent` or an existing binding, runs a static
 panel of reviewers in parallel, revises when any reviewer is non-clear, and terminates by
 unanimous clearance, accepted non-convergence, failed non-convergence, or invalid input.
@@ -3183,10 +3745,10 @@ refine agent("draft"), reviewers: [reviewer(:a, "x"), reviewer(:b, "y")],
 reviewer_adapter() = :findings_v1 | :defects_v1 | :violations_v1 | :concerns_v1
 ```
 
-`BindingRef` extends to:
+The shared `BindingRef` union (§10.11) includes:
 
 ```
-{:node, address()} | {:map, address()} | {:refine, address()}
+{:node, address()} | {:map, address()} | {:fanout, address(), fanout_scope()} | {:refine, address()}
 ```
 
 `let :x = refine ...` records `:x -> {:refine, address}`.
@@ -3711,6 +4273,8 @@ they MUST NOT set run state to `:failed`. Two refine events are terminal failure
 ```
 :pending --run_started----------> :running --run_completed----------> :completed
                                             --agent_failed-----------> :failed
+                                            --loop_exhausted---------> :failed
+                                            --fanout_failed----------> :failed
                                             --refine_non_converged---> :failed
                                             --refine_input_invalid---> :failed
 ```
@@ -3718,6 +4282,10 @@ they MUST NOT set run state to `:failed`. Two refine events are terminal failure
 Failure projection remains the single `%{address, attempts, reason}` map:
 
 - On `agent_failed`, keep the existing `%{address, attempts, reason}` projection.
+- On `loop_exhausted`, set
+  `failure = %{address: address, attempts: 0, reason: {:loop_exhausted, address, iterations}}`.
+- On `fanout_failed`, set
+  `failure = %{address: address, attempts: 0, reason: {:fanout_failed, address, iteration, reason}}`.
 - On `refine_non_converged`, set
   `failure = %{address: address, attempts: 0, reason: {:did_not_converge, address, reason}}`,
   where `reason` is `refine_non_converged.payload.reason`.
@@ -3954,10 +4522,7 @@ internal atom-keyed form of the completed/failed variants above. `ColdReadJSON` 
 public JSON projection. The conversion is key-by-key and atom values become the strings
 shown in `ColdReadJSON`.
 
-The §10.11 `BindingRef` union extends from
-`{:node, address} | {:map, address} | {:element, over_ref}` to
-`{:node, address} | {:map, address} | {:refine, address} | {:element, over_ref}`. `ResolveRef`
-adds:
+The shared §10.11 `BindingRef` union includes `{:refine, address}`. `ResolveRef` adds:
 
 ```
 ResolveRef(ref, run_id, lane):
@@ -4225,20 +4790,20 @@ evaluate host-language predicates.
 ## 10. Dataflow core and proposed extensions
 
 > **Status: dataflow core implemented; remaining surface proposed/deferred.** The reference
-> implementation has shipped the zero-new-event dataflow/refine core: `let :name = agent(...)`,
-> `let :name = synthesize(...)`, `let :name = refine(...)`, top-level `agent(~P"...")`
-> prompt injection over previous `let` bindings, terminal `emit(~P"...")`, and structured
-> terminal `emit_result(:name)`. This section is the normative home for that
-> dataflow/refine addendum going forward while §1–§8 remain the frozen base specification, carrying
-> only forward-reference notes to this section. `SPEC-DATAFLOW-PROPOSAL.md` remains design
-> provenance, not the primary spec.
+> implementation has shipped the zero-new-event dataflow core: `let :name = agent(...)`,
+> `let :name = synthesize(...)`, `let :name = refine(...)` where `refine` is a library
+> producer sugar (§9), top-level `agent(~P"...")` prompt injection over previous `let`
+> bindings, terminal `emit(~P"...")`, and structured terminal `emit_result(:name)`. This
+> section is the normative home for the dataflow addendum; §1–§8 define the generic core
+> calculus and this section supplies the detailed template/binding machinery.
+> `SPEC-DATAFLOW-PROPOSAL.md` remains design provenance, not the primary spec.
 >
 > **Clearly delimited PROPOSED surface.** `gather` and `map` remain **DEFER**; their detailed
 > rules are specified below as proposed future work and are not implemented by the current
 > reference compiler. `reduce` and `select`/`when` remain **REJECT**. The §10.3 Principle 6 →
 > 6′ reconciliation and its amendments are presented as **PROPOSED** amendments to the base
-> normative body; they explain how §1–§8 should be folded when the dataflow addendum is next
-> promoted into the main grammar.
+> normative body as historical provenance; the current §1–§8 text has already adopted the
+> journaled-values-only rule.
 >
 > Notation is identical to the rest of this document (Appendix A): a `::` production is
 > **lexical**, a `:` production is **syntactic**. RFC 2119 keywords in the implemented core
@@ -4247,15 +4812,16 @@ evaluate host-language predicates.
 
 ### 10.1 Purpose & the governing rule (design principles)
 
-**The base problem: outputs flow nowhere.** The §1–§8 DSL produces values it cannot reuse. An
+**The base problem: outputs flow only through named journal edges.** Earlier drafts of the
+§1–§8 DSL produced values it could not reuse. An
 `agent`, a `verify`/`judge` panel, and a `synthesize` each commit a result to the journal
-(`agent_committed.result`, `verify_settled`, `judge_settled` — §7.2), but **no later node can
-read any of them**. Principle 6 (*No value binding*) forbids naming a runtime value; §2.2
-forbids prompt interpolation; §6.4.1 fixes the provider port so the prompt is "this node's
-literal prompt — never a splice of any other node's output". The one in-vocabulary value edge —
-`agent → collect → accumulator` (§6.6) — carries only a **count** into a loop's early-stop
-predicate; the item **content** never reaches another prompt. The worked "outputs flow nowhere"
-cases (§11.4 C/F/G) enshrine this: `judge`'s winner is never passed to `synthesize`; a
+(`agent_committed.result`, `verify_settled`, `judge_settled` — §7.2), but a later node may
+read them only by an explicit `let`/`BindingRef` or accumulator edge. Prompt interpolation is
+still forbidden; §6.4.1 fixes the provider port so the prompt is either literal or the
+materialized result of an inert template over journaled bindings. The `agent → collect →
+accumulator` edge (§6.6) carries collected content into a named accumulator and its count into
+closed predicates. The worked dataflow boundaries (§11.4 C/F/G) remain: `judge`'s winner is
+never implicitly passed to `synthesize`; a
 `pipeline` stage never sees its item; a `fan_out` lane is a byte-identical replica.
 The implemented dataflow core opens one narrow edge for `agent`/`synthesize` outputs: bind the
 producer with `let`, render it through `~P`, and consume it from a later top-level `agent` or
@@ -4302,13 +4868,13 @@ outside the implemented core.
 | **`gather`** (§10.9) | **DEFER** | `synthesize` over journaled inputs; ship when folding several bound outputs recurs. |
 | **`map`** (§10.9) | **DEFER** | Heaviest: runtime-decided width, per-lane re-addressing, structural `max:` cap, a new region + two new events. Single-agent lanes in Tier 1. |
 | **`reduce`** (§10.10) | **REJECT** (Tier 1) | Drifts toward in-language computation; `gather` + accumulators cover real needs. |
-| **`select` / `when`** (§10.10) | **REJECT** | It is **control** flow, not data flow — violates Principle 8 and the thesis. |
+| **`select` / `when`** (§10.10) | **REJECT** | It is **control** flow, not data flow — violates Principles 2, 3, and 6 and the thesis. |
 
 **Build order.** (1) **Complete:** dataflow core = Template + `let` over `agent`/`synthesize`/`refine` +
 top-level injection + `emit`, one coherent slice (unlocks pipeline-with-dataflow for free, adds
 **zero** new events). (2) **DEFER:** `gather`. (3) **DEFER:** `map`. (4) **Never, absent a hard
-wall:** `reduce`, `select`/`when`. §9 `refine` is an implemented independent combinator whose
-completed artifact is bindable by the same `let` machinery.
+wall:** `reduce`, `select`/`when`. §9 `refine` is implemented library sugar whose completed
+artifact is bindable by the same `let` machinery.
 
 ### 10.3 Reconciliation — Principle 6 → 6′ and the proposed amendments
 
@@ -4343,16 +4909,16 @@ carry only the one-line forward-reference notes that point here.
   **preserved**: the injected prompt is materialized to a `String.t()` by a pure journal fold
   **before** the call, journaled verbatim at commit, never re-rendered on replay. `CallProvider`
   still receives only `(prompt, schema, key, opts)`.
-- **Rule 5.3.1 → Rule 5.3.1′ (agent prompt admits an inert `%Template{}`).** The frozen gate
+- **Rule 5.3.1 → Rule 5.3.1′ (agent prompt admits an inert `%Template{}`).** The literal-only gate
   requires `is_binary(prompt)`; a `~P` template lowers to the AST tuple `{:sigil_P, meta, …}`, for
-  which `is_binary/1` is false, so the frozen rule categorically rejects it. The amendment: the
+  which `is_binary/1` is false, so the literal-only rule categorically rejects it. The amendment: the
   agent-prompt AST is admissible iff **either** `is_binary(prompt)` **or** it is a `{:sigil_P, _, _}`
   node lowered by `parse/2` to an inert closure-free `%Template{}` in an admissible position
   (Rule P.1). This is a strengthening: it admits only the checked, closure-free `%Template{}` and
-  still rejects every variable, call form, interpolation, and computed prompt the frozen rule rejects.
+  still rejects every variable, call form, interpolation, and computed prompt the literal-only rule rejects.
 - **§2.3 Literal admissibility → §2.3′ (a `~P` template is a `Macro.quoted_literal?` exemption).**
-  The frozen rule requires every prompt/data value to satisfy `Macro.quoted_literal?/1`; a sigil is a
-  call-form AST (`{:sigil_P, …}`), not a quoted literal, so the frozen rule rejects it. The amendment:
+  The literal-only rule requires every prompt/data value to satisfy `Macro.quoted_literal?/1`; a sigil is a
+  call-form AST (`{:sigil_P, …}`), not a quoted literal, so the literal-only rule rejects it. The amendment:
   a prompt / `emit` / `gather` template MAY be a `~P` sigil that lowers to an inert, closure-free
   `%Template{}`, exempt from the `Macro.quoted_literal?` requirement **precisely because** it lowers
   to escapable inert data (a `Macro.escape`-able struct, §10.4.2). Interpolation, closures, and
@@ -4374,15 +4940,15 @@ carry only the one-line forward-reference notes that point here.
   terminal result is (a) committed to the journal by a lexically-preceding node and resolved by a
   pure fold, and (b) rendered by the deterministic, closure-free `RenderText`. Interpolation,
   closures, arithmetic-in-prompts, and computed values remain rejected.
-- **The closed-vocabulary cluster → 19-way when all deferred forms ship.** Five shipped
-  clauses that fix the combinator *count* widen in lockstep from the live **14-way** baseline:
-  **Principle 1 → 1′** ("exactly **19** combinators — the shipped 14 plus `let`, `emit`,
-  `emit_result`, `gather`, and `map`"); **§2.4 → §2.4′** (recognized names 14 → live 17,
-  deferred 19); **§8 C1 → C1′** (reject any form outside this widened vocabulary); **Rule
-  5.1.3**'s vocabulary set widened (so the five added names are not "unknown bare calls" —
-  each gets its own `parse/2` clause); **§11.2** at-a-glance table gains five rows. `collect`
-  remains **body-only**. The implemented dataflow/refine core currently recognizes the live
-  14 plus `let`, `emit`, and `emit_result`; `gather` and `map` remain DEFER.
+- **The closed-vocabulary cluster → explicit core/sugar split.** Clauses that formerly fixed
+  a combinator *count* now reference §2.4's closed surface vocabulary and the core/sugar
+  distinction: **Principle 1** says product vocabulary must desugar before becoming primitive;
+  **§2.4 → §2.4′** separates core forms, library forms, deferred forms, rejected
+  forms, and contextual names; **§8 C1 → C1′** rejects any form outside that split; **Rule
+  5.1.3**'s vocabulary set widens only by named entries with their own `parse/2` clauses;
+  **§11.2** at-a-glance table documents the accepted authoring surface. `collect` remains
+  **body-only**. The implemented dataflow core currently recognizes `let`, `emit`, and
+  `emit_result`; `gather` and `map` remain DEFER.
 - **Separately (terminal-value amendment): §5.10.2** ("a workflow MUST contain a `return`") is
   widened by `emit` and `emit_result` to "a final `return`, `emit`, or `emit_result`"
   (§10.7 / §10.7a / DF-E2 / DF-ER1).
@@ -4584,6 +5150,7 @@ TemplateParts(template, bindings, lane):
 
 ResolvePart(ref, lane):
   - If ref is {:node, address}: Return {:bound_value, ref}.
+  - If ref is {:fanout, address, scope}: Return {:bound_list, ref}.
   - If ref is {:map, address}: Return {:bound_list, ref}.      ; deferred map/gather support
   - If ref is {:refine, address}: Return {:bound_refine, ref}.
   - If ref is {:element, over}: Resolve per the deferred map lane rules in §10.11.
@@ -4770,14 +5337,17 @@ Principle 3.
   would follow the one-`agent_committed` rule; future `map` would bind the ordered lane list
   resolved via `BoundList` per DF-M4, and the `map`'s `map_started`/`map_completed` would be the
   **producer's** events, not `let`'s. `let` is the sole value-binding construct admitted by the
-  narrowed Non-goal §1.2′.
+  narrowed non-goals in §1.2.
 - **DF-L2.** A bound value MUST be resolvable **only** by a pure fold over the journal via
-  `ResolveRef` (`{:node} → BoundValue`, `{:refine} → BoundRefineArtifact`, `{:map} →
-  BoundList`); an implementation MUST NOT cache the value in process state.
-- **DF-L3.** Binding names are top-level only in Tier 1; a bound reference MUST resolve at
-  `iteration = 0`. If a name is rebound, subsequent consumers MUST resolve to the latest
-  lexically-preceding binding, while earlier consumers keep the address captured when they were
-  parsed.
+  `ResolveRef` (`{:node} → BoundValue`, `{:refine} → BoundRefineArtifact`,
+  `{:fanout} → BoundFanoutList`, `{:map} → BoundList`); an implementation MUST NOT cache
+  the value in process state.
+- **DF-L3.** `let` binding names are top-level only in Tier 1; a `let`-bound reference MUST
+  resolve at `iteration = 0`. If a `let` name is rebound, subsequent consumers MUST resolve
+  to the latest lexically-preceding binding, while earlier consumers keep the address
+  captured when they were parsed. Loop-local `fanout bind:` names are not `let` bindings;
+  they follow the scoped `{:fanout, address, {:loop_local, loop_address}}` rule in §10.11
+  and resolve with the current loop iteration.
 - **DF-L4.** `parse/2` MUST recognize `let` as the uniform one-arg `{:let, _, [{:=, _, [name,
   producer]}]}` shape, MUST require `name` to be an atom literal, MUST dispatch `producer` through
   the ordinary node path, and MUST reject the two-arg block-bearing shape (Rule L.5) rather than
@@ -4827,7 +5397,7 @@ whitelist would add `map`-lane `agent` and top-level `gather` positions when tho
 promoted. A `%Template{}` prompt is rejected in two families, each by an **active guard**
 matching `{:sigil_P, meta, _}`: (1) observational/literal-only positions (`verify`/`judge`
 subject/candidate, `return`, `phase`/`log`, and a `synthesize` prompt or inputs — a `let`-bound
-`synthesize` stays literal-only) — panels stay literal-only (Principle 8); (2) nested
+`synthesize` stays literal-only) — panels stay literal-only (Principles 2 and 6); (2) nested
 agent positions (`parallel` branch, `pipeline` stage, `fan_out` body, loop body). The guard emits
 a precise diagnostic ("templates are not admissible in a `parallel` branch"; for a `synthesize`,
 "templates are not admissible in a `synthesize` prompt — use `gather` (§10.9.1) to fold journaled
@@ -5151,7 +5721,7 @@ RunMap(node, run_id, provider, prior, ctx):
   - Let {cap} be node.max_concurrency or max(width, 1).    ; OPTIONAL max_concurrency (Rule M.7); nil ⇒ all lanes at once, mirroring §6.9 RunParallel
   - Let {lanes} be the List [ {the lane agent re-addressed node.address ++ [e, 0], %{index: e}} for e in 0..(width - 1) ].
   - Let {results} be RunConcurrently(lanes, cap, fn {lane_agent, lane} ->
-      BuildAgent(lane_agent, run_id, provider, prior, lane) end).   ; lane threaded into §10.6.4 EffectivePrompt
+      BuildMapAgent(lane_agent, run_id, provider, prior, lane) end). ; deferred map helper threads lane into §10.6.4 EffectivePrompt
   - Let {r} be CommitLanes(results, run_id, seq).          ; commit each lane's events in lane order
   - If {r} is {:ok, seq'}:
     - Return {:cont, ctx with seq = CommitMarker(map_completed, node, prior, seq')}.   ; payload %{address}, idempotent on resume (§6.3)
@@ -5200,8 +5770,8 @@ Two candidate idioms cross the Tier-1/Tier-2 line. They are specified precisely 
 
 **10.10.1 `select` / `when` (REJECT).** Choosing among literal branches by a predicate over a bound
 value (`select @verdict do; true -> agent("ship"); false -> agent("revise"); end`) is **control
-flow**, and the thesis is *data flow, not control flow* (§10.1). It violates Principle 8 and §6.10
-("no conditional or branching combinator"): it chooses **which subtree runs** on a runtime value.
+flow**, and the thesis is *data flow, not control flow* (§10.1). It violates Principles 2, 3,
+and 6 and §6.10 ("no conditional or branching combinator"): it chooses **which subtree runs** on a runtime value.
 This is categorically distinct from the existing value→control edges (`while_budget until:`,
 `until_dry` dryness), which are **size-only** folds that affect only **loop stop**, never which
 node runs. The Tier-1 alternative: render the value into **one** agent's prompt and let the
@@ -5218,7 +5788,7 @@ end
 
 - **DF-X1 (conformance).** An implementation MUST NOT provide any combinator that selects which
   node/subtree runs based on a runtime value. Value-dependent control flow remains unexpressible
-  (C2, Principle 8).
+  (C2; Principles 2 and 6).
 
 **10.10.2 `reduce` with a closed in-language reducer (REJECT for Tier 1).** Folding a bound
 collection into one value with a **closed operator** rather than a node (`reduce(:n, over: :items,
@@ -5239,13 +5809,16 @@ reduce(:n, over: :items, with: :count)   # an in-language reducer — REJECTED (
 ### 10.11 Shared machinery, output & error format
 
 **Binding resolution (shared by every idiom).** `BindingRef` is `{:node, address}` |
-`{:refine, address}` | `{:map, address}` | `{:element, over_ref}`.
+`{:refine, address}` | `{:fanout, address, fanout_scope}` | `{:map, address}` |
+`{:element, over_ref}`, where `fanout_scope` is `:global` or `{:loop_local, loop_address}`.
 `BindingEnv` is a compile-time ordered map `name(atom) → BindingRef` threaded through parsing so
 only lexically-preceding bindings are in scope (Rule T.5); there is **no** runtime name→value map.
 The implemented core emits `{:node, address}` refs for `agent`/`synthesize` producers and
-`{:refine, address}` refs for `refine` producers. `{:map, address}` is support for the deferred
-`map` producer's ordered result list, and `{:element, over_ref}` belongs only to the deferred
-`map` lane scope. At runtime a reference is resolved by the pure journal fold
+`{:refine, address}` refs for `refine` producers. Top-level `fanout bind: :name` emits
+`{:fanout, address, :global}`; a loop-body `fanout bind: :name` emits
+`{:fanout, address, {:loop_local, loop_address}}`. `{:map, address}` is support for the
+deferred `map` producer's ordered result list, and `{:element, over_ref}` belongs only to the
+deferred `map` lane scope. At runtime a reference is resolved by the pure journal fold
 `ResolveAssign → ResolveRef`, defined for these `BindingRef` shapes:
 
 ```
@@ -5256,6 +5829,10 @@ ResolveAssign(name, bindings, run_id, lane):   ; bindings :: %{atom() => Binding
 ResolveRef(ref, run_id, lane):
   - If ref is {:node, address}: Return BoundValue(run_id, address).
   - If ref is {:refine, address}: Return BoundRefineArtifact(run_id, address).
+  - If ref is {:fanout, address, :global}: Return BoundFanoutList(run_id, address, nil).
+  - If ref is {:fanout, address, {:loop_local, loop_address}}:
+    - Assert lane.loop_address == loop_address and lane.iteration is an integer.
+    - Return BoundFanoutList(run_id, address, lane.iteration).
   - If ref is {:map, address}:  Return BoundList(run_id, address).
   - If ref is {:element, over}:                ; a map lane's element; lane is %{index: e}, e a 0-based lane index
     - Let list be ResolveRef(over, run_id, lane).   ; over is {:node, _} (list-valued) or {:map, _}
@@ -5277,12 +5854,26 @@ BoundRefineResult(run_id, address):            ; structured refine result fold
     address ++ [3] or address ++ [4].
   - Return the §9.11 `RefineResultJSON` public projection.
 
+BoundFanoutList(run_id, address, iteration):   ; a generic fanout's ordered lane-result list
+  - Let event_iteration be iteration when not nil, otherwise 0.
+  - Let width be the width of the fanout_started at address whose payload.iteration is
+    iteration or absent when iteration is nil (payload.width).
+  - If width == 0: Return [].
+  - For each lane index e in 0..(width - 1), in ascending order:
+    - Let lane_address be address ++ [e].
+    - Let committed be the agent_committed events whose payload.address is prefixed by
+      lane_address and whose payload.iteration == event_iteration, in address order within
+      the lane.
+    - If committed is empty: raise a malformed journal error.
+    - Append the result of the last committed event in that lane.
+  - Return the appended list.
+
 BoundList(run_id, address):                    ; a map's ordered lane-result list
   - Let width be the width of the map_started at address (payload.width).
   - Return the List [ BoundValue(run_id, address ++ [e, 0]) for e in 0..(width - 1) ], in ascending e order.
 ```
 
-`BoundValue`, `BoundRefineArtifact`, and `BoundList` are pure folds over
+`BoundValue`, `BoundRefineArtifact`, `BoundFanoutList`, and `BoundList` are pure folds over
 already-committed events; `{:element, over}` never folds directly but indexes the resolved list
 zero-based, so a `map`-lane agent template resolving `@element_name` (env `{:element, over}`,
 §10.9.2; `lane = %{index: e}`, §10.6.4) yields the `e`-th element of `over`'s resolved
@@ -5319,7 +5910,7 @@ closed).
 
 ### 10.12 Conformance rollup
 
-An implementation of the shipped dataflow/refine core MUST satisfy DF-T1..DF-T4 (template),
+An implementation of the shipped dataflow core and refine library binding surface MUST satisfy DF-T1..DF-T4 (template),
 DF-L1..DF-L4 (`let` over `agent`/`synthesize`/`refine`), DF-P1..DF-P3 (top-level injection),
 DF-E1..DF-E4 (`emit`), DF-ER1..DF-ER3 (`emit_result`), and DF-C1
 (pipeline-by-composition). It MUST keep `gather` and `map` out of the accepted surface until
@@ -5363,7 +5954,9 @@ Requirements you MUST meet:
    `let` over a previous `agent`/`synthesize` and render with `~P` holes like `<%= @draft %>`.
 3. The block terminates with a final `return(<literal>)`, `emit(~P"...")`, or
    `emit_result(:refine_binding)`.
-4. Inside a loop body use only `agent`, `log`, `phase`, `collect`.
+4. Inside a generic `loop` body use only `agent`, `log`, `phase`, `until`, `fanout`, and
+   `collect`; legacy `while_budget`/`until_dry` bodies use only `agent`, `log`, `phase`,
+   and `collect`.
 5. Compile with `mix compile`; every mistake is a located compile error.
 
 Note (terminal placement): `return`, `emit`, and `emit_result` set the terminal value and
@@ -5391,13 +5984,16 @@ is rejected by the compiler. Put the terminal you want as the result **last**.
 | `verify("subject", voters: N \| lenses: [..], threshold: …)` | literal subject | verification panel |
 | `judge([cands…], by: [:c], pick: :max_score \| :min_score)` | literal candidates | scoring panel |
 | `synthesize([inputs…], "prompt")` | literals | fold inputs into one turn |
-| `while_budget reserve: N do … end` | body | loop while budget remains |
-| `until_dry rounds: N, seen_by: [..] do … collect(into: :acc) end` | body must collect | loop until dry |
+| `loop max_iterations: N, until: P, on_exhausted: :stop do … end` | body | bounded core loop |
+| `while_budget reserve: N do … end` | sugar | loop while budget remains |
+| `until_dry rounds: N, seen_by: [..] do … collect(into: :acc) end` | sugar; body must collect | loop until dry |
 | `collect(into: :acc)` | body-only | fold iteration result into accumulator |
-| `fan_out width: budget_slices(per: N) do agent(…) end` | agent lane | budget-scaled fan-out (**requires a run budget** — crashes without one; see §11.4 Use-case F) |
+| `fanout width: N, bind: :xs do lanes([...]) end` | lane list or repeated lane | bounded core fan-out, optionally bound as an ordered list |
+| `fan_out width: budget_slices(per: N) do agent(…) end` | sugar | budget-scaled fan-out (**requires a run budget** — crashes without one; see §11.4 Use-case F) |
 
 Not combinators: `budget_slices(per: N)` (only a `fan_out` width); the `until:` predicate
-forms `count(:acc)`, `budget_remaining()`, `all_of([..])`, `any_of([..])`.
+forms `count(:acc)`, `budget_remaining()`, `all([..])`, `any([..])`, legacy
+`all_of([..])`/`any_of([..])`, `dry(...)`, `agree(...)`, and `path_*`.
 
 > *(Proposed §10 — dataflow: `gather(~P"…")` and `map :el, over: :xs, max: N do agent(…) end`
 > remain DEFER; `reduce` and `select`/`when` remain REJECT.)*
@@ -5527,7 +6123,7 @@ workflow "judge-panel" do
 end
 ```
 
-Caution (`judge`'s winner does **not** flow into `synthesize`, Principle 8): `judge`
+Caution (`judge`'s winner does **not** flow into `synthesize`, Principles 2 and 6): `judge`
 journals its winner (`judge_settled.winner`, §7.2), but panels are **observational** — that
 winner is **never** passed to any later node. The `synthesize` agent sees only its own
 literal `inputs` (all three candidates) and its literal `prompt`; it has **no** way to learn
@@ -5705,6 +6301,7 @@ StringLiteral :: `"` StringCharacter* `"`
 IntegerLiteral :: `-`? Digit+
 FloatLiteral :: `-`? Digit+ `.` Digit+ ((`e` | `E`) (`+` | `-`)? Digit+)?
 Atom :: `:` AtomName
+AtomName :: (`a`–`z` | `_`) (Letter | Digit | `_`)*
 BooleanLiteral :: `true` | `false`
 NilLiteral :: `nil`
 ```
@@ -5714,14 +6311,36 @@ Syntactic (`:`) — the workflow surface:
 ```
 WorkflowDefinition : `workflow` StringLiteral `do` WorkflowBody `end`
 WorkflowBody : Statement*
-Statement : PhaseStmt | LogStmt | AgentStmt | LetStmt | EmitStmt | ReturnStmt | ParallelStmt
-          | PipelineStmt | VerifyStmt | JudgeStmt | SynthesizeStmt
-          | WhileBudgetStmt | UntilDryStmt | FanOutStmt
+Statement : PhaseStmt | LogStmt | AgentStmt | LetStmt | EmitStmt | EmitResultStmt
+          | ReturnStmt | LoopStmt | FanoutStmt | LibrarySugarStmt
+LibrarySugarStmt : ParallelStmt | PipelineStmt | VerifyStmt | JudgeStmt | SynthesizeStmt
+                 | WhileBudgetStmt | UntilDryStmt | FanOutStmt | RefineStmt
+LoopStmt : `loop` KeywordList `do` LoopBody `end`
+FanoutStmt : `fanout` KeywordList `do` FanoutBody `end`
+FanoutBody : AgentLane | LaneList
+AgentLane : AgentStmt+
+LaneList : `lanes` `(` `[` Lane (`,` Lane)* `]` `)`
+Lane : `[` AgentStmt (`,` AgentStmt)* `]`
 LoopBody : BodyStatement+
-BodyStatement : AgentStmt | LogStmt | PhaseStmt | CollectStmt
-Predicate : Comparison | `all_of` `(` `[` Predicate+ `]` `)` | `any_of` `(` `[` Predicate+ `]` `)`
+BodyStatement : AgentStmt | LogStmt | PhaseStmt | UntilStmt | FanoutStmt | CollectStmt
+UntilStmt : `until` `(` Predicate `)`
+Predicate : Comparison | DryPredicate | AgreePredicate | PathPredicate
+          | `all` `(` `[` Predicate (`,` Predicate)* `]` `)`
+          | `any` `(` `[` Predicate (`,` Predicate)* `]` `)`
+          | `all_of` `(` `[` Predicate (`,` Predicate)* `]` `)`
+          | `any_of` `(` `[` Predicate (`,` Predicate)* `]` `)`
 Comparison : Operand CompareOp IntegerLiteral
 Operand : `count` `(` Atom `)` | `budget_remaining` `(` `)`
+        | `path_count` `(` BindingRefAtom `,` JsonPointerString `)`
+DryPredicate : `dry` `(` `[` `rounds:` IntegerLiteral (`,` `seen_by:` AtomList)? `]` `)`
+AgreePredicate : `agree` `(` BindingRefAtom `,` `[` `path:` JsonPointerString `,`
+                 `equals:` Literal `,` `threshold:` AgreementThreshold `]` `)`
+PathPredicate : `path_exists` `(` BindingRefAtom `,` JsonPointerString `)`
+              | `path_non_empty` `(` BindingRefAtom `,` JsonPointerString `)`
+              | `path_equals` `(` BindingRefAtom `,` JsonPointerString `,` Literal `)`
+AgreementThreshold : `:all` | `:any` | IntegerLiteral
+AtomList : `[` Atom (`,` Atom)* `]`
+BindingRefAtom :: `:` AtomName
 ```
 
 (Per-combinator argument and option productions are in §3; validation predicates in §5.)

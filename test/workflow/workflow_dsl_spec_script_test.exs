@@ -19,16 +19,26 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     assert {:ok, %Tree{} = tree} = Script.load_tree(@script_path)
 
     prompts = tree |> agent_prompts() |> Enum.join("\n---PROMPT---\n")
+    normalized_prompts = String.replace(prompts, ~r/\s+/, " ")
 
     refute prompts =~ "/Users/"
     assert prompts =~ ~s|Extract GROUND TRUTH for the "spec-structure" area|
-    assert prompts =~ "SURGICAL EDIT — DO NOT REWRITE SPEC.md"
+    assert prompts =~ "MAINTENANCE EDIT — DO NOT REWRITE SPEC.md"
+    assert prompts =~ "§10 is the current normative home for implemented dataflow core"
+    assert prompts =~ "§11 is the current authoring guide"
     assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
     assert prompts =~ "The adversarial refine panel found blocking defects"
     assert prompts =~ "Read the section end to end"
 
+    refute prompts =~ "Proposed §10"
+    refute prompts =~ "SPEC-DATAFLOW-PROPOSAL.md"
+    refute normalized_prompts =~ "§1–§9 plus an authoring guide"
+    refute normalized_prompts =~ "§1-§9 plus an authoring guide"
+    refute normalized_prompts =~ "§10 insertion"
+    refute normalized_prompts =~ "SURGICALLY inserting §10"
+
     assert prompts =~
-             "Finalize the SPEC.md §10 insertion for HUMAN REVIEW — do NOT commit anything"
+             "Finalize the current SPEC.md maintenance pass for HUMAN REVIEW — do not commit anything"
   end
 
   test "migrated workflow defines stable UI labels for every agent" do
@@ -80,6 +90,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     prompts = reviewers |> Enum.map(& &1.prompt) |> Enum.join("\n---PROMPT---\n")
     assert prompts =~ "Return approved=false with blocking findings"
     assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
+    assert prompts =~ "§10 dataflow core is normative"
   end
 
   test "final cold-read is modeled as a refine gate instead of an ad-hoc bound agent" do

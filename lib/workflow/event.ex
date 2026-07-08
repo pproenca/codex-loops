@@ -207,14 +207,48 @@ defmodule Workflow.Event do
   end
 
   @doc """
+  Generic fanout markers. `fanout_started` records the decided width before any
+  lane runs; top-level fanouts carry `iteration: nil`, while loop-body fanouts can
+  qualify the marker by the owning loop iteration. `fanout_failed` is terminal for
+  declared fanout failures such as `on_zero: :fail`.
+  """
+  def fanout_started(%Workflow.Node.GenericFanout{} = node, width, iteration \\ nil) do
+    %__MODULE__{
+      type: :fanout_started,
+      payload: %{
+        address: node.address,
+        iteration: iteration,
+        width_expr: node.width,
+        width: width,
+        bind: node.bind
+      }
+    }
+  end
+
+  def fanout_completed(%Workflow.Node.GenericFanout{} = node, iteration \\ nil) do
+    %__MODULE__{
+      type: :fanout_completed,
+      payload: %{address: node.address, iteration: iteration}
+    }
+  end
+
+  def fanout_failed(%Workflow.Node.GenericFanout{} = node, reason, iteration \\ nil) do
+    %__MODULE__{
+      type: :fanout_failed,
+      payload: %{address: node.address, iteration: iteration, reason: reason}
+    }
+  end
+
+  @doc """
   Loop control-flow markers and the declared-reduction event. **Control-flow
   decisions are journaled**, so a resume replays them rather than recomputing them
   from a ledger/accumulator fold that reflects the whole run instead of the
   historical decision point.
 
     * `iteration_started` — enters loop iteration `n` at the loop's address.
-    * `loop_decision` — the journaled `:continue`/`:stop` decision for iteration `n`.
+    * `loop_decision` — the journaled generic loop decision for iteration `n`.
     * `loop_completed` — the loop's terminal bracket, recording how many iterations ran.
+    * `loop_exhausted` — terminal failure when `on_exhausted: :fail` fires.
     * `accumulate` — one `collect`'s reduction: the exact deduped items `added` to
       `into` this iteration, plus the resulting accumulator `size`. Folding these
       rebuilds every accumulator exactly on resume.
@@ -223,16 +257,41 @@ defmodule Workflow.Event do
     %__MODULE__{type: :iteration_started, payload: %{address: loop.address, iteration: iteration}}
   end
 
-  def loop_decision(loop, iteration, decision) when decision in [:continue, :stop] do
+  def loop_decision(loop, iteration, decision, opts \\ []) do
     %__MODULE__{
       type: :loop_decision,
-      payload: %{address: loop.address, iteration: iteration, decision: decision}
+      payload: %{
+        address: loop_address(loop),
+        iteration: iteration,
+        decision: decision,
+        predicate_result: Keyword.get(opts, :predicate_result),
+        exhausted: Keyword.get(opts, :exhausted, false),
+        source_address: Keyword.get(opts, :source_address)
+      }
     }
   end
 
-  def loop_completed(loop, iterations) do
-    %__MODULE__{type: :loop_completed, payload: %{address: loop.address, iterations: iterations}}
+  def loop_completed(loop, iterations, opts \\ []) do
+    %__MODULE__{
+      type: :loop_completed,
+      payload: %{
+        address: loop_address(loop),
+        iterations: iterations,
+        exhausted: Keyword.get(opts, :exhausted, false),
+        reason: Keyword.get(opts, :reason)
+      }
+    }
   end
+
+  def loop_exhausted(loop, iterations, reason) do
+    %__MODULE__{
+      type: :loop_exhausted,
+      payload: %{address: loop_address(loop), iterations: iterations, reason: reason}
+    }
+  end
+
+  defp loop_address(%{address: address}), do: address
+  defp loop_address(address) when is_list(address), do: address
 
   def accumulate(%Workflow.Node.Collect{} = node, iteration, seen_by, added, size) do
     %__MODULE__{

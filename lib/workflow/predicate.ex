@@ -3,105 +3,244 @@ defmodule Workflow.Predicate do
   The closed **predicate sub-vocabulary** a loop may test against journaled state.
 
   It is a tiny, total expression language parsed at compile time into inert structs
-  and evaluated at runtime against a pure fold of the journal. The whole vocabulary
-  is:
-
-    * `count(:acc) >= n` — the size of a declared accumulator, compared to a literal
-    * `budget_remaining() > n` — the ledger's remaining budget, compared to a literal
-    * `all_of([...])` / `any_of([...])` — boolean combinators over nested predicates
+  and evaluated at runtime against a pure fold of the journal. The vocabulary is
+  closed: predicates may read only accumulators, ledger state, dry-streak state,
+  and explicitly resolved binding refs.
 
   Comparison operators are `>`, `<`, `>=`, `<=`, `==`; the left operand must be
-  `count(:acc)` or `budget_remaining()` and the right a literal integer. **Anything
-  outside this set is rejected at compile time** — there is no arithmetic, no
-  function call, no closure — so, like the workflow vocabulary itself, determinism
-  is a property of what the grammar can and cannot express, not a runtime linter.
-
-  Evaluation is a pure function over `%{accumulators: %{atom => list}, remaining:
-  integer | :infinity}`. `:infinity` compares correctly with `>`/`>=` because an
-  atom sorts above every integer in Erlang term order, matching the ledger.
+  `count(:acc)`, `budget_remaining()`, or `path_count(:binding, "/pointer")`,
+  and the right operand must be a literal integer. Boolean combinators are
+  `all([...])` and `any([...])`; legacy `all_of([...])` and `any_of([...])`
+  remain aliases.
   """
 
   alias Workflow.Compiler.Finding
 
   defmodule Count do
-    @moduledoc "The size of a declared accumulator — the left operand of a compare."
+    @moduledoc "The size of a declared accumulator -- the left operand of a compare."
     @enforce_keys [:acc]
     defstruct [:acc]
     @type t :: %__MODULE__{acc: atom()}
   end
 
   defmodule BudgetRemaining do
-    @moduledoc "The ledger's remaining budget — the left operand of a compare."
+    @moduledoc "The ledger's remaining budget -- the left operand of a compare."
     defstruct []
     @type t :: %__MODULE__{}
+  end
+
+  defmodule PathCount do
+    @moduledoc "The count of a JSON Pointer lookup under a resolved binding ref."
+    @enforce_keys [:binding, :ref, :pointer]
+    defstruct [:binding, :ref, :pointer]
+    @type t :: %__MODULE__{binding: atom(), ref: Workflow.Node.binding_ref(), pointer: String.t()}
   end
 
   defmodule Compare do
     @moduledoc "A comparison of an operand against a literal integer threshold."
     @enforce_keys [:op, :left, :right]
     defstruct [:op, :left, :right]
-    @type t :: %__MODULE__{op: atom(), left: struct(), right: integer()}
+
+    @type t :: %__MODULE__{
+            op: atom(),
+            left: Count.t() | BudgetRemaining.t() | PathCount.t(),
+            right: integer()
+          }
+  end
+
+  defmodule Dry do
+    @moduledoc "True when the folded loop dry streak is at least `rounds`."
+    @enforce_keys [:rounds, :seen_by]
+    defstruct [:rounds, :seen_by]
+    @type t :: %__MODULE__{rounds: pos_integer(), seen_by: [atom()]}
+  end
+
+  defmodule PathExists do
+    @moduledoc "True when a JSON Pointer lookup is present, including present nil."
+    @enforce_keys [:binding, :ref, :pointer]
+    defstruct [:binding, :ref, :pointer]
+    @type t :: %__MODULE__{binding: atom(), ref: Workflow.Node.binding_ref(), pointer: String.t()}
+  end
+
+  defmodule PathNonEmpty do
+    @moduledoc "True when a JSON Pointer lookup resolves to a non-empty value."
+    @enforce_keys [:binding, :ref, :pointer]
+    defstruct [:binding, :ref, :pointer]
+    @type t :: %__MODULE__{binding: atom(), ref: Workflow.Node.binding_ref(), pointer: String.t()}
+  end
+
+  defmodule PathEquals do
+    @moduledoc "True when a JSON Pointer lookup is JSON-equal to a literal."
+    @enforce_keys [:binding, :ref, :pointer, :literal]
+    defstruct [:binding, :ref, :pointer, :literal]
+
+    @type t :: %__MODULE__{
+            binding: atom(),
+            ref: Workflow.Node.binding_ref(),
+            pointer: String.t(),
+            literal: term()
+          }
+  end
+
+  defmodule Agree do
+    @moduledoc "True when a bound list has enough JSON-equal values at a pointer."
+    @enforce_keys [:binding, :ref, :pointer, :literal, :threshold]
+    defstruct [:binding, :ref, :pointer, :literal, :threshold]
+
+    @type threshold :: :all | :any | pos_integer()
+    @type t :: %__MODULE__{
+            binding: atom(),
+            ref: Workflow.Node.binding_ref(),
+            pointer: String.t(),
+            literal: term(),
+            threshold: threshold()
+          }
   end
 
   defmodule AllOf do
     @moduledoc "True when every nested predicate is true."
     @enforce_keys [:predicates]
     defstruct [:predicates]
-    @type t :: %__MODULE__{predicates: [struct()]}
+    @type t :: %__MODULE__{predicates: [Workflow.Predicate.t()]}
   end
 
   defmodule AnyOf do
     @moduledoc "True when any nested predicate is true."
     @enforce_keys [:predicates]
     defstruct [:predicates]
-    @type t :: %__MODULE__{predicates: [struct()]}
+    @type t :: %__MODULE__{predicates: [Workflow.Predicate.t()]}
   end
 
   @comparisons [:>, :<, :>=, :<=, :==]
+  @binding_ref_kinds [:node, :map, :refine]
 
-  @type t :: Compare.t() | AllOf.t() | AnyOf.t()
-  @type context :: %{accumulators: %{atom() => list()}, remaining: integer() | :infinity}
+  @type t ::
+          Compare.t()
+          | Dry.t()
+          | PathExists.t()
+          | PathNonEmpty.t()
+          | PathEquals.t()
+          | Agree.t()
+          | AllOf.t()
+          | AnyOf.t()
+
+  @type binding_env :: %{atom() => Workflow.Node.binding_ref()}
+
+  @type context :: %{
+          optional(:accumulators) => %{atom() => list()},
+          optional(:remaining) => integer() | :infinity,
+          optional(:dry_streak) => non_neg_integer(),
+          optional(:bindings) => %{Workflow.Node.binding_ref() => term()}
+        }
 
   # --- Compile-time parsing (returns a located Finding on any out-of-vocab form) ---
 
   @doc """
   Parse a quoted predicate into an inert struct, or a located `{:error, %Finding{}}`
   for anything outside the closed sub-vocabulary.
+
+  `parse/2` preserves the legacy call shape and has no binding refs in scope.
+  Use `parse/3` when path/agreement predicates may reference lexically preceding
+  bindings.
   """
   @spec parse(Macro.t(), Macro.Env.t()) :: {:ok, t()} | {:error, Finding.t()}
-  def parse(ast, env), do: predicate(ast, env)
+  def parse(ast, env), do: parse(ast, env, %{})
 
-  defp predicate({op, _meta, [left, right]} = form, env) when op in @comparisons do
-    with {:ok, operand} <- operand(left, form, env),
+  @spec parse(Macro.t(), Macro.Env.t(), binding_env()) :: {:ok, t()} | {:error, Finding.t()}
+  def parse(ast, env, binding_env) when is_map(binding_env),
+    do: predicate(ast, env, binding_env)
+
+  @doc """
+  Return the shared `seen_by` list required by any `dry(...)` predicates in a tree.
+
+  A predicate tree with no `dry(...)` predicates returns `{:ok, []}`. Multiple dry
+  predicates may omit `seen_by` or use the same list; conflicting lists are a
+  compile-time validation error for loop callers.
+  """
+  @spec dry_seen_by(t() | nil) :: {:ok, [atom()]} | {:error, :conflicting_seen_by}
+  def dry_seen_by(predicate) do
+    case dry_seen_by_value(predicate) do
+      {:ok, nil} -> {:ok, []}
+      {:ok, seen_by} -> {:ok, seen_by}
+      {:error, :conflicting_seen_by} = error -> error
+    end
+  end
+
+  defp predicate({op, _meta, [left, right]} = form, env, binding_env) when op in @comparisons do
+    with {:ok, operand} <- operand(left, form, env, binding_env),
          {:ok, threshold} <- threshold(right, form, env) do
       {:ok, %Compare{op: op, left: operand, right: threshold}}
     end
   end
 
-  defp predicate({:all_of, _meta, [branches]} = form, env) when is_list(branches),
-    do: combine(AllOf, branches, form, env)
+  defp predicate({name, _meta, [branches]} = form, env, binding_env)
+       when name in [:all, :all_of] and is_list(branches),
+       do: combine(AllOf, name, branches, form, env, binding_env)
 
-  defp predicate({:any_of, _meta, [branches]} = form, env) when is_list(branches),
-    do: combine(AnyOf, branches, form, env)
+  defp predicate({name, _meta, [branches]} = form, env, binding_env)
+       when name in [:any, :any_of] and is_list(branches),
+       do: combine(AnyOf, name, branches, form, env, binding_env)
 
-  defp predicate(form, env) do
+  defp predicate({:dry, _meta, [opts]} = form, env, _binding_env) when is_list(opts),
+    do: dry(opts, form, env)
+
+  defp predicate({:path_exists, _meta, [binding, pointer]} = form, env, binding_env),
+    do: path_predicate(PathExists, binding, pointer, form, env, binding_env)
+
+  defp predicate({:path_non_empty, _meta, [binding, pointer]} = form, env, binding_env),
+    do: path_predicate(PathNonEmpty, binding, pointer, form, env, binding_env)
+
+  defp predicate({:path_equals, _meta, [binding, pointer, literal]} = form, env, binding_env) do
+    with {:ok, binding, ref} <- binding_ref(binding, form, env, binding_env),
+         {:ok, pointer} <- json_pointer(pointer, form, env),
+         {:ok, literal} <- literal_to_json(literal, form, env) do
+      {:ok, %PathEquals{binding: binding, ref: ref, pointer: pointer, literal: literal}}
+    end
+  end
+
+  defp predicate({:agree, _meta, [binding, opts]} = form, env, binding_env) when is_list(opts) do
+    with {:ok, opts} <-
+           exact_keyword(
+             opts,
+             [:path, :equals, :threshold],
+             [:path, :equals, :threshold],
+             form,
+             env,
+             "`agree`"
+           ),
+         {:ok, binding, ref} <- binding_ref(binding, form, env, binding_env),
+         {:ok, pointer} <- json_pointer(Keyword.fetch!(opts, :path), form, env),
+         {:ok, literal} <- literal_to_json(Keyword.fetch!(opts, :equals), form, env),
+         {:ok, threshold} <- agreement_threshold(Keyword.fetch!(opts, :threshold), form, env) do
+      {:ok,
+       %Agree{
+         binding: binding,
+         ref: ref,
+         pointer: pointer,
+         literal: literal,
+         threshold: threshold
+       }}
+    end
+  end
+
+  defp predicate(form, env, _binding_env) do
     {:error,
      Finding.at(env, form, "unsupported predicate",
        hint: "the predicate vocabulary is: #{vocabulary()}"
      )}
   end
 
-  defp combine(module, branches, form, env) do
+  defp combine(module, name, branches, form, env, binding_env) do
     branches
     |> Enum.reduce_while({:ok, []}, fn branch, {:ok, acc} ->
-      case predicate(branch, env) do
+      case predicate(branch, env, binding_env) do
         {:ok, pred} -> {:cont, {:ok, [pred | acc]}}
         {:error, _} = err -> {:halt, err}
       end
     end)
     |> case do
       {:ok, []} ->
-        {:error, Finding.at(env, form, "`#{combinator(module)}` requires at least one predicate")}
+        {:error, Finding.at(env, form, "`#{name}` requires at least one predicate")}
 
       {:ok, preds} ->
         {:ok, struct!(module, predicates: Enum.reverse(preds))}
@@ -111,13 +250,40 @@ defmodule Workflow.Predicate do
     end
   end
 
-  defp operand({:count, _meta, [acc]}, _form, _env) when is_atom(acc), do: {:ok, %Count{acc: acc}}
-  defp operand({:budget_remaining, _meta, []}, _form, _env), do: {:ok, %BudgetRemaining{}}
+  defp dry(opts, form, env) do
+    with {:ok, opts} <- exact_keyword(opts, [:rounds, :seen_by], [:rounds], form, env, "`dry`"),
+         {:ok, rounds} <- positive_integer(Keyword.fetch!(opts, :rounds), :rounds, form, env),
+         {:ok, seen_by} <- seen_by(Keyword.get(opts, :seen_by, []), form, env) do
+      {:ok, %Dry{rounds: rounds, seen_by: seen_by}}
+    end
+  end
 
-  defp operand(_other, form, env) do
+  defp path_predicate(module, binding, pointer, form, env, binding_env) do
+    with {:ok, binding, ref} <- binding_ref(binding, form, env, binding_env),
+         {:ok, pointer} <- json_pointer(pointer, form, env) do
+      {:ok, struct!(module, binding: binding, ref: ref, pointer: pointer)}
+    end
+  end
+
+  defp operand({:count, _meta, [acc]}, _form, _env, _binding_env)
+       when is_atom(acc) and not is_boolean(acc) and not is_nil(acc),
+       do: {:ok, %Count{acc: acc}}
+
+  defp operand({:budget_remaining, _meta, []}, _form, _env, _binding_env),
+    do: {:ok, %BudgetRemaining{}}
+
+  defp operand({:path_count, _meta, [binding, pointer]} = form, _outer_form, env, binding_env) do
+    with {:ok, binding, ref} <- binding_ref(binding, form, env, binding_env),
+         {:ok, pointer} <- json_pointer(pointer, form, env) do
+      {:ok, %PathCount{binding: binding, ref: ref, pointer: pointer}}
+    end
+  end
+
+  defp operand(_other, form, env, _binding_env) do
     {:error,
      Finding.at(env, form, "unsupported predicate operand",
-       hint: "the left side must be `count(:acc)` or `budget_remaining()`"
+       hint:
+         "the left side must be `count(:acc)`, `budget_remaining()`, or `path_count(:binding, \"/pointer\")`"
      )}
   end
 
@@ -126,11 +292,247 @@ defmodule Workflow.Predicate do
   defp threshold(_other, form, env),
     do: {:error, Finding.at(env, form, "a predicate threshold must be a literal integer")}
 
-  defp combinator(AllOf), do: "all_of"
-  defp combinator(AnyOf), do: "any_of"
+  defp exact_keyword(opts, allowed, required, form, env, label) do
+    keys = if Keyword.keyword?(opts), do: Keyword.keys(opts), else: []
+    duplicates = keys -- Enum.uniq(keys)
 
-  defp vocabulary,
-    do: "count(:acc) >= n, budget_remaining() > n, all_of([...]), any_of([...])"
+    cond do
+      not Keyword.keyword?(opts) ->
+        {:error, Finding.at(env, form, "#{label} options must be a keyword list")}
+
+      duplicates != [] ->
+        {:error,
+         Finding.at(env, form, "#{label} has duplicate option #{inspect(hd(duplicates))}")}
+
+      Enum.any?(keys, &(&1 not in allowed)) or Enum.any?(required, &(&1 not in keys)) ->
+        {:error,
+         Finding.at(env, form, "invalid #{label} options",
+           hint: "allowed options: #{Enum.join(allowed, ", ")}"
+         )}
+
+      true ->
+        {:ok, opts}
+    end
+  end
+
+  defp positive_integer(n, _key, _form, _env) when is_integer(n) and n >= 1, do: {:ok, n}
+
+  defp positive_integer(_value, key, form, env),
+    do: {:error, Finding.at(env, form, "`#{key}` must be an integer >= 1")}
+
+  defp seen_by(fields, form, env) when is_list(fields) do
+    if Enum.all?(fields, &field_atom?/1) do
+      {:ok, fields}
+    else
+      {:error, Finding.at(env, form, "`dry` `seen_by:` must be a list of field atoms")}
+    end
+  end
+
+  defp seen_by(_fields, form, env),
+    do: {:error, Finding.at(env, form, "`dry` `seen_by:` must be a list of field atoms")}
+
+  defp field_atom?(field), do: is_atom(field) and not is_boolean(field) and not is_nil(field)
+
+  defp binding_ref(binding, form, env, binding_env)
+       when is_atom(binding) and not is_boolean(binding) and not is_nil(binding) do
+    case Map.fetch(binding_env, binding) do
+      {:ok, ref} ->
+        if binding_ref?(ref) do
+          {:ok, binding, ref}
+        else
+          {:error,
+           Finding.at(
+             env,
+             form,
+             "binding #{inspect(binding)} does not resolve to a journal binding ref"
+           )}
+        end
+
+      :error ->
+        {:error, Finding.at(env, form, "unknown binding #{inspect(binding)}")}
+    end
+  end
+
+  defp binding_ref(_binding, form, env, _binding_env) do
+    {:error, Finding.at(env, form, "predicate binding must be a literal binding atom")}
+  end
+
+  defp binding_ref?({kind, address})
+       when kind in @binding_ref_kinds and is_list(address),
+       do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
+
+  defp binding_ref?({:fanout, address, :global}) when is_list(address),
+    do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
+
+  defp binding_ref?({:fanout, address, {:loop_local, loop_address}})
+       when is_list(address) and is_list(loop_address),
+       do:
+         Enum.all?(address, &(is_integer(&1) and &1 >= 0)) and
+           Enum.all?(loop_address, &(is_integer(&1) and &1 >= 0))
+
+  defp binding_ref?(_ref), do: false
+
+  defp json_pointer(pointer, form, env) when is_binary(pointer) do
+    if valid_pointer?(pointer) do
+      {:ok, pointer}
+    else
+      {:error,
+       Finding.at(
+         env,
+         form,
+         "predicate JSON pointer must be \"\" or start with \"/\" and use RFC 6901 escapes"
+       )}
+    end
+  end
+
+  defp json_pointer(_pointer, form, env),
+    do: {:error, Finding.at(env, form, "predicate JSON pointer must be a literal string")}
+
+  defp valid_pointer?(""), do: true
+  defp valid_pointer?("/" <> _rest = pointer), do: valid_pointer_escapes?(pointer)
+  defp valid_pointer?(_pointer), do: false
+
+  defp valid_pointer_escapes?(pointer) do
+    pointer
+    |> String.graphemes()
+    |> valid_escape_tokens?()
+  end
+
+  defp valid_escape_tokens?([]), do: true
+
+  defp valid_escape_tokens?(["~", next | rest]) when next in ["0", "1"],
+    do: valid_escape_tokens?(rest)
+
+  defp valid_escape_tokens?(["~" | _rest]), do: false
+  defp valid_escape_tokens?([_char | rest]), do: valid_escape_tokens?(rest)
+
+  defp literal_to_json(nil, _form, _env), do: {:ok, nil}
+  defp literal_to_json(value, _form, _env) when is_boolean(value), do: {:ok, value}
+  defp literal_to_json(value, _form, _env) when is_integer(value), do: {:ok, value}
+  defp literal_to_json(value, _form, _env) when is_binary(value), do: {:ok, value}
+
+  defp literal_to_json(value, form, env) when is_float(value) do
+    if finite_float?(value) do
+      {:ok, value}
+    else
+      literal_error({:error, :non_finite_float}, form, env)
+    end
+  end
+
+  defp literal_to_json(value, _form, _env) when is_atom(value),
+    do: {:ok, Atom.to_string(value)}
+
+  defp literal_to_json(values, form, env) when is_list(values) do
+    values
+    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
+      case literal_to_json(value, form, env) do
+        {:ok, json} -> {:cont, {:ok, [json | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      {:error, _} = err -> literal_error(err, form, env)
+    end
+  end
+
+  defp literal_to_json({:%{}, _meta, pairs}, form, env) do
+    pairs
+    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key_ast, value_ast}, {:ok, acc, seen} ->
+      with {:ok, key} <- literal_key_to_json(key_ast, form, env),
+           false <- MapSet.member?(seen, key),
+           {:ok, value} <- literal_to_json(value_ast, form, env) do
+        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
+      else
+        true -> {:halt, {:error, :duplicate_key}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc, _seen} -> {:ok, acc}
+      {:error, _} = err -> literal_error(err, form, env)
+    end
+  end
+
+  defp literal_to_json(value, form, env) when is_map(value) and not is_struct(value) do
+    value
+    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key, item}, {:ok, acc, seen} ->
+      with {:ok, key} <- literal_key_to_json(key, form, env),
+           false <- MapSet.member?(seen, key),
+           {:ok, value} <- literal_to_json(item, form, env) do
+        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
+      else
+        true -> {:halt, {:error, :duplicate_key}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc, _seen} -> {:ok, acc}
+      {:error, _} = err -> literal_error(err, form, env)
+    end
+  end
+
+  defp literal_to_json(_value, form, env),
+    do: literal_error({:error, :not_json}, form, env)
+
+  defp literal_key_to_json(key, _form, _env) when is_binary(key), do: {:ok, key}
+  defp literal_key_to_json(key, _form, _env) when is_atom(key), do: {:ok, Atom.to_string(key)}
+
+  defp literal_key_to_json(_key, _form, _env), do: {:error, :invalid_key}
+
+  defp literal_error({:error, :duplicate_key}, form, env),
+    do: {:error, Finding.at(env, form, "predicate literal has duplicate object key")}
+
+  defp literal_error({:error, :invalid_key}, form, env),
+    do: {:error, Finding.at(env, form, "predicate literal object keys must be strings or atoms")}
+
+  defp literal_error({:error, :non_finite_float}, form, env),
+    do: {:error, Finding.at(env, form, "predicate literal floats must be finite")}
+
+  defp literal_error({:error, _reason}, form, env),
+    do: {:error, Finding.at(env, form, "predicate literal is not JSON-encodable")}
+
+  defp agreement_threshold(threshold, _form, _env) when threshold in [:all, :any],
+    do: {:ok, threshold}
+
+  defp agreement_threshold(threshold, _form, _env) when is_integer(threshold) and threshold >= 1,
+    do: {:ok, threshold}
+
+  defp agreement_threshold(_threshold, form, env) do
+    {:error, Finding.at(env, form, "`agree` threshold must be :all, :any, or a positive integer")}
+  end
+
+  defp vocabulary do
+    "count(:acc) >= n, budget_remaining() > n, path_count(:binding, \"/pointer\") == n, " <>
+      "dry(rounds: n), agree(:binding, path: \"/pointer\", equals: literal, threshold: :all), " <>
+      "path_exists(:binding, \"/pointer\"), path_non_empty(:binding, \"/pointer\"), " <>
+      "path_equals(:binding, \"/pointer\", literal), all([...]), any([...])"
+  end
+
+  defp dry_seen_by_value(nil), do: {:ok, nil}
+  defp dry_seen_by_value(%Dry{seen_by: seen_by}), do: {:ok, seen_by}
+  defp dry_seen_by_value(%AllOf{predicates: predicates}), do: dry_seen_by_values(predicates)
+  defp dry_seen_by_value(%AnyOf{predicates: predicates}), do: dry_seen_by_values(predicates)
+  defp dry_seen_by_value(_predicate), do: {:ok, nil}
+
+  defp dry_seen_by_values(predicates) do
+    predicates
+    |> Enum.reduce_while({:ok, nil}, fn predicate, {:ok, acc} ->
+      case dry_seen_by_value(predicate) do
+        {:ok, nil} ->
+          {:cont, {:ok, acc}}
+
+        {:ok, seen_by} when is_nil(acc) or acc == seen_by ->
+          {:cont, {:ok, seen_by}}
+
+        {:ok, _conflicting_seen_by} ->
+          {:halt, {:error, :conflicting_seen_by}}
+
+        {:error, :conflicting_seen_by} = error ->
+          {:halt, error}
+      end
+    end)
+  end
 
   # --- Runtime evaluation (pure over a journal-folded context) ---
 
@@ -139,15 +541,181 @@ defmodule Workflow.Predicate do
   def evaluate(%Compare{op: op, left: left, right: right}, ctx),
     do: compare(op, resolve(left, ctx), right)
 
+  def evaluate(%Dry{rounds: rounds}, ctx), do: dry_streak(ctx) >= rounds
+
+  def evaluate(%PathExists{ref: ref, pointer: pointer}, ctx),
+    do: match?({:present, _value}, path_resolve(resolve_ref(ref, ctx), pointer))
+
+  def evaluate(%PathNonEmpty{ref: ref, pointer: pointer}, ctx),
+    do: ref |> resolve_ref(ctx) |> path_resolve(pointer) |> path_non_empty?()
+
+  def evaluate(%PathEquals{ref: ref, pointer: pointer, literal: literal}, ctx) do
+    case ref |> resolve_ref(ctx) |> path_resolve(pointer) do
+      {:present, value} -> json_equal?(value, literal)
+      :missing -> false
+    end
+  end
+
+  def evaluate(%Agree{ref: ref, pointer: pointer, literal: literal, threshold: threshold}, ctx),
+    do: agree?(resolve_ref(ref, ctx), pointer, literal, threshold)
+
   def evaluate(%AllOf{predicates: preds}, ctx), do: Enum.all?(preds, &evaluate(&1, ctx))
   def evaluate(%AnyOf{predicates: preds}, ctx), do: Enum.any?(preds, &evaluate(&1, ctx))
 
-  defp resolve(%Count{acc: acc}, ctx), do: length(Map.get(ctx.accumulators, acc, []))
-  defp resolve(%BudgetRemaining{}, ctx), do: ctx.remaining
+  defp resolve(%Count{acc: acc}, ctx),
+    do: ctx |> Map.get(:accumulators, %{}) |> Map.get(acc, []) |> length()
+
+  defp resolve(%BudgetRemaining{}, ctx), do: Map.get(ctx, :remaining, :infinity)
+
+  defp resolve(%PathCount{ref: ref, pointer: pointer}, ctx),
+    do: ref |> resolve_ref(ctx) |> path_resolve(pointer) |> path_count()
+
+  defp dry_streak(ctx), do: Map.get(ctx, :dry_streak, 0)
+
+  defp resolve_ref(ref, ctx) do
+    case Map.fetch(Map.get(ctx, :bindings, %{}), ref) do
+      {:ok, value} -> value
+      :error -> :missing
+    end
+  end
 
   defp compare(:>, a, b), do: a > b
   defp compare(:<, a, b), do: a < b
   defp compare(:>=, a, b), do: a >= b
   defp compare(:<=, a, b), do: a <= b
   defp compare(:==, a, b), do: a == b
+
+  defp path_resolve(:missing, _pointer), do: :missing
+  defp path_resolve(value, ""), do: {:present, value}
+
+  defp path_resolve(value, "/" <> rest) do
+    rest
+    |> String.split("/")
+    |> Enum.map(&unescape_token/1)
+    |> Enum.reduce_while({:present, value}, fn token, {:present, current} ->
+      case path_step(current, token) do
+        {:present, _value} = present -> {:cont, present}
+        :missing -> {:halt, :missing}
+      end
+    end)
+  end
+
+  defp path_resolve(_value, _pointer), do: :missing
+
+  defp path_step(current, token) when is_map(current) do
+    case Map.fetch(current, token) do
+      {:ok, value} ->
+        {:present, value}
+
+      :error ->
+        case Enum.find(current, fn {key, _value} ->
+               is_atom(key) and Atom.to_string(key) == token
+             end) do
+          {_key, value} -> {:present, value}
+          nil -> :missing
+        end
+    end
+  end
+
+  defp path_step(current, token) when is_list(current) do
+    with true <- canonical_index?(token),
+         {index, ""} <- Integer.parse(token),
+         {:ok, value} <- Enum.fetch(current, index) do
+      {:present, value}
+    else
+      _other -> :missing
+    end
+  end
+
+  defp path_step(_current, _token), do: :missing
+
+  defp path_non_empty?(:missing), do: false
+  defp path_non_empty?({:present, nil}), do: false
+  defp path_non_empty?({:present, value}) when is_binary(value), do: byte_size(value) > 0
+  defp path_non_empty?({:present, value}) when is_list(value), do: length(value) > 0
+  defp path_non_empty?({:present, value}) when is_map(value), do: map_size(value) > 0
+  defp path_non_empty?({:present, _scalar}), do: true
+
+  defp path_count(:missing), do: 0
+  defp path_count({:present, nil}), do: 0
+  defp path_count({:present, value}) when is_list(value), do: length(value)
+  defp path_count({:present, value}) when is_map(value), do: map_size(value)
+  defp path_count({:present, _scalar}), do: 1
+
+  defp agree?(value, pointer, literal, threshold) when is_list(value) do
+    matches =
+      Enum.count(value, fn item ->
+        case path_resolve(item, pointer) do
+          {:present, candidate} -> json_equal?(candidate, literal)
+          :missing -> false
+        end
+      end)
+
+    case threshold do
+      :all -> matches == length(value) and length(value) > 0
+      :any -> matches >= 1
+      n when is_integer(n) -> matches >= n
+    end
+  end
+
+  defp agree?(_value, _pointer, _literal, _threshold), do: false
+
+  defp json_equal?(nil, nil), do: true
+  defp json_equal?(left, right) when is_boolean(left) and is_boolean(right), do: left == right
+  defp json_equal?(left, right) when is_integer(left) and is_integer(right), do: left == right
+
+  defp json_equal?(left, right) when is_float(left) and is_float(right),
+    do: finite_float?(left) and finite_float?(right) and left == right
+
+  defp json_equal?(left, right) when is_binary(left) and is_binary(right), do: left == right
+
+  defp json_equal?(left, right) when is_list(left) and is_list(right) do
+    length(left) == length(right) and
+      Enum.zip(left, right)
+      |> Enum.all?(fn {left_item, right_item} -> json_equal?(left_item, right_item) end)
+  end
+
+  defp json_equal?(left, right) when is_map(left) and is_map(right) do
+    with {:ok, left} <- normalize_json_object(left),
+         {:ok, right} <- normalize_json_object(right),
+         true <- Enum.sort(Map.keys(left)) == Enum.sort(Map.keys(right)) do
+      Enum.all?(left, fn {key, left_value} -> json_equal?(left_value, Map.fetch!(right, key)) end)
+    else
+      _other -> false
+    end
+  end
+
+  defp json_equal?(_left, _right), do: false
+
+  defp normalize_json_object(map) do
+    map
+    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key, value}, {:ok, acc, seen} ->
+      with {:ok, key} <- runtime_object_key(key),
+           false <- MapSet.member?(seen, key) do
+        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
+      else
+        true -> {:halt, :error}
+        :error -> {:halt, :error}
+      end
+    end)
+    |> case do
+      {:ok, normalized, _seen} -> {:ok, normalized}
+      :error -> :error
+    end
+  end
+
+  defp runtime_object_key(key) when is_binary(key), do: {:ok, key}
+  defp runtime_object_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
+  defp runtime_object_key(_key), do: :error
+
+  defp canonical_index?("0"), do: true
+  defp canonical_index?(token), do: String.match?(token, ~r/^[1-9][0-9]*$/)
+
+  defp unescape_token(token) do
+    token
+    |> String.replace("~1", "/")
+    |> String.replace("~0", "~")
+  end
+
+  defp finite_float?(value) when is_float(value), do: value - value == 0.0
 end

@@ -695,6 +695,8 @@ defmodule Workflow.RefineRunTest do
 
     started = Enum.find(events(id), &(&1.type == :refine_started)).payload
 
+    assert started.review_schema_version == 1
+
     assert started.review_adapter_versions == %{
              findings_v1: 1,
              defects_v1: 1,

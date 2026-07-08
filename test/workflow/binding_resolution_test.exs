@@ -2,7 +2,7 @@ defmodule Workflow.BindingResolutionTest do
   use ExUnit.Case, async: true
 
   alias Workflow.Provider.Usage
-  alias Workflow.Node.Agent
+  alias Workflow.Node.{Agent, GenericFanout}
   alias Workflow.Event
 
   test "bound value folds a committed node result from a hand-built journal" do
@@ -72,5 +72,59 @@ defmodule Workflow.BindingResolutionTest do
 
     assert {:ok, [%{"echo" => "alpha"}, %{"echo" => "beta"}]} =
              apply(Workflow.BoundList, :fold, [events, {:map, [9]}])
+  end
+
+  test "bound list folds ordered lane results for a fanout reference from journal markers" do
+    assert Code.ensure_loaded?(Workflow.BoundList)
+
+    fanout = %GenericFanout{
+      address: [4],
+      width: 2,
+      lanes: [[%Agent{address: [4], prompt: "lane"}]],
+      bind: :reviews
+    }
+
+    events = [
+      Event.fanout_started(fanout, 2),
+      Event.agent_committed(
+        %Agent{address: [4, 1, 0], prompt: "lane 1"},
+        0,
+        :lane1,
+        %{"echo" => "beta"},
+        %Usage{}
+      ),
+      Event.agent_committed(
+        %Agent{address: [4, 0, 0], prompt: "lane 0 draft"},
+        0,
+        :lane0_draft,
+        %{"echo" => "draft"},
+        %Usage{}
+      ),
+      Event.agent_committed(
+        %Agent{address: [4, 0, 1], prompt: "lane 0 final"},
+        0,
+        :lane0_final,
+        %{"echo" => "alpha"},
+        %Usage{}
+      )
+    ]
+
+    assert {:ok, [%{"echo" => "alpha"}, %{"echo" => "beta"}]} =
+             apply(Workflow.BoundList, :fold, [events, {:fanout, [4], :global}])
+  end
+
+  test "bound list resolves a zero-width fanout binding to an empty list" do
+    fanout = %GenericFanout{
+      address: [4],
+      width: 0,
+      lanes: [[%Agent{address: [4], prompt: "lane"}]],
+      bind: :reviews
+    }
+
+    assert {:ok, []} =
+             apply(Workflow.BoundList, :fold, [
+               [Event.fanout_started(fanout, 0)],
+               {:fanout, [4], :global}
+             ])
   end
 end

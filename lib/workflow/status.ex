@@ -229,6 +229,36 @@ defmodule Workflow.Status do
     |> tick()
   end
 
+  defp apply_known_event(%Event{type: :fanout_failed, payload: p}, s) do
+    iteration = Map.get(p, :iteration)
+
+    %{
+      s
+      | state: :failed,
+        failure: %{
+          address: p.address,
+          iteration: iteration,
+          attempts: 0,
+          reason: {:fanout_failed, p.address, iteration, p.reason}
+        }
+    }
+    |> tick()
+  end
+
+  defp apply_known_event(%Event{type: :loop_exhausted, payload: p}, s) do
+    %{
+      s
+      | state: :failed,
+        failure: %{
+          address: p.address,
+          iteration: p.iterations,
+          attempts: 0,
+          reason: {:loop_exhausted, p.address, p.iterations}
+        }
+    }
+    |> tick()
+  end
+
   defp apply_known_event(%Event{type: :refine_role_failed, payload: p}, s) do
     %{s | usage: add_failed_usage(s.usage, Map.get(p, :usage))}
     |> tick()
@@ -243,6 +273,8 @@ defmodule Workflow.Status do
               :parallel_completed,
               :pipeline_started,
               :pipeline_completed,
+              :fanout_started,
+              :fanout_completed,
               :refine_started,
               :refine_round_started,
               :refine_round_decision,

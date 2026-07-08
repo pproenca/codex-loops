@@ -31,6 +31,7 @@ defmodule Workflow.BoundValue do
   end
 
   def fold(_events, {:map, _address} = ref), do: {:error, {:unbound, ref}}
+  def fold(_events, {:fanout, _address, _scope} = ref), do: {:error, {:unbound, ref}}
 
   defp apply_event(
          %Event{type: :agent_committed, payload: %{address: address, result: result}},

@@ -9,7 +9,17 @@ defmodule Workflow.FanoutCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Agent, Parallel, Pipeline, Return}
+
+  alias Workflow.Node.{
+    Agent,
+    BudgetSlices,
+    Emit,
+    GenericFanout,
+    Parallel,
+    PathCount,
+    Pipeline,
+    Return
+  }
 
   defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
@@ -153,6 +163,162 @@ defmodule Workflow.FanoutCompilerTest do
     test "a stage that is not an agent is a located finding" do
       assert {:error, %Finding{} = f} = parse(~s|pipeline(["x"], [log("s")])\nreturn(:ok)|)
       assert f.message =~ "stages must be `agent`"
+    end
+  end
+
+  describe "fanout (generic repeated lane)" do
+    test "compiles an integer width into a repeated non-empty agent lane" do
+      {:ok, tree} =
+        parse("""
+        fanout width: 3 do
+          agent "work"
+          agent "check"
+        end
+        return :ok
+        """)
+
+      assert [
+               %GenericFanout{
+                 address: [0],
+                 width: 3,
+                 lanes: [
+                   [
+                     %Agent{address: [0], prompt: "work"},
+                     %Agent{address: [0], prompt: "check"}
+                   ]
+                 ],
+                 repeated: true,
+                 on_zero: :complete,
+                 max_concurrency: nil,
+                 bind: nil
+               },
+               %Return{}
+             ] = tree.nodes
+
+      refute contains_function?(tree)
+    end
+
+    test "binds the ordered fanout result list after the fanout node" do
+      {:ok, tree} =
+        parse("""
+        fanout width: 2, bind: :reviews do
+          agent "review"
+        end
+
+        emit ~P"Reviews: <%= @reviews %>"
+        """)
+
+      assert [
+               %GenericFanout{address: [0], bind: :reviews},
+               %Emit{bindings: %{reviews: {:fanout, [0], :global}}}
+             ] = tree.nodes
+    end
+
+    test "carries optional max_concurrency and on_zero controls" do
+      {:ok, tree} =
+        parse("""
+        fanout width: 0, max_concurrency: 1, on_zero: :fail do
+          agent "work"
+        end
+        return :ok
+        """)
+
+      assert [%GenericFanout{width: 0, max_concurrency: 1, on_zero: :fail}, %Return{}] =
+               tree.nodes
+    end
+
+    test "compiles budget_slices width with an explicit max cap" do
+      {:ok, tree} =
+        parse("""
+        fanout width: budget_slices(per: 10, max: 3) do
+          agent "work"
+        end
+        return :ok
+        """)
+
+      assert [%GenericFanout{width: %BudgetSlices{per: 10, max: 3}}, %Return{}] = tree.nodes
+    end
+
+    test "compiles path_count width against a lexically preceding binding" do
+      {:ok, tree} =
+        parse("""
+        let :items = agent("items")
+        fanout width: path_count(:items, "/rows", max: 4) do
+          agent "work"
+        end
+        return :ok
+        """)
+
+      assert [
+               %Agent{address: [0]},
+               %GenericFanout{
+                 address: [1],
+                 width: %PathCount{
+                   binding: :items,
+                   ref: {:node, [0]},
+                   pointer: "/rows",
+                   max: 4
+                 }
+               },
+               %Return{}
+             ] = tree.nodes
+    end
+
+    test "rejects a width outside the closed WidthExpr grammar" do
+      assert {:error, %Finding{} = f} =
+               parse("fanout width: count(:items) do\n agent \"w\"\nend\nreturn :ok")
+
+      assert f.message =~ "`fanout` width"
+    end
+
+    test "path_count width requires a preceding binding and an explicit positive max" do
+      assert {:error, %Finding{} = f} =
+               parse(
+                 "fanout width: path_count(:items, \"/rows\", max: 4) do\n agent \"w\"\nend\nreturn :ok"
+               )
+
+      assert f.message =~ "unknown binding"
+
+      assert {:error, %Finding{} = f} =
+               parse("""
+               let :items = agent("items")
+               fanout width: path_count(:items, "/rows") do
+                 agent "w"
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "requires `max:`"
+    end
+
+    test "bind option validates atom names and rejects shadowing" do
+      assert {:error, %Finding{} = f} =
+               parse("""
+               let :items = agent("items")
+               fanout width: 1, bind: :items do
+                 agent "w"
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "already bound"
+
+      assert {:error, %Finding{} = f} =
+               parse("fanout width: 1, bind: true do\n agent \"w\"\nend\nreturn :ok")
+
+      assert f.message =~ "`fanout bind:`"
+    end
+
+    test "rejects an empty repeated lane" do
+      assert {:error, %Finding{} = f} = parse("fanout width: 2 do\nend\nreturn :ok")
+      assert f.message =~ "at least one body step"
+    end
+
+    test "rejects invalid on_zero policy" do
+      assert {:error, %Finding{} = f} =
+               parse("fanout width: 0, on_zero: :skip do\n agent \"w\"\nend\nreturn :ok")
+
+      assert f.message =~ "`on_zero`"
     end
   end
 

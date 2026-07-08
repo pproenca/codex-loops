@@ -91,9 +91,55 @@ Useful DSL forms:
 - `log "message"`
 - `agent "prompt"`
 - `agent "prompt", schema: %{...}, retries: n`
+- `let :name = agent(...)`
+- `let :name = synthesize(...)`
+- `let :name = refine(...)`
+- `agent(~P"... <%= @name %> ...")`
+- `emit(~P"... <%= @name %> ...")`
+- `emit_result(:name)`
 - `return value`
-- Advanced orchestration: `parallel`, `pipeline`, `collect`, `while_budget`,
-  `until_dry`, `verify`, `judge`, `synthesize`, and `fan_out`.
+- Core orchestration: `loop max_iterations: n, until: predicate do ... end` and
+  `fanout width: n do ... end`.
+- Advanced orchestration: `parallel`, `pipeline`, `collect`, `verify`, `judge`,
+  and `synthesize`.
+- Compatibility/sugar surfaces: `while_budget`, `until_dry`, and `fan_out`.
+- Deferred and unavailable: `gather` and `map`.
+- Unavailable user-authored surface: explicit heterogeneous `lanes([...])`.
+
+Prefer the generic core for new dynamic workflows. Use `loop max_iterations:`
+with either a header `until:` predicate or one body-local `until(predicate)`,
+but not both. Body-local `until` stops at that body point, cannot contain
+`dry(...)`, and can inspect an earlier loop-local `fanout bind:`.
+
+Use `fanout` for a repeated non-empty lane of `agent` turns. Supported widths
+are integer, `budget_slices(per: n, max: m)`, and
+`path_count(:binding, "/json/pointer", max: m)`. Optional controls are `bind:`,
+`max_concurrency:`, and `on_zero: :complete | :fail`. A `fanout bind:` produces
+an ordered result list for later templates and predicates; lane prompts do not
+receive implicit per-lane data.
+
+Closed predicate examples. For `agree` over a fanout binding, each lane result
+must be a structured map, usually from a schema-backed agent:
+
+```elixir
+all([count(:items) >= 2, budget_remaining() > 10])
+any([path_exists(:reviews, "/0"), path_non_empty(:draft, "/summary")])
+dry(rounds: 2, seen_by: [:id])
+agree(:reviews, path: "/approved", equals: true, threshold: :all)
+path_count(:draft, "/items") >= 2
+path_equals(:draft, "/status", "ready")
+```
+
+`all_of` and `any_of` are legacy aliases for `all` and `any`.
+
+Implemented dataflow forms are top-level only. Use `let` to bind a previous
+producer's journaled output, `agent(~P...)` to inject earlier bindings into a
+later top-level agent prompt, `emit(~P...)` as a final rendered text terminal,
+and `emit_result(:name)` as a final structured terminal for a result-capable
+binding. The shipped result-capable producer is `refine`. Template holes use the
+closed `~P` surface, such as `<%= @draft %>`; do not use Elixir interpolation,
+helper calls, or nested template prompts in `parallel`, `pipeline`, `fanout`,
+`fan_out`, or loop bodies.
 
 ## Testing Gate
 

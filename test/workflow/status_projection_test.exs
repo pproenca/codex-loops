@@ -4,7 +4,7 @@ defmodule Workflow.StatusProjectionTest do
   alias Workflow.Provider.Usage
   alias Workflow.Scheduler.RunProjection
   alias Workflow.{Event, IdempotencyKey, Status, Tree}
-  alias Workflow.Node.{Agent, Refine}
+  alias Workflow.Node.{Agent, GenericFanout, Loop, Refine}
 
   test "status folds refines, tool activity, and ordered raw journal refs" do
     run_id = "status_projection_refine"
@@ -50,7 +50,8 @@ defmodule Workflow.StatusProjectionTest do
     events =
       [
         Event.run_started(%Tree{name: "refine-status", nodes: [node]}),
-        Event.refine_started(node),
+        Event.refine_started(node)
+        |> put_in([Access.key!(:payload), :future_payload_key], :ignored_by_status),
         Event.refine_round_started(node, 0, "draft-v1"),
         Event.agent_activity(cold_reader, 0, 0, 0, streamed_activity),
         Event.agent_committed(
@@ -102,6 +103,10 @@ defmodule Workflow.StatusProjectionTest do
       |> stamp(run_id)
 
     status = Status.fold(events, run_id)
+    started_event = Enum.find(events, &(&1.type == :refine_started))
+
+    assert started_event.payload.review_schema_version == 1
+    assert started_event.payload.future_payload_key == :ignored_by_status
 
     assert Enum.map(status.raw_refs.journal, & &1.seq) == Enum.to_list(0..9)
 
@@ -152,6 +157,84 @@ defmodule Workflow.StatusProjectionTest do
     assert public_refine["rawRefs"]["started"]["seq"] == 1
     assert public_refine["rawRefs"]["gateRoleAgents"] |> Enum.map(& &1["seq"]) == [3, 4]
     assert public_refine["rawRefs"]["journal"] |> Enum.map(& &1["seq"]) == Enum.to_list(1..8)
+  end
+
+  test "status folds generic fanout failure as a terminal run failure" do
+    run_id = "status_projection_fanout_failed"
+
+    node = %GenericFanout{
+      address: [0],
+      width: 0,
+      lanes: [[%Agent{address: [0], prompt: "never"}]],
+      on_zero: :fail
+    }
+
+    events =
+      [
+        Event.run_started(%Tree{name: "fanout-status", nodes: [node]}),
+        Event.fanout_started(node, 0, nil),
+        Event.fanout_failed(node, :zero_width, nil)
+      ]
+      |> stamp(run_id)
+
+    status = Status.fold(events, run_id)
+
+    assert status.state == :failed
+
+    assert status.failure == %{
+             address: [0],
+             iteration: nil,
+             attempts: 0,
+             reason: {:fanout_failed, [0], nil, :zero_width}
+           }
+
+    assert Enum.map(status.raw_refs.journal, & &1.type) == [
+             "run_started",
+             "fanout_started",
+             "fanout_failed"
+           ]
+  end
+
+  test "status folds loop exhaustion as a terminal run failure" do
+    run_id = "status_projection_loop_exhausted"
+    node = %Loop{address: [0], max_iterations: 1, body: [], on_exhausted: :fail}
+
+    events =
+      [
+        Event.run_started(%Tree{name: "loop-status", nodes: [node]}),
+        Event.loop_decision(node, 0, :continue,
+          predicate_result: false,
+          exhausted: false,
+          source_address: nil
+        ),
+        Event.iteration_started(node, 0),
+        Event.loop_decision(node, 1, {:exhausted, :fail},
+          predicate_result: nil,
+          exhausted: true,
+          source_address: nil
+        ),
+        Event.loop_exhausted(node, 1, :max_iterations)
+      ]
+      |> stamp(run_id)
+
+    status = Status.fold(events, run_id)
+
+    assert status.state == :failed
+
+    assert status.failure == %{
+             address: [0],
+             iteration: 1,
+             attempts: 0,
+             reason: {:loop_exhausted, [0], 1}
+           }
+
+    assert Enum.map(status.raw_refs.journal, & &1.type) == [
+             "run_started",
+             "loop_decision",
+             "iteration_started",
+             "loop_decision",
+             "loop_exhausted"
+           ]
   end
 
   defp stamp(events, run_id) do

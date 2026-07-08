@@ -8,7 +8,7 @@ defmodule Workflow.ResumeTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Status, Ledger, IdempotencyKey}
+  alias Workflow.{Run, Journal, Status, Ledger, Event, IdempotencyKey}
   alias Workflow.Test.{EchoProvider, GateProvider, LedgeredProvider}
 
   # A run whose first turn commits and whose second turn can be held in flight.
@@ -50,6 +50,18 @@ defmodule Workflow.ResumeTest do
     workflow "injected-then-gate" do
       let(:draft = agent("draft"))
       agent(~P"improve: <%= @draft %>")
+      return(:ok)
+    end
+  end
+
+  defmodule JournaledDynamicFanout do
+    use Workflow
+
+    workflow "journaled-dynamic-fanout" do
+      fanout width: budget_slices(per: 10, max: 5) do
+        agent("branch")
+      end
+
       return(:ok)
     end
   end
@@ -254,5 +266,32 @@ defmodule Workflow.ResumeTest do
       )
 
     assert committed.payload.prompt == "improve: %{}"
+  end
+
+  test "resume replays a journaled generic fanout width instead of recomputing budget_slices" do
+    id = run_id()
+    tree = JournaledDynamicFanout.__workflow__(:tree)
+    [fanout, _return] = tree.nodes
+
+    :ok = Journal.register_run(id)
+    :ok = Journal.append(id, 0, Event.run_started(tree, 5))
+    :ok = Journal.append(id, 1, Event.fanout_started(fanout, 3))
+
+    assert {:ok, ^id} =
+             Run.run(JournaledDynamicFanout,
+               run_id: id,
+               budget: 5,
+               provider: {EchoProvider, sink: self()}
+             )
+
+    for _ <- 1..3, do: assert_received({:agent_called, "branch"})
+    refute_received {:agent_called, _}
+
+    events = Journal.fold(id)
+    assert Enum.count(events, &(&1.type == :fanout_started)) == 1
+
+    assert events
+           |> Enum.filter(&(&1.type == :agent_committed))
+           |> Enum.map(& &1.payload.address) == [[0, 0, 0], [0, 1, 0], [0, 2, 0]]
   end
 end

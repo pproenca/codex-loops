@@ -41,7 +41,7 @@ defmodule Workflow.MCP.Lifecycle do
         stderr_to_stdout: true
       )
 
-    scheduler = wait_for_port_exit(scheduler, 50)
+    scheduler = wait_for_scheduler_stop(scheduler)
 
     if Process.alive?(self()) and not port_exited?(scheduler) do
       Port.close(scheduler.port)
@@ -199,6 +199,7 @@ defmodule Workflow.MCP.Lifecycle do
       release_bin: release_bin,
       cwd: cwd,
       env: env,
+      os_pid: nil,
       logs: [],
       exit_status: nil
     }
@@ -217,7 +218,8 @@ defmodule Workflow.MCP.Lifecycle do
          logs: state.owned_scheduler.logs
        }), state}
     else
-      {:ok, state}
+      os_pid = release_pid(release_bin, cwd, env) || port_os_pid(port)
+      {:ok, put_in(state.owned_scheduler.os_pid, os_pid)}
     end
   rescue
     error ->
@@ -243,16 +245,102 @@ defmodule Workflow.MCP.Lifecycle do
     end
   end
 
-  defp wait_for_port_exit(scheduler, 0), do: collect_scheduler_messages(scheduler)
+  defp wait_for_scheduler_stop(scheduler) do
+    scheduler = wait_for_health_down(scheduler, 50)
 
-  defp wait_for_port_exit(scheduler, attempts_left) do
+    if scheduler_healthy?() do
+      pid = scheduler.os_pid || port_os_pid(scheduler.port) || listener_pid()
+      terminate_pid(pid, "-TERM")
+      scheduler = wait_for_health_down(scheduler, 50)
+
+      if scheduler_healthy?() do
+        pid = pid || listener_pid()
+        terminate_pid(pid, "-KILL")
+        wait_for_health_down(scheduler, 50)
+      else
+        scheduler
+      end
+    else
+      scheduler
+    end
+  end
+
+  defp terminate_pid(pid, signal) when is_integer(pid) do
+    System.cmd("kill", [signal, Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  rescue
+    _error -> :ok
+  end
+
+  defp terminate_pid(_pid, _signal), do: :ok
+
+  defp wait_for_health_down(scheduler, 0), do: collect_scheduler_messages(scheduler)
+
+  defp wait_for_health_down(scheduler, attempts_left) do
     scheduler = collect_scheduler_messages(scheduler)
 
-    if port_exited?(scheduler) do
-      scheduler
-    else
+    if scheduler_healthy?() do
       Process.sleep(100)
-      wait_for_port_exit(scheduler, attempts_left - 1)
+      wait_for_health_down(scheduler, attempts_left - 1)
+    else
+      scheduler
+    end
+  end
+
+  defp scheduler_healthy? do
+    match?({:ok, _payload}, SchedulerClient.health())
+  end
+
+  defp release_pid(release_bin, cwd, env) do
+    case System.cmd(release_bin, ["pid"], cd: cwd, env: env, stderr_to_stdout: true) do
+      {output, 0} ->
+        output
+        |> String.trim()
+        |> Integer.parse()
+        |> case do
+          {pid, ""} -> pid
+          _other -> nil
+        end
+
+      _other ->
+        nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp port_os_pid(port) do
+    case Port.info(port, :os_pid) do
+      {:os_pid, pid} when is_integer(pid) -> pid
+      _other -> nil
+    end
+  end
+
+  defp listener_pid do
+    port = SchedulerClient.config().port
+
+    case System.cmd("lsof", ["-nP", "-t", "-iTCP:#{port}", "-sTCP:LISTEN"],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} ->
+        output
+        |> String.split()
+        |> List.first()
+        |> parse_pid()
+
+      _other ->
+        nil
+    end
+  rescue
+    _error -> nil
+  end
+
+  defp parse_pid(nil), do: nil
+
+  defp parse_pid(raw) do
+    case Integer.parse(raw) do
+      {pid, ""} -> pid
+      _other -> nil
     end
   end
 

@@ -32,12 +32,14 @@ defmodule Workflow.Compiler do
   """
 
   alias Workflow.{Tree, Predicate, RenderText, Template}
+  alias Workflow.Refine.{Gate, ReviewerAdapter}
 
   alias Workflow.Node.{
     Phase,
     Log,
     Agent,
     Emit,
+    EmitResult,
     Return,
     Parallel,
     Pipeline,
@@ -64,6 +66,7 @@ defmodule Workflow.Compiler do
     :pipeline,
     :return,
     :emit,
+    :emit_result,
     :collect,
     :while_budget,
     :until_dry,
@@ -96,32 +99,11 @@ defmodule Workflow.Compiler do
     "required" => ["artifact"]
   }
 
-  @review_schema %{
-    "type" => "object",
-    "additionalProperties" => false,
-    "properties" => %{
-      "approved" => %{"type" => "boolean"},
-      "findings" => %{
-        "type" => "array",
-        "items" => %{
-          "type" => "object",
-          "additionalProperties" => false,
-          "properties" => %{
-            "id" => %{"type" => "string"},
-            "blocking" => %{"type" => "boolean"},
-            "issue" => %{"type" => "string"},
-            "fix" => %{"type" => "string"}
-          },
-          "required" => ["id", "blocking", "issue", "fix"]
-        }
-      }
-    },
-    "required" => ["approved", "findings"]
-  }
-
   @refine_required_options [:reviewers, :revise_with, :until, :max_rounds]
-  @refine_optional_options [:on_non_convergence, :max_concurrency]
+  @refine_optional_options [:on_non_convergence, :max_concurrency, :gates]
   @refine_allowed_options @refine_required_options ++ @refine_optional_options
+  @refine_gate_options [:cold_read, :repair_when, :halt_when]
+  @gate_compare_ops [:>, :<, :>=, :<=, :==]
 
   @pick_strategies [:max_score, :min_score]
 
@@ -188,13 +170,13 @@ defmodule Workflow.Compiler do
   end
 
   defp finish_build(%node{} = built, stmt, rest, index, acc, seen, env, binding_env)
-       when node in [Return, Emit] do
+       when node in [Return, Emit, EmitResult] do
     if rest == [] do
       build(rest, index + 1, [built | acc], seen, env, binding_env)
     else
       {:error,
        Finding.at(env, stmt, "`#{terminal_name(built)}` must be the final top-level node",
-         hint: "a workflow terminates with `return` or `emit`"
+         hint: "a workflow terminates with `return`, `emit`, or `emit_result`"
        )}
     end
   end
@@ -260,6 +242,7 @@ defmodule Workflow.Compiler do
 
   defp terminal_name(%Return{}), do: "return"
   defp terminal_name(%Emit{}), do: "emit"
+  defp terminal_name(%EmitResult{}), do: "emit_result"
 
   # --- The closed combinator vocabulary ---
 
@@ -358,6 +341,12 @@ defmodule Workflow.Compiler do
     end
   end
 
+  defp node({:emit_result, _meta, [binding]} = form, address, env, binding_env) do
+    with {:ok, ref} <- emit_result_ref(binding, binding_env, form, env) do
+      {:ok, %EmitResult{address: address, binding: binding, ref: ref}}
+    end
+  end
+
   # `parallel [agent(...), ...]` — a barrier fan-out over a literal list of agent
   # branches, optionally capped by `max_concurrency:`. Each branch is addressed
   # `address ++ [branch_index]`, so branches journal and key independently.
@@ -452,7 +441,8 @@ defmodule Workflow.Compiler do
          {:ok, until} <- refine_until(opts, form, env),
          {:ok, max_rounds} <- refine_max_rounds(opts, form, env),
          {:ok, on_non_convergence} <- refine_on_non_convergence(opts, form, env),
-         {:ok, max_concurrency} <- refine_max_concurrency(opts, length(reviewers), form, env) do
+         {:ok, max_concurrency} <- refine_max_concurrency(opts, length(reviewers), form, env),
+         {:ok, gates} <- refine_gates(opts, address, reviser, form, env) do
       {:ok,
        %Refine{
          address: address,
@@ -462,7 +452,8 @@ defmodule Workflow.Compiler do
          until: until,
          max_rounds: max_rounds,
          on_non_convergence: on_non_convergence,
-         max_concurrency: max_concurrency
+         max_concurrency: max_concurrency,
+         gates: gates
        }}
     end
   end
@@ -914,6 +905,9 @@ defmodule Workflow.Compiler do
   defp body_node({:emit, _meta, _args} = form, _address, env, _binding_env),
     do: {:error, Finding.at(env, form, "`emit` is not allowed inside a loop body")}
 
+  defp body_node({:emit_result, _meta, _args} = form, _address, env, _binding_env),
+    do: {:error, Finding.at(env, form, "`emit_result` is not allowed inside a loop body")}
+
   defp body_node({combinator, _meta, _args} = form, _address, env, _binding_env)
        when combinator in [
               :while_budget,
@@ -1288,22 +1282,16 @@ defmodule Workflow.Compiler do
 
   defp refine_reviewer({:reviewer, _meta, [name, prompt]} = form, address, index, env)
        when is_binary(prompt) do
-    with {:ok, name} <- refine_reviewer_name(name, form, env),
-         {:ok, prompt} <- prompt_text(prompt, form, env, "reviewer prompt") do
-      agent = %Agent{
-        address: address ++ [1, index],
-        prompt: prompt,
-        label: Atom.to_string(name),
-        schema: @review_schema,
-        retries: 0
-      }
+    refine_reviewer(form, name, prompt, [], address, index, env)
+  end
 
-      {:ok, %{index: index, name: name, prompt: prompt, agent: agent}}
-    end
+  defp refine_reviewer({:reviewer, _meta, [name, prompt, opts]} = form, address, index, env)
+       when is_binary(prompt) do
+    refine_reviewer(form, name, prompt, opts, address, index, env)
   end
 
   defp refine_reviewer(
-         {:reviewer, _meta, [_name, {:<<>>, _, _parts}]} = form,
+         {:reviewer, _meta, [_name, {:<<>>, _, _parts} | _rest]} = form,
          _address,
          _index,
          env
@@ -1312,7 +1300,75 @@ defmodule Workflow.Compiler do
 
   defp refine_reviewer(_reviewer, _address, _index, env),
     do:
-      {:error, Finding.at(env, nil, "`reviewers:` entries must be `reviewer(:name, \"prompt\")`")}
+      {:error,
+       Finding.at(
+         env,
+         nil,
+         "`reviewers:` entries must be `reviewer(:name, \"prompt\", adapter: :findings_v1)`"
+       )}
+
+  defp refine_reviewer(form, name, prompt, opts, address, index, env) do
+    refine_reviewer_at(form, name, prompt, opts, address ++ [1, index], index, env)
+  end
+
+  defp refine_reviewer_at(form, name, prompt, opts, agent_address, index, env) do
+    with {:ok, name} <- refine_reviewer_name(name, form, env),
+         {:ok, prompt} <- prompt_text(prompt, form, env, "reviewer prompt"),
+         {:ok, adapter} <- reviewer_adapter(opts, form, env) do
+      agent = %Agent{
+        address: agent_address,
+        prompt: prompt,
+        label: Atom.to_string(name),
+        schema: ReviewerAdapter.schema(adapter),
+        retries: 0
+      }
+
+      {:ok, %{index: index, name: name, prompt: prompt, adapter: adapter, agent: agent}}
+    end
+  end
+
+  defp reviewer_adapter([], _form, _env), do: {:ok, ReviewerAdapter.default()}
+
+  defp reviewer_adapter(opts, form, env) do
+    cond do
+      not keyword_literal?(opts) or not Keyword.keyword?(opts) ->
+        {:error,
+         Finding.at(env, form, "`reviewer` options must be a literal keyword list",
+           hint: "allowed option: adapter: #{inspect(ReviewerAdapter.all())}"
+         )}
+
+      unknown = Enum.find(Keyword.keys(opts), &(&1 != :adapter)) ->
+        {:error,
+         Finding.at(env, form, "`reviewer` options may only include `adapter:`",
+           hint: "`#{unknown}:` is not a reviewer option"
+         )}
+
+      keyword_count(opts, :adapter) > 1 ->
+        {:error, Finding.at(env, form, "`reviewer` option `adapter:` must appear at most once")}
+
+      true ->
+        case Keyword.fetch(opts, :adapter) do
+          :error -> {:ok, ReviewerAdapter.default()}
+          {:ok, adapter} when is_atom(adapter) -> validate_reviewer_adapter(adapter, form, env)
+          {:ok, _other} -> unsupported_reviewer_adapter(nil, form, env)
+        end
+    end
+  end
+
+  defp validate_reviewer_adapter(adapter, form, env) do
+    if ReviewerAdapter.known?(adapter) do
+      {:ok, adapter}
+    else
+      unsupported_reviewer_adapter(adapter, form, env)
+    end
+  end
+
+  defp unsupported_reviewer_adapter(adapter, form, env) do
+    {:error,
+     Finding.at(env, form, "unsupported reviewer adapter #{inspect(adapter)}",
+       hint: "supported adapters: #{Enum.map_join(ReviewerAdapter.all(), ", ", &inspect/1)}"
+     )}
+  end
 
   defp duplicate_reviewer_name?(reviewers) do
     names = Enum.map(reviewers, & &1.name)
@@ -1393,6 +1449,253 @@ defmodule Workflow.Compiler do
       {:ok, _} ->
         {:error, Finding.at(env, form, "`refine` `max_concurrency:` must be a positive integer")}
     end
+  end
+
+  defp refine_gates(opts, address, %Agent{} = reviser, form, env) do
+    case Keyword.fetch(opts, :gates) do
+      :error ->
+        {:ok, %{}}
+
+      {:ok, gates} ->
+        cond do
+          not (is_list(gates) and Keyword.keyword?(gates) and keyword_literal?(gates)) ->
+            {:error, Finding.at(env, form, "`refine` `gates:` must be a literal keyword list")}
+
+          unknown = Enum.find(Keyword.keys(gates), &(&1 not in @refine_gate_options)) ->
+            {:error,
+             Finding.at(env, form, "`refine` gate `#{unknown}:` is not allowed",
+               hint: "allowed gates: #{Enum.join(@refine_gate_options, ", ")}"
+             )}
+
+          duplicate = Enum.find(@refine_gate_options, &(keyword_count(gates, &1) > 1)) ->
+            {:error,
+             Finding.at(env, form, "`refine` gate `#{duplicate}:` must appear at most once")}
+
+          true ->
+            build_refine_gates(gates, address, reviser, form, env)
+        end
+    end
+  end
+
+  defp build_refine_gates(gates, address, %Agent{} = reviser, form, env) do
+    with {:ok, acc} <- maybe_cold_read_gate(gates, address, form, env),
+         {:ok, acc} <- maybe_repair_gate(gates, address, reviser, acc, form, env),
+         {:ok, acc} <- maybe_halt_gate(gates, acc, form, env) do
+      {:ok, acc}
+    end
+  end
+
+  defp maybe_cold_read_gate(gates, address, form, env) do
+    case Keyword.fetch(gates, :cold_read) do
+      :error ->
+        {:ok, %{}}
+
+      {:ok, opts} ->
+        with {:ok, gate} <- cold_read_gate(opts, address, form, env) do
+          {:ok, %{cold_read: gate}}
+        end
+    end
+  end
+
+  defp cold_read_gate(opts, address, form, env) do
+    cond do
+      not (is_list(opts) and Keyword.keyword?(opts) and keyword_literal?(opts)) ->
+        {:error,
+         Finding.at(env, form, "`cold_read:` gate must be [reviewer: reviewer(...), when: gate]")}
+
+      unknown = Enum.find(Keyword.keys(opts), &(&1 not in [:reviewer, :when])) ->
+        {:error, Finding.at(env, form, "`cold_read:` gate option `#{unknown}:` is not allowed")}
+
+      keyword_count(opts, :reviewer) > 1 ->
+        {:error, Finding.at(env, form, "`cold_read:` gate `reviewer:` must appear exactly once")}
+
+      keyword_count(opts, :when) > 1 ->
+        {:error, Finding.at(env, form, "`cold_read:` gate `when:` must appear exactly once")}
+
+      not Keyword.has_key?(opts, :reviewer) ->
+        {:error, Finding.at(env, form, "`cold_read:` requires `reviewer:`")}
+
+      not Keyword.has_key?(opts, :when) ->
+        {:error, Finding.at(env, form, "`cold_read:` requires `when:`")}
+
+      true ->
+        with {:ok, reviewer} <-
+               cold_read_reviewer(Keyword.fetch!(opts, :reviewer), address ++ [3], env),
+             {:ok, predicate} <- gate_predicate(Keyword.fetch!(opts, :when), form, env) do
+          {:ok, %{predicate: predicate, reviewer: reviewer}}
+        end
+    end
+  end
+
+  defp cold_read_reviewer({:reviewer, _meta, [name, prompt]} = form, address, env)
+       when is_binary(prompt) do
+    refine_reviewer_at(form, name, prompt, [], address, nil, env)
+  end
+
+  defp cold_read_reviewer({:reviewer, _meta, [name, prompt, opts]} = form, address, env)
+       when is_binary(prompt) do
+    refine_reviewer_at(form, name, prompt, opts, address, nil, env)
+  end
+
+  defp cold_read_reviewer(
+         {:reviewer, _meta, [_name, {:<<>>, _, _parts} | _rest]} = form,
+         _address,
+         env
+       ),
+       do: {:error, interpolation_finding(form, env, "cold-read reviewer prompt")}
+
+  defp cold_read_reviewer(_reviewer, _address, env) do
+    {:error,
+     Finding.at(
+       env,
+       nil,
+       "`cold_read:` `reviewer:` must be `reviewer(:name, \"prompt\", adapter: :findings_v1)`"
+     )}
+  end
+
+  defp maybe_repair_gate(gates, address, %Agent{} = reviser, acc, form, env) do
+    case Keyword.fetch(gates, :repair_when) do
+      :error ->
+        {:ok, acc}
+
+      {:ok, predicate_ast} ->
+        with {:ok, predicate} <- gate_predicate(predicate_ast, form, env) do
+          {:ok,
+           Map.put(acc, :repair, %{
+             predicate: predicate,
+             agent: %{reviser | address: address ++ [4]}
+           })}
+        end
+    end
+  end
+
+  defp maybe_halt_gate(gates, acc, form, env) do
+    case Keyword.fetch(gates, :halt_when) do
+      :error ->
+        {:ok, acc}
+
+      {:ok, predicate_ast} ->
+        with {:ok, predicate} <- gate_predicate(predicate_ast, form, env) do
+          {:ok, Map.put(acc, :halt, %{predicate: predicate})}
+        end
+    end
+  end
+
+  defp gate_predicate({:path_exists, _meta, [pointer]} = form, _parent_form, env),
+    do: gate_pointer_predicate(:path_exists, pointer, form, env)
+
+  defp gate_predicate({:path_non_empty, _meta, [pointer]} = form, _parent_form, env),
+    do: gate_pointer_predicate(:path_non_empty, pointer, form, env)
+
+  defp gate_predicate({:path_equals, _meta, [pointer, literal]} = form, _parent_form, env) do
+    with {:ok, pointer} <- gate_pointer(pointer, form, env),
+         {:ok, literal} <- gate_literal_to_json(literal, form, env) do
+      {:ok, {:path_equals, pointer, literal}}
+    end
+  end
+
+  defp gate_predicate(
+         {op, _meta, [{:path_count, _count_meta, [pointer]} = count_form, right]},
+         _parent_form,
+         env
+       )
+       when op in @gate_compare_ops and is_integer(right) do
+    with {:ok, pointer} <- gate_pointer(pointer, count_form, env) do
+      {:ok, {:path_count, pointer, op, right}}
+    end
+  end
+
+  defp gate_predicate(
+         {_op, _meta, [{:path_count, _count_meta, [_pointer]}, _right]} = form,
+         _parent_form,
+         env
+       ) do
+    {:error, Finding.at(env, form, "`path_count` gate must compare with one of >, <, >=, <=, ==")}
+  end
+
+  defp gate_predicate({name, _meta, _args} = form, _parent_form, env) when is_atom(name) do
+    {:error, Finding.at(env, form, "unknown refine gate predicate `#{name}`")}
+  end
+
+  defp gate_predicate(_predicate, form, env) do
+    {:error, Finding.at(env, form, "unknown refine gate predicate")}
+  end
+
+  defp gate_pointer_predicate(kind, pointer, form, env) do
+    with {:ok, pointer} <- gate_pointer(pointer, form, env) do
+      {:ok, {kind, pointer}}
+    end
+  end
+
+  defp gate_pointer(pointer, form, env) when is_binary(pointer) do
+    if Gate.valid_pointer?(pointer) do
+      {:ok, pointer}
+    else
+      {:error,
+       Finding.at(
+         env,
+         form,
+         "gate JSON pointer must be \"\" or start with \"/\" and use RFC 6901 escapes"
+       )}
+    end
+  end
+
+  defp gate_pointer(_pointer, form, env) do
+    {:error, Finding.at(env, form, "gate JSON pointer must be a literal string")}
+  end
+
+  defp gate_literal_to_json(nil, _form, _env), do: {:ok, nil}
+  defp gate_literal_to_json(value, _form, _env) when is_boolean(value), do: {:ok, value}
+  defp gate_literal_to_json(value, _form, _env) when is_integer(value), do: {:ok, value}
+  defp gate_literal_to_json(value, _form, _env) when is_binary(value), do: {:ok, value}
+
+  defp gate_literal_to_json(value, _form, _env) when is_atom(value),
+    do: {:ok, Atom.to_string(value)}
+
+  defp gate_literal_to_json(values, form, env) when is_list(values) do
+    values
+    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
+      case gate_literal_to_json(value, form, env) do
+        {:ok, json} -> {:cont, {:ok, [json | acc]}}
+        {:error, _} = err -> {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc} -> {:ok, Enum.reverse(acc)}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp gate_literal_to_json({:%{}, _meta, pairs}, form, env) do
+    pairs
+    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key_ast, value_ast}, {:ok, acc, seen} ->
+      with {:ok, key} <- gate_literal_key(key_ast, form, env),
+           false <- MapSet.member?(seen, key),
+           {:ok, value} <- gate_literal_to_json(value_ast, form, env) do
+        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
+      else
+        true ->
+          {:halt, {:error, Finding.at(env, form, "gate literal has duplicate object key")}}
+
+        {:error, _} = err ->
+          {:halt, err}
+      end
+    end)
+    |> case do
+      {:ok, acc, _seen} -> {:ok, acc}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp gate_literal_to_json(_value, form, env) do
+    {:error, Finding.at(env, form, "`path_equals` gate literal is not JSON-encodable")}
+  end
+
+  defp gate_literal_key(key, _form, _env) when is_binary(key), do: {:ok, key}
+  defp gate_literal_key(key, _form, _env) when is_atom(key), do: {:ok, Atom.to_string(key)}
+
+  defp gate_literal_key(_key, form, env) do
+    {:error, Finding.at(env, form, "gate literal object keys must be strings or atoms")}
   end
 
   defp judge_candidates(candidates, form, env) do
@@ -1558,10 +1861,14 @@ defmodule Workflow.Compiler do
       %Emit{} ->
         :ok
 
+      %EmitResult{} ->
+        :ok
+
       _other ->
         {:error,
-         Finding.at(env, nil, "workflow must terminate with `return` or `emit`",
-           hint: "end the workflow with `return literal` or `emit(~P\"...\")`"
+         Finding.at(env, nil, "workflow must terminate with `return`, `emit`, or `emit_result`",
+           hint:
+             "end the workflow with `return literal`, `emit(~P\"...\")`, or `emit_result(:name)`"
          )}
     end
   end
@@ -1628,6 +1935,32 @@ defmodule Workflow.Compiler do
       nil -> :error
     end
   end
+
+  defp emit_result_ref(binding, binding_env, form, env) when is_atom(binding) do
+    case Map.fetch(binding_env, binding) do
+      {:ok, {:refine, _address} = ref} ->
+        {:ok, ref}
+
+      {:ok, ref} ->
+        {:error,
+         Finding.at(
+           env,
+           form,
+           "`emit_result` requires a result-capable binding; #{inspect(binding)} is bound to #{binding_kind(ref)}"
+         )}
+
+      :error ->
+        {:error,
+         Finding.at(env, form, "`emit_result` references unknown binding #{inspect(binding)}")}
+    end
+  end
+
+  defp emit_result_ref(_binding, _binding_env, form, env) do
+    {:error, Finding.at(env, form, "`emit_result` expects a literal binding atom")}
+  end
+
+  defp binding_kind({:node, _address}), do: "agent"
+  defp binding_kind({:map, _address}), do: "map"
 
   defp nested_template_prompt_finding(env, form, context) do
     Finding.at(

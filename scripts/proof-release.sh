@@ -177,8 +177,8 @@ for _ in $(seq 1 100); do
 done
 
 assert_contains "$status" '"state":"completed"' "run completed"
-assert_contains "$status" '"workflow_name":"scheduler-release-proof"' "status workflow name"
-assert_contains "$status" '"event_count":5' "status event count"
+assert_contains "$status" '"treeName":"scheduler-release-proof"' "status tree name"
+assert_contains "$status" '"eventCount":5' "status event count"
 
 echo "-- read run events through API"
 events="$tmpdir/events.json"

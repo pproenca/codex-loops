@@ -8,7 +8,8 @@ defmodule Workflow.RunTest do
 
   alias Workflow.{Run, Journal, Status, IdempotencyKey, Idempotency, Event}
   alias Workflow.Provider.Usage
-  alias Workflow.Test.{EchoProvider, GateProvider}
+  alias Workflow.Scheduler.RunProjection
+  alias Workflow.Test.{EchoProvider, ExplodingProvider, GateProvider, ProviderFailureProvider}
 
   defmodule ActivityProvider do
     @behaviour Workflow.Provider
@@ -49,6 +50,19 @@ defmodule Workflow.RunTest do
     end
   end
 
+  defmodule ConfigurableProvider do
+    @behaviour Workflow.Provider
+
+    @impl true
+    def validate_config(opts), do: Keyword.get(opts, :validate_result, :ok)
+
+    @impl true
+    def run_agent(prompt, _schema, _key, opts) do
+      if sink = Keyword.get(opts, :sink), do: send(sink, {:configurable_provider_called, prompt})
+      {:ok, %{"echo" => prompt}, %Usage{}}
+    end
+  end
+
   defmodule DemoWorkflow do
     use Workflow
 
@@ -62,6 +76,11 @@ defmodule Workflow.RunTest do
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp echo, do: {EchoProvider, [sink: self()]}
+
+  defp assert_no_run_started(id) do
+    assert Journal.fold(id) == []
+    assert Registry.lookup(Workflow.Run.Registry, id) == []
+  end
 
   test "runs the demo end-to-end, committing ordered events and completing" do
     id = run_id()
@@ -82,6 +101,53 @@ defmodule Workflow.RunTest do
 
     # Every event is versioned.
     assert Enum.all?(events, &(&1.schema == Event.schema_version()))
+  end
+
+  test "run and start reject absent or nil providers before journaling" do
+    missing_run = run_id()
+    nil_run = run_id()
+    missing_start = run_id()
+    nil_start = run_id()
+
+    assert {:error, {:usage, :provider}} = Run.run(DemoWorkflow, run_id: missing_run)
+    assert_no_run_started(missing_run)
+
+    assert {:error, {:usage, :provider}} =
+             Run.run(DemoWorkflow, run_id: nil_run, provider: nil)
+
+    assert_no_run_started(nil_run)
+
+    assert {:error, {:usage, :provider}} = Run.start(DemoWorkflow, run_id: missing_start)
+    assert_no_run_started(missing_start)
+
+    assert {:error, {:usage, :provider}} =
+             Run.start(DemoWorkflow, run_id: nil_start, provider: nil)
+
+    assert_no_run_started(nil_start)
+  end
+
+  test "non-provider modules are rejected before acquiring the writer lease" do
+    id = run_id()
+
+    assert {:error, {:provider_config, {:not_a_provider, String}}} =
+             Run.start(DemoWorkflow, run_id: id, provider: {String, []})
+
+    assert_no_run_started(id)
+  end
+
+  test "provider validate_config errors are returned before journaling or calling provider" do
+    id = run_id()
+
+    assert {:error, {:provider_config, {:missing_config, :api_key}}} =
+             Run.run(DemoWorkflow,
+               run_id: id,
+               provider:
+                 {ConfigurableProvider,
+                  [sink: self(), validate_result: {:error, {:missing_config, :api_key}}]}
+             )
+
+    assert_no_run_started(id)
+    refute_received {:configurable_provider_called, _prompt}
   end
 
   test "each agent event records usage, a stable address, and the idempotency key" do
@@ -117,6 +183,104 @@ defmodule Workflow.RunTest do
 
     [folded_agent] = Status.of(id).agents
     assert folded_agent.activity == agent.payload.activity
+  end
+
+  test "expected provider failures are journaled with usage and activity and replay on resume" do
+    id = run_id()
+    detail = %{"code" => 504, "retryable" => true, "messages" => ["deadline"]}
+    usage = %Usage{input_tokens: 4, output_tokens: 1, total_tokens: 5}
+
+    activity = [
+      %{
+        kind: "provider",
+        label: "Provider",
+        summary: "deadline exceeded",
+        status: "failed"
+      }
+    ]
+
+    assert {:error, {:provider_failure, [2], :timeout, ^detail}} =
+             Run.run(DemoWorkflow,
+               run_id: id,
+               provider:
+                 {ProviderFailureProvider,
+                  sink: self(), kind: :timeout, detail: detail, usage: usage, activity: activity}
+             )
+
+    assert_received {:agent_called, "say hello",
+                     %IdempotencyKey{run_id: ^id, node_path: [2], iteration: 0, attempt: 0}}
+
+    refute_received {:agent_called, _, _}
+
+    events = Journal.fold(id)
+
+    assert Enum.map(events, & &1.type) == [
+             :run_started,
+             :phase_entered,
+             :log_emitted,
+             :agent_failed
+           ]
+
+    failed = Enum.find(events, &(&1.type == :agent_failed))
+    assert failed.payload.address == [2]
+    assert failed.payload.iteration == 0
+    assert failed.payload.attempts == 1
+    assert failed.payload.reason == {:provider_failure, :timeout, detail}
+    assert failed.payload.usage == usage
+
+    assert Enum.map(failed.payload.activity, &Map.delete(&1, :activity_index)) == activity
+    assert [%{activity_index: 0}] = failed.payload.activity
+
+    status = Status.of(id)
+    assert status.state == :failed
+    assert status.failure.reason == {:provider_failure, :timeout, detail}
+    assert status.usage == usage
+
+    assert [agent] = status.agents
+    assert agent.status == :failed
+    assert agent.usage == usage
+    assert agent.activity == failed.payload.activity
+    assert agent.provider_failure == %{kind: :timeout, detail: detail}
+
+    public_projection =
+      status
+      |> RunProjection.from_status()
+      |> RunProjection.to_map()
+
+    assert [%{"providerFailure" => %{"kind" => "timeout", "detail" => ^detail}}] =
+             public_projection["agents"]
+
+    assert {:error, {:provider_failure, [2], :timeout, ^detail}} =
+             Run.run(DemoWorkflow, run_id: id, provider: {ExplodingProvider, []})
+
+    assert Journal.fold(id) == events
+    refute_received {:agent_called, _, _}
+  end
+
+  @tag :capture_log
+  test "malformed expected provider failure usage and activity are provider bugs" do
+    missing_total_tokens = run_id()
+
+    assert {:error, {:run_crashed, _reason}} =
+             Run.run(DemoWorkflow,
+               run_id: missing_total_tokens,
+               provider:
+                 {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
+             )
+
+    refute Enum.any?(Journal.fold(missing_total_tokens), &(&1.type == :agent_failed))
+
+    scalar_activity = run_id()
+
+    assert {:error, {:run_crashed, _reason}} =
+             Run.run(DemoWorkflow,
+               run_id: scalar_activity,
+               provider:
+                 {ProviderFailureProvider,
+                  activity: [%{kind: "provider", label: "ok"}, "not an activity object"]}
+             )
+
+    refute Enum.any?(Journal.fold(scalar_activity), &(&1.type == :agent_failed))
   end
 
   test "streamed activity before a settled event uses the serialized append allocator" do

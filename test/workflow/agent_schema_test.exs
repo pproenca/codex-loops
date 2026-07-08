@@ -8,7 +8,15 @@ defmodule Workflow.AgentSchemaTest do
   use ExUnit.Case, async: true
 
   alias Workflow.{Run, Journal, Status, IdempotencyKey}
-  alias Workflow.Test.{ScriptedProvider, FlakyProvider, ExplodingProvider, DedupingProvider}
+  alias Workflow.Provider.Usage
+
+  alias Workflow.Test.{
+    DedupingProvider,
+    ExplodingProvider,
+    FlakyProvider,
+    ProviderFailureProvider,
+    ScriptedProvider
+  }
 
   # A workflow with a single schema-backed agent requiring an object with "label".
   defmodule Classify do
@@ -64,6 +72,54 @@ defmodule Workflow.AgentSchemaTest do
 
     assert types(id) == [:run_started, :agent_committed, :run_completed]
     assert Status.of(id).state == :completed
+  end
+
+  test "schema-backed agents journal expected provider failures without schema retries" do
+    id = run_id()
+    detail = %{"code" => 429, "retry_after_ms" => 1_000}
+    usage_map = %{"input_tokens" => 2, "output_tokens" => 0, "total_tokens" => 2}
+    usage = %Usage{input_tokens: 2, output_tokens: 0, total_tokens: 2}
+
+    activity = [
+      %{
+        kind: "provider",
+        label: "Quota",
+        summary: "quota exhausted",
+        status: "failed"
+      }
+    ]
+
+    assert {:error, {:provider_failure, [0], :quota_exceeded, ^detail}} =
+             Run.run(Classify,
+               run_id: id,
+               provider:
+                 {ProviderFailureProvider,
+                  sink: self(),
+                  kind: :quota_exceeded,
+                  detail: detail,
+                  usage: usage_map,
+                  activity: activity}
+             )
+
+    assert_received {:agent_called, "classify", %Workflow.IdempotencyKey{attempt: 0}}
+    refute_received {:agent_called, _, _}
+
+    assert types(id) == [:run_started, :agent_failed]
+
+    failed = Enum.find(Journal.fold(id), &(&1.type == :agent_failed))
+    assert failed.payload.reason == {:provider_failure, :quota_exceeded, detail}
+    assert failed.payload.usage == usage
+    assert Enum.map(failed.payload.activity, &Map.delete(&1, :activity_index)) == activity
+
+    status = Status.of(id)
+    assert status.state == :failed
+    assert status.failure.reason == {:provider_failure, :quota_exceeded, detail}
+    assert status.usage == usage
+
+    assert [agent] = status.agents
+    assert agent.status == :failed
+    assert agent.usage == usage
+    assert agent.activity == failed.payload.activity
   end
 
   test "invalid output triggers on-thread retry up to the limit, then succeeds" do

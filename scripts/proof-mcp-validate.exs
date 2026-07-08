@@ -420,6 +420,20 @@ defmodule ProofMCPValidate do
         ] do
       assert!(name in names, "tools/list should include #{name}; got #{inspect(names)}")
     end
+
+    status_tool = Enum.find(tools, &(&1["name"] == "workflow_status"))
+    inspect_tool = Enum.find(tools, &(&1["name"] == "workflow_inspect"))
+
+    assert!(
+      status_tool["description"] =~ "§7.5 status projection",
+      "workflow_status metadata should describe the public §7.5 surface"
+    )
+
+    assert!(
+      inspect_tool["description"] =~ "§7.5 inspect/status projection" and
+        inspect_tool["description"] =~ "rawRefs",
+      "workflow_inspect metadata should describe rawRefs-based public projection"
+    )
   end
 
   defp assert_tools_list!(message),
@@ -498,22 +512,23 @@ defmodule ProofMCPValidate do
 
     data = payload["data"]
 
-    assert!(data["run_id"] == run_id, "workflow_status should preserve run id")
+    assert!(data["runId"] == run_id, "workflow_status should preserve run id")
     assert!(data["state"] == "completed", "workflow_status should report completion")
-    assert!(data["workflow_name"] == "mcp-lifecycle-proof", "workflow name should be projected")
+    assert!(data["treeName"] == "mcp-lifecycle-proof", "workflow name should be projected")
     assert!(data["phase"] == "proof", "phase should be projected")
     assert!(data["logs"] == ["mcp lifecycle proof"], "logs should be projected")
-    assert!(data["agent_count"] == 1, "agent_count should be projected")
-    assert!(data["event_count"] == 5, "event_count should be projected")
+    assert!(data["agentCount"] == 1, "agentCount should be projected")
+    assert!(data["eventCount"] == 5, "eventCount should be projected")
     assert!(data["result"] == "ok", "result should be projected")
     assert!(data["failure"] == nil, "failure should be nil for successful run")
-    assert!(data["ui_path"] == "/runs/#{run_id}", "status should include ui_path")
-    assert!(data["ui_url"] == "/runs/#{run_id}", "status should include ui_url")
 
     assert!(
-      data["usage"] == %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+      data["usage"] == %{"inputTokens" => 0, "outputTokens" => 0, "totalTokens" => 0},
       "usage should be projected"
     )
+
+    assert!(not Map.has_key?(data, "uiPath"), "workflow_status should be exact §7.5 data")
+    assert!(not Map.has_key?(data, "events"), "workflow_status should not include events")
   end
 
   defp assert_inspected_events!(response, run_id) do
@@ -524,33 +539,24 @@ defmodule ProofMCPValidate do
       "workflow_inspect should return scheduler envelope"
     )
 
-    assert!(payload["data"]["run_id"] == run_id, "workflow_inspect should preserve run id")
+    data = payload["data"]
 
-    events = payload["data"]["events"]
-    assert!(Enum.map(events, & &1["seq"]) == [0, 1, 2, 3, 4], "events should be ordered")
+    assert!(data["runId"] == run_id, "workflow_inspect should preserve run id")
+    assert!(data["eventCount"] == 5, "workflow_inspect should project event count")
+    assert!(not Map.has_key?(data, "events"), "workflow_inspect should expose §7.5 data")
+
+    raw_refs = get_in(data, ["rawRefs", "journal"])
+    assert!(Enum.map(raw_refs, & &1["seq"]) == [0, 1, 2, 3, 4], "raw refs should be ordered")
 
     assert!(
-      Enum.map(events, & &1["type"]) == [
+      Enum.map(raw_refs, & &1["type"]) == [
         "run_started",
         "phase_entered",
         "log_emitted",
         "agent_committed",
         "run_completed"
       ],
-      "events should preserve scheduler event types"
-    )
-
-    expected_events = [
-      %{"seq" => 0, "type" => "run_started"},
-      %{"seq" => 1, "type" => "phase_entered", "address" => [0]},
-      %{"seq" => 2, "type" => "log_emitted", "address" => [1]},
-      %{"seq" => 3, "type" => "agent_committed", "address" => [2]},
-      %{"seq" => 4, "type" => "run_completed"}
-    ]
-
-    assert!(
-      events == expected_events,
-      "workflow_inspect should return MCP-friendly event projections"
+      "raw refs should preserve journal event types"
     )
   end
 
@@ -640,18 +646,18 @@ defmodule ProofMCPValidate do
 
     data = payload["data"]
 
-    assert!(data["run_id"] == run_id, "workflow_open_ui should preserve run id")
+    assert!(data["runId"] == run_id, "workflow_open_ui should preserve run id")
     assert!(data["state"] == "completed", "workflow_open_ui should include status projection")
     assert!(data["result"] == "ok", "workflow_open_ui should include result")
     assert!(data["failure"] == nil, "workflow_open_ui should include failure")
 
     assert!(
-      data["usage"] == %{"input_tokens" => 0, "output_tokens" => 0, "total_tokens" => 0},
+      data["usage"] == %{"inputTokens" => 0, "outputTokens" => 0, "totalTokens" => 0},
       "workflow_open_ui should include usage"
     )
 
-    assert!(data["ui_path"] == "/runs/#{run_id}", "workflow_open_ui should include ui_path")
-    assert!(data["ui_url"] == "/runs/#{run_id}", "workflow_open_ui should include ui_url")
+    assert!(data["uiPath"] == "/runs/#{run_id}", "workflow_open_ui should include uiPath")
+    assert!(data["uiUrl"] == "/runs/#{run_id}", "workflow_open_ui should include uiUrl")
 
     assert!(
       data["open_url"] == "#{scheduler_url}/runs/#{run_id}",

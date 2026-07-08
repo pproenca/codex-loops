@@ -409,12 +409,12 @@ defmodule ProofMCPLive do
       "workflow_status should return scheduler envelope"
     )
 
-    assert!(data["run_id"] == run_id, "workflow_status should preserve run id")
+    assert!(data["runId"] == run_id, "workflow_status should preserve run id")
     assert!(data["state"] == "completed", "workflow_status should report completion")
-    assert!(data["workflow_name"] == "mcp-live-proof", "workflow name should be projected")
+    assert!(data["treeName"] == "mcp-live-proof", "workflow name should be projected")
     assert!(data["result"] == "ok", "result should be projected")
     assert!(data["failure"] == nil, "failure should be nil for successful run")
-    assert!(data["usage"]["total_tokens"] > 0, "journal-backed usage should be nonzero")
+    assert!(data["usage"]["totalTokens"] > 0, "journal-backed usage should be nonzero")
   end
 
   defp assert_inspected_live_events!(response, run_id) do
@@ -425,9 +425,11 @@ defmodule ProofMCPLive do
       "workflow_inspect should return scheduler envelope"
     )
 
-    assert!(payload["data"]["run_id"] == run_id, "workflow_inspect should preserve run id")
+    data = payload["data"]
 
-    event_types = Enum.map(payload["data"]["events"], & &1["type"])
+    assert!(data["runId"] == run_id, "workflow_inspect should preserve run id")
+
+    event_types = Enum.map(get_in(data, ["rawRefs", "journal"]), & &1["type"])
     assert!("agent_committed" in event_types, "live proof should commit an agent result")
     assert!("run_completed" in event_types, "live proof should complete")
   end

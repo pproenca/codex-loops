@@ -28,6 +28,15 @@ defmodule Workflow.Provider do
   """
 
   @type result :: term()
+  @type failure_kind :: :quota_exceeded | :model_limit | :timeout | :unavailable
+  @type failure_detail ::
+          nil
+          | boolean()
+          | integer()
+          | String.t()
+          | [failure_detail()]
+          | %{optional(String.t()) => failure_detail()}
+
   @type activity :: [
           %{
             optional(:kind) => String.t(),
@@ -45,9 +54,28 @@ defmodule Workflow.Provider do
             ) ::
               {:ok, result(), Workflow.Provider.Usage.t()}
               | {:ok, result(), Workflow.Provider.Usage.t(), activity()}
+              | {:error,
+                 {:provider_failure, failure_kind(), failure_detail(),
+                  Workflow.Provider.Usage.t() | map() | nil, activity()}}
 
   @typedoc "A resolved backend: the provider module plus its opaque per-run opts."
   @type t :: {module(), term()}
+
+  @callback validate_config(opts :: term()) :: :ok | {:error, term()}
+  @optional_callbacks validate_config: 1
+
+  @spec resolve(t() | nil | term()) ::
+          {:ok, t()} | {:error, {:usage, :provider} | {:provider_config, term()}}
+  def resolve(nil), do: {:error, {:usage, :provider}}
+
+  def resolve({module, opts}) when is_atom(module) do
+    with :ok <- ensure_provider(module),
+         :ok <- validate_provider_config(module, opts) do
+      {:ok, {module, opts}}
+    end
+  end
+
+  def resolve(other), do: {:error, {:provider_config, {:not_a_provider, other}}}
 
   @doc """
   Resolve a backend name (the `--provider` flag) into a `{module, opts}` port the
@@ -58,6 +86,26 @@ defmodule Workflow.Provider do
   @spec select(:mock | :codex, keyword()) :: t()
   def select(:mock, opts), do: {Workflow.Provider.Mock, opts}
   def select(:codex, opts), do: {Workflow.Provider.Codex, opts}
+
+  defp ensure_provider(module) do
+    with {:module, ^module} <- Code.ensure_loaded(module),
+         true <- function_exported?(module, :run_agent, 4) do
+      :ok
+    else
+      _not_a_provider -> {:error, {:provider_config, {:not_a_provider, module}}}
+    end
+  end
+
+  defp validate_provider_config(module, opts) do
+    if function_exported?(module, :validate_config, 1) do
+      case module.validate_config(opts) do
+        :ok -> :ok
+        {:error, reason} -> {:error, {:provider_config, reason}}
+      end
+    else
+      :ok
+    end
+  end
 end
 
 defmodule Workflow.Provider.Usage do

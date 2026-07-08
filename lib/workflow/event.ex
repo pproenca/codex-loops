@@ -22,6 +22,8 @@ defmodule Workflow.Event do
           schema: pos_integer()
         }
 
+  alias Workflow.Refine.ReviewerAdapter
+
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema
 
@@ -143,14 +145,23 @@ defmodule Workflow.Event do
   structured output). This is the run's terminal event on the fail path — there is
   no `run_completed`.
   """
-  def agent_failed(%Workflow.Node.Agent{} = node, iteration, attempts, reason) do
+  def agent_failed(
+        %Workflow.Node.Agent{} = node,
+        iteration,
+        attempts,
+        reason,
+        usage \\ nil,
+        activity \\ []
+      ) do
     %__MODULE__{
       type: :agent_failed,
       payload: %{
         address: node.address,
         iteration: iteration,
         attempts: attempts,
-        reason: reason
+        reason: reason,
+        usage: usage,
+        activity: activity
       }
     }
   end
@@ -292,8 +303,10 @@ defmodule Workflow.Event do
         reviewer_timeout_ms: node.reviewer_timeout_ms,
         reviewers: Enum.map(node.reviewers, &reviewer_descriptor/1),
         reviser: agent_descriptor(node.reviser),
+        gates: gate_descriptors(node),
         artifact_schema_version: 1,
-        review_schema_version: 1
+        review_schema_version: 1,
+        review_adapter_versions: review_adapter_versions(node.reviewers)
       }
     }
   end
@@ -317,9 +330,33 @@ defmodule Workflow.Event do
             :total,
             :reviewer_decisions,
             :artifact,
-            :open_findings
+            :open_findings,
+            :role_failures,
+            :failed_reviewers,
+            :report_snippets,
+            :cold_read
           ])
         )
+    }
+  end
+
+  def refine_role_failed(role_failure) when is_map(role_failure) do
+    %__MODULE__{
+      type: :refine_role_failed,
+      payload:
+        Map.take(role_failure, [
+          :address,
+          :role,
+          :role_address,
+          :round,
+          :reviewer,
+          :reviewer_index,
+          :attempts,
+          :reason,
+          :detail,
+          :usage,
+          :activity
+        ])
     }
   end
 
@@ -334,7 +371,11 @@ defmodule Workflow.Event do
             :final_round,
             :rounds,
             :artifact,
-            :open_findings
+            :open_findings,
+            :role_failures,
+            :failed_reviewers,
+            :report_snippets,
+            :cold_read
           ])
         )
     }
@@ -347,12 +388,32 @@ defmodule Workflow.Event do
         Map.merge(
           %{address: node.address, reason: :max_rounds},
           Map.take(attrs, [
+            :reason,
             :final_round,
             :rounds,
             :artifact,
-            :open_findings
+            :open_findings,
+            :role_failures,
+            :failed_reviewers,
+            :report_snippets,
+            :cold_read
           ])
         )
+    }
+  end
+
+  def refine_gate_evaluated(%Workflow.Node.Refine{} = node, gate, predicate, opts)
+      when gate in [:cold_read, :repair, :halt] do
+    %__MODULE__{
+      type: :refine_gate_evaluated,
+      payload: %{
+        address: node.address,
+        gate: gate,
+        predicate: predicate,
+        result: Keyword.fetch!(opts, :result),
+        input_round: Keyword.fetch!(opts, :input_round),
+        input_refs: Keyword.get(opts, :input_refs, [])
+      }
     }
   end
 
@@ -380,9 +441,38 @@ defmodule Workflow.Event do
     }
   end
 
-  defp reviewer_descriptor(%{index: index, name: name, agent: agent}) do
+  defp reviewer_descriptor(%{index: index, name: name, agent: agent} = reviewer) do
     agent_descriptor(agent)
-    |> Map.merge(%{index: index, name: name})
+    |> Map.merge(%{
+      index: index,
+      name: name,
+      adapter: Map.get(reviewer, :adapter, ReviewerAdapter.default())
+    })
+  end
+
+  defp gate_descriptors(%Workflow.Node.Refine{gates: gates}) when map_size(gates) == 0, do: %{}
+
+  defp gate_descriptors(%Workflow.Node.Refine{gates: gates}) do
+    %{}
+    |> maybe_put_gate(:cold_read, gates, fn %{predicate: predicate, reviewer: reviewer} ->
+      %{predicate: predicate, descriptor: reviewer_descriptor(reviewer)}
+    end)
+    |> maybe_put_gate(:repair, gates, fn %{predicate: predicate, agent: agent} ->
+      %{predicate: predicate, descriptor: agent_descriptor(agent)}
+    end)
+    |> maybe_put_gate(:halt, gates, fn %{predicate: predicate} -> %{predicate: predicate} end)
+  end
+
+  defp maybe_put_gate(acc, key, gates, fun) do
+    case Map.fetch(gates, key) do
+      {:ok, gate} -> Map.put(acc, key, fun.(gate))
+      :error -> acc
+    end
+  end
+
+  defp review_adapter_versions(_reviewers) do
+    ReviewerAdapter.all()
+    |> Map.new(&{&1, ReviewerAdapter.version(&1)})
   end
 
   @doc """

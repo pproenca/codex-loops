@@ -7,7 +7,7 @@ defmodule Workflow.MCP.Stdio do
   scheduler HTTP API.
   """
 
-  alias Workflow.MCP.{Lifecycle, SchedulerClient}
+  alias Workflow.MCP.{Lifecycle, ProjectionEnvelope, SchedulerClient}
 
   @protocol_version "2024-11-05"
   @api_version "codex-loops.mcp.v1"
@@ -191,7 +191,7 @@ defmodule Workflow.MCP.Stdio do
 
   defp call_tool(%{"name" => "workflow_status", "arguments" => %{"run_id" => run_id}}, state)
        when is_binary(run_id) and byte_size(run_id) > 0 do
-    call_scheduler_tool(state, fn -> SchedulerClient.get_run(run_id) end)
+    call_scheduler_projection_tool(state, fn -> SchedulerClient.get_run(run_id) end)
   end
 
   defp call_tool(%{"name" => "workflow_status", "arguments" => arguments}, state) do
@@ -212,7 +212,7 @@ defmodule Workflow.MCP.Stdio do
 
   defp call_tool(%{"name" => "workflow_inspect", "arguments" => %{"run_id" => run_id}}, state)
        when is_binary(run_id) and byte_size(run_id) > 0 do
-    call_scheduler_tool(state, fn -> SchedulerClient.get_run_events(run_id) end)
+    call_scheduler_projection_tool(state, fn -> SchedulerClient.get_run_events(run_id) end)
   end
 
   defp call_tool(%{"name" => "workflow_inspect", "arguments" => arguments}, state) do
@@ -306,6 +306,16 @@ defmodule Workflow.MCP.Stdio do
     end
   end
 
+  defp call_scheduler_projection_tool(state, scheduler_fun) when is_function(scheduler_fun, 0) do
+    with {:ok, state} <- Lifecycle.ensure_ready(state) do
+      scheduler_fun.()
+      |> scheduler_projection_tool_response(state)
+    else
+      {:error, envelope, state} ->
+        {:ok, tool_result(envelope, true), state}
+    end
+  end
+
   defp call_open_ui_tool(state, run_id) do
     with {:ok, state} <- Lifecycle.ensure_ready(state) do
       case SchedulerClient.get_run(run_id) do
@@ -345,6 +355,12 @@ defmodule Workflow.MCP.Stdio do
 
     {:ok, tool_result(envelope, true), state}
   end
+
+  defp scheduler_projection_tool_response({:ok, envelope}, state) do
+    {:ok, envelope |> ProjectionEnvelope.conform() |> tool_result(false), state}
+  end
+
+  defp scheduler_projection_tool_response(other, state), do: scheduler_tool_response(other, state)
 
   defp invalid_tool_params(reason, nil, state) do
     {:error, -32602, "Invalid params", %{"reason" => reason}, state}
@@ -419,7 +435,7 @@ defmodule Workflow.MCP.Stdio do
   defp workflow_status_tool do
     %{
       "name" => "workflow_status",
-      "description" => "Read a scheduler run projection through GET /api/runs/:id.",
+      "description" => "Read the public §7.5 status projection through GET /api/runs/:id.",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
@@ -438,7 +454,7 @@ defmodule Workflow.MCP.Stdio do
     %{
       "name" => "workflow_inspect",
       "description" =>
-        "Read ordered scheduler event projections through GET /api/runs/:id/events.",
+        "Read the public §7.5 inspect/status projection with ordered rawRefs through GET /api/runs/:id/events.",
       "inputSchema" => %{
         "type" => "object",
         "properties" => %{
@@ -561,7 +577,8 @@ defmodule Workflow.MCP.Stdio do
   end
 
   defp open_ui_envelope(projection) do
-    ui_url = projection["ui_url"] || projection["ui_path"]
+    ui_url =
+      projection["uiUrl"] || projection["uiPath"] || projection["ui_url"] || projection["ui_path"]
 
     %{
       "api_version" => @api_version,

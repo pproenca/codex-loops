@@ -287,9 +287,25 @@ defmodule Workflow.QualityRunTest do
     assert decision.open_findings == []
 
     assert decision.reviewer_decisions == [
-             %{reviewer: :spec, reviewer_index: 0, approved: true, clear: true},
-             %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+             %{
+               reviewer: :spec,
+               reviewer_index: 0,
+               approved: true,
+               clear: true,
+               adapter: :findings_v1,
+               status: :completed
+             },
+             %{
+               reviewer: :runtime,
+               reviewer_index: 1,
+               approved: true,
+               clear: true,
+               adapter: :findings_v1,
+               status: :completed
+             }
            ]
+
+    assert decision.report_snippets == []
 
     completed = event(id, :refine_completed).payload
     assert completed.converged == true

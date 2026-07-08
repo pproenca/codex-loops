@@ -35,17 +35,18 @@ It exposes:
   `provider` (`mock` or `codex`), and optional non-negative integer `budget`.
   The scheduler API defaults to `mock`; selecting `codex` spends a real Codex
   provider turn.
-- `workflow_status`: reads the scheduler projection through
-  `GET /api/runs/:id`, preserving run id, state, result, failure, usage, and UI
-  link fields.
-- `workflow_inspect`: reads ordered scheduler event projections through
-  `GET /api/runs/:id/events`, preserving the scheduler event sequence, type, and
-  public address fields.
+- `workflow_status`: reads `GET /api/runs/:id` and returns the public §7.5
+  status projection: `runId`, state, result, failure, usage, agents/rejections,
+  refine summaries, tool activity, and ordered `rawRefs`.
+- `workflow_inspect`: reads `GET /api/runs/:id/events` and returns the public
+  §7.5 inspect/status projection with ordered `rawRefs.journal`; lower-level
+  event rows and scheduler-only UI/lifecycle fields are not part of this MCP
+  surface.
 - `workflow_resume`: resumes an existing scheduler-owned run through
   `POST /api/runs/:id/resume`. Inputs are `run_id`, optional `script_path` or
   scheduler-supported `script` alias, and optional `provider` (`mock` or
   `codex`).
-- `workflow_open_ui`: reads the run projection and returns `ui_path`, `ui_url`,
+- `workflow_open_ui`: reads the scheduler run projection and returns `uiPath`, `uiUrl`,
   and an absolute `open_url` for the Phoenix LiveView run page.
 
 Before the tool call, the MCP adapter checks `GET /api/health`. If the scheduler

@@ -47,10 +47,12 @@ MCP behavior:
   release before retrying the operation
 - `workflow_start` calls `POST /api/runs` and returns the scheduler success or
   error envelope exactly as MCP `structuredContent`
-- `workflow_status` calls `GET /api/runs/:id` and returns the scheduler
-  projection exactly as MCP `structuredContent`
-- `workflow_inspect` calls `GET /api/runs/:id/events` and returns the ordered
-  scheduler event projection exactly as MCP `structuredContent`
+- `workflow_status` calls `GET /api/runs/:id` and returns the §7.5 conforming
+  status projection as MCP `structuredContent`; scheduler-only lifecycle/UI
+  fields are omitted from this public status surface
+- `workflow_inspect` calls `GET /api/runs/:id/events` and returns the §7.5
+  conforming inspect/status projection as MCP `structuredContent`, including
+  ordered `rawRefs.journal` instead of the lower-level `events` rows
 - `workflow_resume` calls `POST /api/runs/:id/resume` and returns the scheduler
   success or error envelope exactly as MCP `structuredContent`
 - `workflow_open_ui` calls `GET /api/runs/:id` and returns an MCP envelope with

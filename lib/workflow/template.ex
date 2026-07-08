@@ -1,18 +1,33 @@
 defmodule Workflow.Template do
   @moduledoc """
-  An inert `~P` template: literal segments plus ordered assign names.
+  An inert `~P` template: literal segments plus parsed holes.
 
-  Parsing is a hand-rolled binary scanner. Only `<%= @name %>` holes are
-  admitted; the template language has no expressions, control flow, or
-  interpolation.
+  Parsing is a hand-rolled binary scanner. Only `<%= @name %>` and the adopted
+  formatter holes are admitted; the template language has no expressions,
+  control flow, or interpolation.
   """
 
   alias Workflow.Compiler.Finding
+  alias __MODULE__.Hole
 
-  @enforce_keys [:segments, :assigns]
-  defstruct [:segments, :assigns]
+  defmodule Hole do
+    @moduledoc "A parsed, inert template hole."
 
-  @type t :: %__MODULE__{segments: [String.t()], assigns: [String.t()]}
+    @enforce_keys [:op, :assign, :args]
+    defstruct [:op, :assign, :args]
+
+    @type op :: :identity | :path | :flatten | :count | :numbered_findings | :truncate
+    @type t :: %__MODULE__{op: op(), assign: String.t(), args: map()}
+  end
+
+  @enforce_keys [:segments, :holes, :assigns]
+  defstruct [:segments, :holes, :assigns]
+
+  @type t :: %__MODULE__{
+          segments: [String.t()],
+          holes: [Hole.t()],
+          assigns: [String.t()]
+        }
 
   @spec parse(String.t(), Macro.Env.t()) :: {:ok, t()} | {:error, Finding.t()}
   def parse(source, env) when is_binary(source) do
@@ -22,26 +37,28 @@ defmodule Workflow.Template do
          hint: "use `<%= @name %>` holes over `let` bindings"
        )}
     else
-      scan(source, [], [], env)
+      scan(source, [], [], [], env)
     end
   end
 
   @spec to_parts(t(), %{atom() => Workflow.Node.binding_ref()}) :: [Workflow.RenderText.part()]
-  def to_parts(%__MODULE__{segments: segments, assigns: assigns}, bindings) do
+  def to_parts(%__MODULE__{segments: segments, holes: holes}, bindings) do
     [head | tail] = segments
 
-    Enum.zip(assigns, tail)
-    |> Enum.reduce([{:text, head}], fn {name, segment}, parts ->
-      parts ++ [binding_part(fetch_binding!(name, bindings)), {:text, segment}]
+    Enum.zip(holes, tail)
+    |> Enum.reduce([{:text, head}], fn {%Hole{} = hole, segment}, parts ->
+      ref = fetch_binding!(hole.assign, bindings)
+      parts ++ [hole_part(hole, binding_part(ref)), {:text, segment}]
     end)
   end
 
-  defp scan(source, segments, assigns, env) do
+  defp scan(source, segments, holes, assigns, env) do
     case :binary.match(source, "<%") do
       :nomatch ->
         {:ok,
          %__MODULE__{
            segments: Enum.reverse([source | segments]),
+           holes: Enum.reverse(holes),
            assigns: Enum.reverse(assigns)
          }}
 
@@ -68,14 +85,23 @@ defmodule Workflow.Template do
                     byte_size(hole_and_tail) - close_index - 2
                   )
 
-                with {:ok, assign} <- parse_hole(String.trim(hole), env) do
-                  scan(remaining, [literal | segments], [assign | assigns], env)
+                with {:ok, %Hole{} = parsed} <- parse_hole(trim_template_ws(hole), env) do
+                  scan(
+                    remaining,
+                    [literal | segments],
+                    [parsed | holes],
+                    [parsed.assign | assigns],
+                    env
+                  )
                 end
             end
 
           _other ->
             {:error,
-             Finding.at(env, nil, "only `<%= @name %>` holes are allowed in `~P` templates",
+             Finding.at(
+               env,
+               nil,
+               "only `<%= @name %>` or closed formatter holes are allowed in `~P` templates",
                hint: "statement, comment, and other raw `<% ... %>` tags are not allowed"
              )}
         end
@@ -97,14 +123,176 @@ defmodule Workflow.Template do
   defp parse_hole(hole, env) do
     case Regex.run(~r/^@([a-zA-Z_][a-zA-Z0-9_]*)$/, hole) do
       [_, assign] ->
-        {:ok, assign}
+        {:ok, %Hole{op: :identity, assign: assign, args: %{}}}
 
       _ ->
+        parse_formatter_hole(hole, env)
+    end
+  end
+
+  defp parse_formatter_hole(hole, env) do
+    formatter =
+      Regex.run(
+        ~r/\A([a-z_][a-z0-9_]*)[ \t\r\n]*\([ \t\r\n]*@([A-Za-z_][A-Za-z0-9_]*)(?:[ \t\r\n]*,[ \t\r\n]*(.*))?[ \t\r\n]*\)\z/s,
+        hole
+      )
+
+    case formatter do
+      [_, op, assign] -> formatter_hole(op, assign, nil, env)
+      [_, op, assign, arg] -> formatter_hole(op, assign, trim_template_ws(arg), env)
+      _other -> unsupported_hole(env)
+    end
+  end
+
+  defp formatter_hole("path", assign, arg, env) when is_binary(arg) do
+    with {:ok, pointer} <- pointer_arg(arg, env) do
+      {:ok, %Hole{op: :path, assign: assign, args: %{pointer: pointer}}}
+    end
+  end
+
+  defp formatter_hole("flatten", assign, nil, _env),
+    do: {:ok, %Hole{op: :flatten, assign: assign, args: %{pointer: ""}}}
+
+  defp formatter_hole("flatten", assign, arg, env) when is_binary(arg) do
+    with {:ok, pointer} <- pointer_arg(arg, env) do
+      {:ok, %Hole{op: :flatten, assign: assign, args: %{pointer: pointer}}}
+    end
+  end
+
+  defp formatter_hole("count", assign, nil, _env),
+    do: {:ok, %Hole{op: :count, assign: assign, args: %{pointer: ""}}}
+
+  defp formatter_hole("count", assign, arg, env) when is_binary(arg) do
+    with {:ok, pointer} <- pointer_arg(arg, env) do
+      {:ok, %Hole{op: :count, assign: assign, args: %{pointer: pointer}}}
+    end
+  end
+
+  defp formatter_hole("numbered_findings", assign, nil, _env),
+    do: {:ok, %Hole{op: :numbered_findings, assign: assign, args: %{pointer: ""}}}
+
+  defp formatter_hole("numbered_findings", assign, arg, env) when is_binary(arg) do
+    with {:ok, pointer} <- pointer_arg(arg, env) do
+      {:ok, %Hole{op: :numbered_findings, assign: assign, args: %{pointer: pointer}}}
+    end
+  end
+
+  defp formatter_hole("truncate", assign, arg, env) when is_binary(arg) do
+    with {:ok, max_bytes} <- non_negative_integer_arg(arg, env) do
+      {:ok, %Hole{op: :truncate, assign: assign, args: %{max_bytes: max_bytes}}}
+    end
+  end
+
+  defp formatter_hole(_op, _assign, _arg, env), do: unsupported_hole(env)
+
+  defp pointer_arg(source, env) do
+    with {:ok, pointer} <- quoted_string(source),
+         :ok <- validate_json_pointer(pointer) do
+      {:ok, pointer}
+    else
+      _error ->
         {:error,
-         Finding.at(env, nil, "only `<%= @name %>` holes are allowed in `~P` templates",
-           hint: "bind a producer with `let :name = ...`, then reference it as `<%= @name %>`"
+         Finding.at(env, nil, "invalid JSON pointer in template formatter",
+           hint: "use an empty pointer or one that starts with `/` and only escapes `~0` and `~1`"
          )}
     end
+  end
+
+  defp quoted_string(<<"\"", rest::binary>>), do: quoted_string(rest, [])
+  defp quoted_string(_other), do: :error
+
+  defp quoted_string(<<"\"">>, acc), do: {:ok, IO.iodata_to_binary(Enum.reverse(acc))}
+  defp quoted_string(<<"\"", _rest::binary>>, _acc), do: :error
+  defp quoted_string(<<"\\\"", rest::binary>>, acc), do: quoted_string(rest, ["\"" | acc])
+  defp quoted_string(<<"\\\\", rest::binary>>, acc), do: quoted_string(rest, ["\\" | acc])
+  defp quoted_string(<<"\\", _rest::binary>>, _acc), do: :error
+
+  defp quoted_string(<<char::utf8, rest::binary>>, acc),
+    do: quoted_string(rest, [<<char::utf8>> | acc])
+
+  defp quoted_string(_invalid, _acc), do: :error
+
+  defp validate_json_pointer(""), do: :ok
+
+  defp validate_json_pointer(<<"/", rest::binary>>) do
+    if valid_pointer_escapes?(rest), do: :ok, else: :error
+  end
+
+  defp validate_json_pointer(_other), do: :error
+
+  defp valid_pointer_escapes?(<<>>), do: true
+  defp valid_pointer_escapes?(<<"~0", rest::binary>>), do: valid_pointer_escapes?(rest)
+  defp valid_pointer_escapes?(<<"~1", rest::binary>>), do: valid_pointer_escapes?(rest)
+  defp valid_pointer_escapes?(<<"~", _rest::binary>>), do: false
+  defp valid_pointer_escapes?(<<_char::utf8, rest::binary>>), do: valid_pointer_escapes?(rest)
+
+  defp non_negative_integer_arg(source, env) do
+    source = trim_template_ws(source)
+
+    if integer_literal?(source) do
+      {:ok, integer_literal_value(source)}
+    else
+      {:error,
+       Finding.at(env, nil, "truncate formatter expects a non-negative integer",
+         hint: "write `truncate(@name, 4000)`"
+       )}
+    end
+  end
+
+  defp trim_template_ws(source) do
+    source
+    |> trim_leading_template_ws()
+    |> trim_trailing_template_ws()
+  end
+
+  defp trim_leading_template_ws(<<char, rest::binary>>) when char in [?\s, ?\t, ?\n, ?\r],
+    do: trim_leading_template_ws(rest)
+
+  defp trim_leading_template_ws(source), do: source
+
+  defp trim_trailing_template_ws(source), do: trim_trailing_template_ws(source, byte_size(source))
+  defp trim_trailing_template_ws(source, 0), do: source
+
+  defp trim_trailing_template_ws(source, size) do
+    prefix_size = size - 1
+    <<rest::binary-size(prefix_size), char>> = source
+
+    if char in [?\s, ?\t, ?\n, ?\r] do
+      trim_trailing_template_ws(rest, byte_size(rest))
+    else
+      source
+    end
+  end
+
+  defp integer_literal?(source) do
+    Regex.match?(
+      ~r/\A(?:[0-9](?:_?[0-9])*|0x[0-9A-Fa-f](?:_?[0-9A-Fa-f])*|0o[0-7](?:_?[0-7])*|0b[01](?:_?[01])*)\z/,
+      source
+    )
+  end
+
+  defp integer_literal_value("0x" <> digits),
+    do: digits |> strip_separators() |> String.to_integer(16)
+
+  defp integer_literal_value("0o" <> digits),
+    do: digits |> strip_separators() |> String.to_integer(8)
+
+  defp integer_literal_value("0b" <> digits),
+    do: digits |> strip_separators() |> String.to_integer(2)
+
+  defp integer_literal_value(digits), do: digits |> strip_separators() |> String.to_integer(10)
+
+  defp strip_separators(source), do: String.replace(source, "_", "")
+
+  defp unsupported_hole(env) do
+    {:error,
+     Finding.at(
+       env,
+       nil,
+       "only `<%= @name %>` or closed formatter holes are allowed in `~P` templates",
+       hint:
+         "use `@name`, `path`, `flatten`, `count`, `numbered_findings`, or `truncate` over an assign"
+     )}
   end
 
   defp fetch_binding!(name, bindings) do
@@ -117,4 +305,7 @@ defmodule Workflow.Template do
   defp binding_part({:node, _address} = ref), do: {:bound_value, ref}
   defp binding_part({:refine, _address} = ref), do: {:bound_value, ref}
   defp binding_part({:map, _address} = ref), do: {:bound_list, ref}
+
+  defp hole_part(%Hole{op: :identity}, value_part), do: value_part
+  defp hole_part(%Hole{} = hole, value_part), do: {:formatter, hole, value_part}
 end

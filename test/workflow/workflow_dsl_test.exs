@@ -110,7 +110,7 @@ defmodule Workflow.DSLTest do
     """
 
     err = assert_raise Workflow.CompileError, fn -> Code.compile_string(source, "wf.ex") end
-    assert err.message =~ "must terminate with `return` or `emit`"
+    assert err.message =~ "must terminate with `return`, `emit`, or `emit_result`"
   end
 
   defp contains_function?(term) when is_function(term), do: true

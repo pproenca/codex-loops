@@ -44,7 +44,8 @@ require 'Interpolated prompt `agent("do #{x}")`'
 require "Unbound dataflow assign"
 require "Template in a nested position"
 require 'It MUST keep `gather` and `map`'
-require 'out of the accepted surface until those DEFER sections are promoted'
+require 'out of the accepted surface until'
+require 'those DEFER sections are promoted'
 
 forbid "## 10. Proposed extensions — Tier-1 dataflow (NOT YET IMPLEMENTED)"
 forbid "the entire dataflow surface remains unimplemented"

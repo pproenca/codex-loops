@@ -22,6 +22,7 @@ defmodule Workflow.Ledger do
   """
 
   alias Workflow.{Journal, Event}
+  alias Workflow.Provider.Usage
 
   defstruct total: nil, spent: 0
 
@@ -47,10 +48,15 @@ defmodule Workflow.Ledger do
   defp apply_event(%Event{type: :run_started, payload: %{budget: budget}}, ledger),
     do: %{ledger | total: budget}
 
-  # Both a committed turn and a rejected fail-closed attempt are *paid* provider
-  # usage, so each counts against the budget.
-  defp apply_event(%Event{type: type, payload: %{usage: usage}}, ledger)
-       when type in [:agent_committed, :agent_attempt_rejected],
+  # Committed turns, rejected fail-closed attempts, and expected provider failures
+  # with non-nil usage are paid provider effects, so each counts against the budget.
+  defp apply_event(%Event{type: type, payload: %{usage: %Usage{} = usage}}, ledger)
+       when type in [
+              :agent_committed,
+              :agent_attempt_rejected,
+              :agent_failed,
+              :refine_role_failed
+            ],
        do: %{ledger | spent: ledger.spent + usage.total_tokens}
 
   # Structural markers, logs, terminal failure, completion: no budget movement.

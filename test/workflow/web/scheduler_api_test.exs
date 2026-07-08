@@ -401,7 +401,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     case json_response(conn, 200) do
       %{
         "data" => %{
-          "run_id" => ^id,
+          "runId" => ^id,
           "events" => [
             _run_started,
             _phase_entered,
@@ -490,9 +490,9 @@ defmodule Workflow.Web.SchedulerAPITest do
       assert %{
                "state" => "completed",
                "usage" => %{
-                 "input_tokens" => 7,
-                 "output_tokens" => 11,
-                 "total_tokens" => 18
+                 "inputTokens" => 7,
+                 "outputTokens" => 11,
+                 "totalTokens" => 18
                },
                "result" => "ok"
              } = wait_for_api_projection(id)
@@ -510,23 +510,39 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert %{"data" => %{"run_id" => ^id}} = json_response(conn, 200)
 
     assert %{
-             "run_id" => ^id,
+             "runId" => ^id,
              "state" => "completed",
-             "workflow_name" => "scheduler-api-demo",
+             "treeName" => "scheduler-api-demo",
+             "workflowName" => "scheduler-api-demo",
              "phase" => "draft",
              "logs" => ["ready"],
-             "agent_count" => 1,
-             "event_count" => 5,
+             "agentCount" => 1,
+             "eventCount" => 5,
              "usage" => %{
-               "input_tokens" => 0,
-               "output_tokens" => 0,
-               "total_tokens" => 0
+               "inputTokens" => 0,
+               "outputTokens" => 0,
+               "totalTokens" => 0
              },
              "result" => "ok",
              "failure" => nil,
-             "ui_path" => "/runs/" <> ^id,
-             "ui_url" => "/runs/" <> ^id
+             "agents" => [%{"address" => [2], "status" => "completed"}],
+             "rejected" => [],
+             "verifications" => [],
+             "judgments" => [],
+             "refines" => [],
+             "toolActivity" => [],
+             "rawRefs" => %{"journal" => raw_refs},
+             "uiPath" => "/runs/" <> ^id,
+             "uiUrl" => "/runs/" <> ^id
            } = wait_for_api_projection(id)
+
+    assert Enum.map(raw_refs, & &1["type"]) == [
+             "run_started",
+             "phase_entered",
+             "log_emitted",
+             "agent_committed",
+             "run_completed"
+           ]
   end
 
   @tag :capture_log
@@ -542,7 +558,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
     assert %{
              "state" => "completed",
-             "lifecycle_action" => %{
+             "lifecycleAction" => %{
                "action" => "none",
                "label" => "No lifecycle action",
                "enabled" => false,
@@ -570,7 +586,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert %{
              "data" => %{
                "state" => "running",
-               "lifecycle_action" => %{
+               "lifecycleAction" => %{
                  "action" => "pause_unavailable",
                  "label" => "Pause unavailable",
                  "enabled" => false,
@@ -587,7 +603,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert %{
              "data" => %{
                "state" => "running",
-               "lifecycle_action" => resume_action
+               "lifecycleAction" => resume_action
              }
            } = json_response(conn, 200)
 
@@ -623,7 +639,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert %{
              "data" => %{
                "state" => "running",
-               "lifecycle_action" => %{
+               "lifecycleAction" => %{
                  "action" => "resume_unavailable",
                  "label" => "Resume unavailable",
                  "enabled" => false,
@@ -651,7 +667,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert %{
              "api_version" => "scheduler.v1",
              "data" => %{
-               "run_id" => ^id,
+               "runId" => ^id,
                "events" => events
              }
            } = wait_for_api_events(id)
@@ -702,7 +718,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
     assert %{
              "data" => %{
-               "run_id" => ^id,
+               "runId" => ^id,
                "events" => [
                  %{"type" => "run_started"},
                  %{"type" => "phase_entered"},
@@ -752,8 +768,8 @@ defmodule Workflow.Web.SchedulerAPITest do
 
     projection = get(json_conn(), "/api/runs/#{id}") |> json_response(200) |> Map.fetch!("data")
     assert projection["state"] == "completed"
-    assert projection["event_count"] == length(after_events)
-    assert projection["event_count"] == length(Journal.fold(id))
+    assert projection["eventCount"] == length(after_events)
+    assert projection["eventCount"] == length(Journal.fold(id))
     assert projection["result"] == "ok"
   end
 
@@ -935,7 +951,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
 
     projection = wait_for_api_projection(id)
-    assert projection["event_count"] == 4
+    assert projection["eventCount"] == 4
 
     conn = get(json_conn(), "/api/runs/#{id}/events")
     assert %{"data" => %{"events" => events}} = json_response(conn, 200)

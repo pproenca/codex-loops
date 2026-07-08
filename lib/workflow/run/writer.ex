@@ -44,11 +44,16 @@ defmodule Workflow.Run.Writer do
     Template
   }
 
+  alias Workflow.Refine.{Gate, ReviewerAdapter}
+  alias Workflow.Refine.Result, as: RefineResult
+  alias Workflow.Provider.Usage
+
   alias Workflow.Node.{
     Phase,
     Log,
     Agent,
     Emit,
+    EmitResult,
     Return,
     Parallel,
     Pipeline,
@@ -70,33 +75,11 @@ defmodule Workflow.Run.Writer do
     "required" => ["artifact"]
   }
 
-  @refine_review_schema %{
-    "type" => "object",
-    "additionalProperties" => false,
-    "properties" => %{
-      "approved" => %{"type" => "boolean"},
-      "findings" => %{
-        "type" => "array",
-        "items" => %{
-          "type" => "object",
-          "additionalProperties" => false,
-          "properties" => %{
-            "id" => %{"type" => "string"},
-            "blocking" => %{"type" => "boolean"},
-            "issue" => %{"type" => "string"},
-            "fix" => %{"type" => "string"}
-          },
-          "required" => ["id", "blocking", "issue", "fix"]
-        }
-      }
-    },
-    "required" => ["approved", "findings"]
-  }
-
   # The agent turn is capped by `retries` on-thread, so a bounded fan-out timeout is
   # unnecessary; concurrent branches simply wait on their (mock or real) provider.
   @fanout_timeout :infinity
   @default_refine_reviewer_timeout 30_000
+  @provider_failure_kinds [:quota_exceeded, :model_limit, :timeout, :unavailable]
 
   def start_link(opts) do
     run_id = Keyword.fetch!(opts, :run_id)
@@ -147,8 +130,19 @@ defmodule Workflow.Run.Writer do
   defp failed_run_result(%{reason: {:did_not_converge, address, reason}}),
     do: {:error, {:did_not_converge, address, reason}}
 
+  defp failed_run_result(%{address: address, reason: {:provider_failure, kind, detail}}),
+    do: {:error, {:provider_failure, address, kind, detail}}
+
   defp failed_run_result(failure),
     do: {:error, {:malformed_output, failure.address, failure.reason}}
+
+  defp failed_turn_result(%Agent{address: address}, reason),
+    do: failed_turn_result(address, reason)
+
+  defp failed_turn_result(address, {:provider_failure, kind, detail}),
+    do: {:provider_failure, address, kind, detail}
+
+  defp failed_turn_result(address, reason), do: {:malformed_output, address, reason}
 
   defp run_tree(run_id, tree, provider, prior, budget, script_path) do
     seq = Journal.last_seq(run_id) + 1
@@ -207,6 +201,17 @@ defmodule Workflow.Run.Writer do
     {:cont, %{ctx | return: rendered}}
   end
 
+  defp run_node(%EmitResult{ref: {:refine, address}} = node, run_id, _provider, _prior, ctx) do
+    case RefineResult.of(run_id, address) do
+      {:ok, value} ->
+        {:cont, %{ctx | return: value}}
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "unable to resolve structured result for #{inspect(node.binding)}: #{inspect(reason)}"
+    end
+  end
+
   # The sequential agent path commits each paid attempt *incrementally* — a rejection
   # lands in the journal before the next paid call runs — so a crash mid-retry
   # durably preserves the already-paid attempts and resume never re-pays them. The
@@ -221,11 +226,11 @@ defmodule Workflow.Run.Writer do
         {:cont, %{ctx | last_result: result}}
 
       {:failed, reason} ->
-        {:halt, ctx, {:malformed_output, node.address, reason}}
+        {:halt, ctx, failed_turn_result(node, reason)}
 
       {:exhausted, attempts, reason} ->
         seq = commit(run_id, ctx.seq, Event.agent_failed(node, iteration, attempts, reason))
-        {:halt, %{ctx | seq: seq}, {:malformed_output, node.address, reason}}
+        {:halt, %{ctx | seq: seq}, failed_turn_result(node, reason)}
 
       # Mid-flight resume: pick the retry loop back up at the first un-journaled
       # attempt rather than re-calling the provider for already-ledgered rejections.
@@ -446,7 +451,8 @@ defmodule Workflow.Run.Writer do
         max_rounds: payload.max_rounds,
         on_non_convergence: payload.on_non_convergence,
         max_concurrency: payload.max_concurrency,
-        reviewer_timeout_ms: payload[:reviewer_timeout_ms] || refine_reviewer_timeout()
+        reviewer_timeout_ms: payload[:reviewer_timeout_ms] || refine_reviewer_timeout(),
+        gates: refine_gates_from_started_payload(Map.get(payload, :gates, %{}))
     }
   end
 
@@ -461,11 +467,46 @@ defmodule Workflow.Run.Writer do
     do: {:binding, name, ref}
 
   defp reviewer_from_descriptor(%{index: index, name: name} = descriptor) do
+    adapter = Map.get(descriptor, :adapter, ReviewerAdapter.default())
+
     %{
       index: index,
       name: name,
+      adapter: adapter,
       prompt: descriptor.prompt,
-      agent: agent_from_descriptor(descriptor, @refine_review_schema)
+      agent: agent_from_descriptor(descriptor, ReviewerAdapter.schema(adapter))
+    }
+  end
+
+  defp refine_gates_from_started_payload(gates) when map_size(gates) == 0, do: %{}
+
+  defp refine_gates_from_started_payload(gates) do
+    %{}
+    |> maybe_started_gate(:cold_read, gates, fn %{predicate: predicate, descriptor: descriptor} ->
+      %{predicate: predicate, reviewer: cold_read_reviewer_from_descriptor(descriptor)}
+    end)
+    |> maybe_started_gate(:repair, gates, fn %{predicate: predicate, descriptor: descriptor} ->
+      %{predicate: predicate, agent: agent_from_descriptor(descriptor, @refine_artifact_schema)}
+    end)
+    |> maybe_started_gate(:halt, gates, fn %{predicate: predicate} -> %{predicate: predicate} end)
+  end
+
+  defp maybe_started_gate(acc, key, gates, fun) do
+    case Map.fetch(gates, key) do
+      {:ok, gate} -> Map.put(acc, key, fun.(gate))
+      :error -> acc
+    end
+  end
+
+  defp cold_read_reviewer_from_descriptor(%{name: name} = descriptor) do
+    adapter = Map.get(descriptor, :adapter, ReviewerAdapter.default())
+
+    %{
+      index: Map.get(descriptor, :index),
+      name: name,
+      adapter: adapter,
+      prompt: descriptor.prompt,
+      agent: agent_from_descriptor(descriptor, ReviewerAdapter.schema(adapter))
     }
   end
 
@@ -558,23 +599,33 @@ defmodule Workflow.Run.Writer do
     timeout = node.reviewer_timeout_ms || refine_reviewer_timeout()
 
     outcomes =
-      run_refine_reviewers_concurrently(node.reviewers, cap, timeout, round, fn %{
-                                                                                  agent: agent,
-                                                                                  prompt:
-                                                                                    base_prompt
-                                                                                } ->
+      run_refine_reviewers_concurrently(node, node.reviewers, cap, timeout, round, fn %{
+                                                                                        agent:
+                                                                                          agent,
+                                                                                        adapter:
+                                                                                          adapter,
+                                                                                        prompt:
+                                                                                          base_prompt
+                                                                                      } =
+                                                                                        reviewer ->
         agent = %{agent | prompt: reviewer_prompt(base_prompt, round, artifact)}
-        build_role_agent(agent, run_id, provider, prior, round, &normalize_review/1)
+
+        build_reviewer_role_agent(
+          node,
+          %{reviewer | agent: agent},
+          run_id,
+          provider,
+          prior,
+          round,
+          &normalize_review(adapter, &1)
+        )
       end)
 
-    case commit_with_results(outcomes, run_id, seq) do
-      {:ok, seq, reviews} ->
-        decision = refine_decision(node, round, artifact, reviews)
+    case commit_reviewer_lanes(outcomes, run_id, prior, seq) do
+      {:ok, seq, settlements} ->
+        decision = refine_decision(node, round, artifact, settlements)
         seq = commit(run_id, seq, Event.refine_round_decision(node, round, decision))
         {:ok, seq, decision}
-
-      {:halt, seq, reason} ->
-        {:failed, seq, reason}
     end
   end
 
@@ -583,54 +634,49 @@ defmodule Workflow.Run.Writer do
            run_refine_round(node, round, artifact, run_id, provider, prior, seq) do
       cond do
         decision.consensus ->
-          seq =
-            commit_refine_completed(
-              run_id,
-              seq,
-              prior,
-              Event.refine_completed(node, %{
-                converged: true,
-                final_round: round,
-                rounds: round + 1,
-                artifact: artifact,
-                open_findings: []
-              })
-            )
-
-          {:ok, seq, artifact}
+          finalize_refine(
+            node,
+            :completed,
+            nil,
+            true,
+            round,
+            artifact,
+            %{decision | open_findings: []},
+            run_id,
+            provider,
+            prior,
+            seq
+          )
 
         round == node.max_rounds - 1 and node.on_non_convergence == :accept_current ->
-          seq =
-            commit_refine_completed(
-              run_id,
-              seq,
-              prior,
-              Event.refine_completed(node, %{
-                converged: false,
-                final_round: round,
-                rounds: round + 1,
-                artifact: artifact,
-                open_findings: decision.open_findings
-              })
-            )
-
-          {:ok, seq, artifact}
+          finalize_refine(
+            node,
+            :completed,
+            nil,
+            false,
+            round,
+            artifact,
+            decision,
+            run_id,
+            provider,
+            prior,
+            seq
+          )
 
         round == node.max_rounds - 1 ->
-          seq =
-            commit_refine_non_converged(
-              run_id,
-              seq,
-              prior,
-              Event.refine_non_converged(node, %{
-                final_round: round,
-                rounds: round + 1,
-                artifact: artifact,
-                open_findings: decision.open_findings
-              })
-            )
-
-          {:failed, seq, {:did_not_converge, node.address, :max_rounds}}
+          finalize_refine(
+            node,
+            :non_converged,
+            :max_rounds,
+            false,
+            round,
+            artifact,
+            decision,
+            run_id,
+            provider,
+            prior,
+            seq
+          )
 
         true ->
           case run_refine_reviser(
@@ -638,6 +684,7 @@ defmodule Workflow.Run.Writer do
                  round,
                  artifact,
                  decision.open_findings,
+                 decision.role_failures,
                  run_id,
                  provider,
                  prior,
@@ -653,11 +700,744 @@ defmodule Workflow.Run.Writer do
     end
   end
 
+  defp finalize_refine(
+         %Refine{} = node,
+         base_terminal,
+         base_reason,
+         converged,
+         round,
+         artifact,
+         decision,
+         run_id,
+         provider,
+         prior,
+         seq
+       ) do
+    projection = terminal_projection(converged, round, artifact, decision)
+
+    with {:ok, seq, projection} <-
+           maybe_run_cold_read_gate(node, projection, run_id, provider, seq),
+         {:ok, seq, projection} <- maybe_run_repair_gate(node, projection, run_id, provider, seq),
+         {:ok, seq, halt?} <- maybe_evaluate_gate(node, :halt, projection, run_id, seq) do
+      cond do
+        halt? ->
+          predicate = node.gates.halt.predicate
+          reason = {:gate, predicate}
+
+          seq =
+            commit_refine_non_converged(
+              run_id,
+              seq,
+              prior,
+              Event.refine_non_converged(node, Map.put(projection, :reason, reason))
+            )
+
+          {:failed, seq, {:did_not_converge, node.address, reason}}
+
+        base_terminal == :non_converged ->
+          seq =
+            commit_refine_non_converged(
+              run_id,
+              seq,
+              prior,
+              Event.refine_non_converged(node, Map.put(projection, :reason, base_reason))
+            )
+
+          {:failed, seq, {:did_not_converge, node.address, base_reason}}
+
+        true ->
+          seq =
+            commit_refine_completed(
+              run_id,
+              seq,
+              prior,
+              Event.refine_completed(node, projection)
+            )
+
+          {:ok, seq, projection.artifact}
+      end
+    end
+  end
+
+  defp terminal_projection(converged, round, artifact, decision) do
+    %{
+      converged: converged,
+      final_round: round,
+      rounds: round + 1,
+      artifact: artifact,
+      open_findings: decision.open_findings,
+      role_failures: decision.role_failures,
+      failed_reviewers: decision.failed_reviewers,
+      reviewer_decisions: decision.reviewer_decisions,
+      report_snippets: decision.report_snippets,
+      cold_read: nil
+    }
+  end
+
+  defp maybe_run_cold_read_gate(%Refine{gates: gates} = node, projection, run_id, provider, seq) do
+    case Map.fetch(gates, :cold_read) do
+      :error ->
+        {:ok, seq, projection}
+
+      {:ok, gate} ->
+        with {:ok, seq, true} <-
+               evaluate_gate(node, :cold_read, gate.predicate, projection, run_id, seq) do
+          run_or_replay_cold_read(node, gate.reviewer, projection, run_id, provider, seq)
+        else
+          {:ok, seq, false} -> {:ok, seq, projection}
+        end
+    end
+  end
+
+  defp maybe_run_repair_gate(%Refine{gates: gates} = node, projection, run_id, provider, seq) do
+    case Map.fetch(gates, :repair) do
+      :error ->
+        {:ok, seq, projection}
+
+      {:ok, gate} ->
+        with {:ok, seq, true} <-
+               evaluate_gate(node, :repair, gate.predicate, projection, run_id, seq) do
+          run_or_replay_repair(node, gate.agent, projection, run_id, provider, seq)
+        else
+          {:ok, seq, false} -> {:ok, seq, projection}
+        end
+    end
+  end
+
+  defp maybe_evaluate_gate(%Refine{gates: gates} = node, gate, projection, run_id, seq) do
+    case Map.fetch(gates, gate) do
+      :error ->
+        {:ok, seq, false}
+
+      {:ok, %{predicate: predicate}} ->
+        evaluate_gate(node, gate, predicate, projection, run_id, seq)
+    end
+  end
+
+  defp evaluate_gate(%Refine{} = node, gate, predicate, projection, run_id, seq) do
+    events = Journal.fold(run_id)
+
+    case journaled_refine_gate(events, node.address, gate) do
+      {:ok, result} ->
+        {:ok, seq, result}
+
+      :none ->
+        json = RefineResult.public(projection, events, run_id, node.address)
+        result = Gate.evaluate(predicate, json)
+
+        event =
+          Event.refine_gate_evaluated(node, gate, predicate,
+            result: result,
+            input_round: projection.final_round,
+            input_refs: get_in(json, ["rawRefs", "journal"]) || []
+          )
+
+        {:ok, commit(run_id, seq, event), result}
+    end
+  end
+
+  defp journaled_refine_gate(events, address, gate) do
+    case Enum.find(
+           events,
+           &(&1.type == :refine_gate_evaluated and &1.payload.address == address and
+               &1.payload.gate == gate)
+         ) do
+      nil -> :none
+      event -> {:ok, event.payload.result}
+    end
+  end
+
+  defp run_or_replay_cold_read(
+         %Refine{} = node,
+         %{agent: %Agent{} = agent} = reviewer,
+         projection,
+         run_id,
+         provider,
+         seq
+       ) do
+    agent = %{agent | prompt: cold_read_prompt(agent.prompt, projection, run_id, node.address)}
+    events = Journal.fold(run_id)
+
+    case gate_role_state(events, node.address, :cold_read, agent, 0) do
+      {:committed, review} ->
+        {:ok, seq, cold_read_completed_projection(projection, reviewer, review)}
+
+      {:failed, failure} ->
+        {:ok, seq, cold_read_failed_projection(projection, failure)}
+
+      {:exhausted, attempts, reason} ->
+        {seq, failure} =
+          commit_exhausted_gate_role_failure(
+            node,
+            :cold_read,
+            reviewer,
+            agent,
+            run_id,
+            seq,
+            attempts,
+            reason
+          )
+
+        {:ok, seq, cold_read_failed_projection(projection, failure)}
+
+      {:resume, attempt} ->
+        run_cold_read_role_attempt(
+          node,
+          reviewer,
+          agent,
+          run_id,
+          provider,
+          seq,
+          attempt,
+          &normalize_review(reviewer.adapter, &1)
+        )
+        |> cold_read_attempt_result(projection, reviewer)
+    end
+  end
+
+  defp run_or_replay_repair(
+         %Refine{} = node,
+         %Agent{} = agent,
+         projection,
+         run_id,
+         provider,
+         seq
+       ) do
+    agent = %{agent | prompt: repair_prompt(agent.prompt, projection, run_id, node.address)}
+    events = Journal.fold(run_id)
+
+    case gate_role_state(events, node.address, :repair, agent, 0) do
+      {:committed, artifact} ->
+        {:ok, seq, repair_completed_projection(projection, artifact)}
+
+      {:failed, failure} ->
+        {:ok, seq, append_role_failure(projection, failure)}
+
+      {:exhausted, attempts, reason} ->
+        {seq, failure} =
+          commit_exhausted_gate_role_failure(
+            node,
+            :repair,
+            %{name: nil, index: nil, agent: agent},
+            agent,
+            run_id,
+            seq,
+            attempts,
+            reason
+          )
+
+        {:ok, seq, append_role_failure(projection, failure)}
+
+      {:resume, attempt} ->
+        commit_gate_role_attempt(
+          node,
+          :repair,
+          %{name: nil, index: nil, agent: agent},
+          agent,
+          run_id,
+          provider,
+          %{seq: seq},
+          0,
+          attempt,
+          &normalize_artifact/1
+        )
+        |> repair_attempt_result(projection)
+    end
+  end
+
+  defp gate_role_state(events, address, role, %Agent{} = agent, iteration) do
+    case journaled_gate_role_failure(events, address, role, agent.address) do
+      {:ok, failure} ->
+        {:failed, failure}
+
+      :none ->
+        case resolve_agent_turn(agent, events, iteration) do
+          {:committed, result, _usage} -> {:committed, result}
+          {:failed, reason} -> {:failed, gate_role_failure(address, role, agent, 1, reason, [])}
+          {:exhausted, attempts, reason} -> {:exhausted, attempts, reason}
+          {:resume, attempt} -> {:resume, attempt}
+          :none -> {:resume, 0}
+        end
+    end
+  end
+
+  defp journaled_gate_role_failure(events, address, role, role_address) do
+    case Enum.find(
+           events,
+           &(&1.type == :refine_role_failed and &1.payload.address == address and
+               &1.payload.role == role and &1.payload.round == nil and
+               &1.payload.role_address == role_address)
+         ) do
+      nil -> :none
+      event -> {:ok, event.payload}
+    end
+  end
+
+  defp run_cold_read_role_attempt(
+         %Refine{} = refine,
+         reviewer,
+         %Agent{} = agent,
+         run_id,
+         provider,
+         seq,
+         attempt,
+         normalizer
+       ) do
+    timeout = refine.reviewer_timeout_ms || refine_reviewer_timeout()
+
+    task =
+      Task.Supervisor.async_nolink(Workflow.TaskSupervisor, fn ->
+        build_gate_role_attempt(
+          refine,
+          :cold_read,
+          reviewer,
+          agent,
+          run_id,
+          provider,
+          0,
+          attempt,
+          [],
+          normalizer
+        )
+      end)
+
+    case Task.yield(task, timeout) do
+      {:ok, {:ok, events, review}} ->
+        {:ok, commit_all(run_id, seq, events), review}
+
+      {:ok, {:role_failed, events, failure}} ->
+        seq = commit_all(run_id, seq, events)
+
+        seq =
+          commit_refine_role_failed(
+            run_id,
+            seq,
+            Journal.fold(run_id),
+            Event.refine_role_failed(failure)
+          )
+
+        {:failed, seq, failure}
+
+      nil ->
+        Task.shutdown(task, :brutal_kill)
+
+        failure =
+          gate_role_failure(
+            refine.address,
+            :cold_read,
+            reviewer,
+            agent,
+            max(attempt + 1, 1),
+            {:cold_read_timeout, timeout},
+            detail: timeout
+          )
+
+        seq =
+          commit_refine_role_failed(
+            run_id,
+            seq,
+            Journal.fold(run_id),
+            Event.refine_role_failed(failure)
+          )
+
+        {:failed, seq, failure}
+
+      {:exit, {%_{} = exception, stacktrace}} when is_list(stacktrace) ->
+        reraise exception, stacktrace
+
+      {:exit, reason} ->
+        failure =
+          gate_role_failure(
+            refine.address,
+            :cold_read,
+            reviewer,
+            agent,
+            max(attempt + 1, 1),
+            {:cold_read_crashed, reason},
+            detail: reason
+          )
+
+        seq =
+          commit_refine_role_failed(
+            run_id,
+            seq,
+            Journal.fold(run_id),
+            Event.refine_role_failed(failure)
+          )
+
+        {:failed, seq, failure}
+    end
+  end
+
+  defp build_gate_role_attempt(
+         %Refine{} = refine,
+         role,
+         role_owner,
+         %Agent{} = agent,
+         run_id,
+         provider,
+         iteration,
+         attempt,
+         acc,
+         normalizer
+       ) do
+    key = key(run_id, agent.address, iteration, attempt)
+    {activity_sink, finalize_activity} = local_activity_tracker()
+
+    case call_provider(provider, agent.prompt, agent.schema, key, activity_sink) do
+      {:ok, output, usage, activity} ->
+        activity = finalize_activity.(activity)
+
+        with {:ok, validated} <- Schema.validate(agent.schema, output),
+             {:ok, normalized} <- normalizer.(validated) do
+          committed = Event.agent_committed(agent, iteration, key, normalized, usage, activity)
+          {:ok, Enum.reverse([committed | acc]), normalized}
+        else
+          {:error, reason} ->
+            rejected =
+              Event.agent_attempt_rejected(
+                agent,
+                iteration,
+                attempt,
+                output,
+                reason,
+                usage,
+                activity
+              )
+
+            if attempt < agent.retries do
+              build_gate_role_attempt(
+                refine,
+                role,
+                role_owner,
+                agent,
+                run_id,
+                provider,
+                iteration,
+                attempt + 1,
+                [rejected | acc],
+                normalizer
+              )
+            else
+              failure =
+                gate_role_failure(
+                  refine.address,
+                  role,
+                  role_owner,
+                  agent,
+                  attempt + 1,
+                  gate_role_malformed_reason(role, reason),
+                  detail: reason
+                )
+
+              {:role_failed, Enum.reverse([rejected | acc]), failure}
+            end
+        end
+
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+
+        failure =
+          gate_role_failure(
+            refine.address,
+            role,
+            role_owner,
+            agent,
+            attempt + 1,
+            gate_role_provider_reason(role, kind, detail),
+            detail: detail,
+            usage: usage,
+            activity: activity
+          )
+
+        {:role_failed, Enum.reverse(acc), failure}
+    end
+  end
+
+  defp commit_exhausted_gate_role_failure(
+         %Refine{} = refine,
+         role,
+         role_owner,
+         %Agent{} = agent,
+         run_id,
+         seq,
+         attempts,
+         reason
+       ) do
+    failure =
+      gate_role_failure(
+        refine.address,
+        role,
+        role_owner,
+        agent,
+        attempts,
+        gate_role_malformed_reason(role, reason),
+        detail: reason
+      )
+
+    event = Event.refine_role_failed(failure)
+    seq = commit_refine_role_failed(run_id, seq, Journal.fold(run_id), event)
+    {seq, failure}
+  end
+
+  defp commit_gate_role_attempt(
+         %Refine{} = refine,
+         role,
+         role_owner,
+         %Agent{} = agent,
+         run_id,
+         provider,
+         ctx,
+         iteration,
+         attempt,
+         normalizer
+       ) do
+    key = key(run_id, agent.address, iteration, attempt)
+    {activity_sink, finalize_activity} = local_activity_tracker()
+
+    case call_provider(provider, agent.prompt, agent.schema, key, activity_sink) do
+      {:ok, output, usage, activity} ->
+        activity = finalize_activity.(activity)
+
+        with {:ok, validated} <- Schema.validate(agent.schema, output),
+             {:ok, normalized} <- normalizer.(validated) do
+          seq =
+            commit(
+              run_id,
+              ctx.seq,
+              Event.agent_committed(agent, iteration, key, normalized, usage, activity)
+            )
+
+          {:ok, seq, normalized}
+        else
+          {:error, reason} ->
+            seq =
+              commit(
+                run_id,
+                ctx.seq,
+                Event.agent_attempt_rejected(
+                  agent,
+                  iteration,
+                  attempt,
+                  output,
+                  reason,
+                  usage,
+                  activity
+                )
+              )
+
+            if attempt < agent.retries do
+              commit_gate_role_attempt(
+                refine,
+                role,
+                role_owner,
+                agent,
+                run_id,
+                provider,
+                %{ctx | seq: seq},
+                iteration,
+                attempt + 1,
+                normalizer
+              )
+            else
+              failure =
+                gate_role_failure(
+                  refine.address,
+                  role,
+                  role_owner,
+                  agent,
+                  attempt + 1,
+                  gate_role_malformed_reason(role, reason),
+                  detail: reason
+                )
+
+              event = Event.refine_role_failed(failure)
+              seq = commit_refine_role_failed(run_id, seq, Journal.fold(run_id), event)
+              {:failed, seq, failure}
+            end
+        end
+
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+
+        failure =
+          gate_role_failure(
+            refine.address,
+            role,
+            role_owner,
+            agent,
+            attempt + 1,
+            gate_role_provider_reason(role, kind, detail),
+            detail: detail,
+            usage: usage,
+            activity: activity
+          )
+
+        event = Event.refine_role_failed(failure)
+        seq = commit_refine_role_failed(run_id, ctx.seq, Journal.fold(run_id), event)
+        {:failed, seq, failure}
+    end
+  end
+
+  defp cold_read_attempt_result({:ok, seq, review}, projection, reviewer),
+    do: {:ok, seq, cold_read_completed_projection(projection, reviewer, review)}
+
+  defp cold_read_attempt_result({:failed, seq, failure}, projection, _reviewer),
+    do: {:ok, seq, cold_read_failed_projection(projection, failure)}
+
+  defp repair_attempt_result({:ok, seq, artifact}, projection),
+    do: {:ok, seq, repair_completed_projection(projection, artifact)}
+
+  defp repair_attempt_result({:failed, seq, failure}, projection),
+    do: {:ok, seq, append_role_failure(projection, failure)}
+
+  defp cold_read_completed_projection(projection, reviewer, review) do
+    open_findings = review_open_findings(reviewer, review)
+    reviewer_decision = review_decision(reviewer, review)
+
+    %{
+      projection
+      | cold_read: %{
+          state: :completed,
+          open_findings: open_findings,
+          reviewer_decision: reviewer_decision,
+          report_snippets: Map.get(review, "report_snippets", []),
+          repaired: false
+        }
+    }
+  end
+
+  defp cold_read_failed_projection(projection, failure) do
+    projection
+    |> append_role_failure(failure)
+    |> Map.put(:cold_read, %{state: :failed, role_failure: failure, repaired: false})
+  end
+
+  defp repair_completed_projection(projection, artifact) do
+    projection
+    |> Map.put(:artifact, artifact)
+    |> update_in([:cold_read], fn
+      %{state: :completed} = cold_read -> %{cold_read | repaired: true}
+      other -> other
+    end)
+  end
+
+  defp append_role_failure(projection, failure) do
+    role_failures = projection.role_failures ++ [failure]
+
+    %{
+      projection
+      | role_failures: role_failures,
+        failed_reviewers: failed_reviewers(role_failures)
+    }
+  end
+
+  defp review_decision(%{index: index, name: name} = reviewer, review) do
+    approved = Map.fetch!(review, "approved")
+    clear = approved and not Enum.any?(review["findings"], &(&1["blocking"] == true))
+
+    %{
+      reviewer: name,
+      reviewer_index: index,
+      approved: approved,
+      clear: clear,
+      adapter: Map.get(reviewer, :adapter, ReviewerAdapter.default()),
+      status: :completed
+    }
+  end
+
+  defp review_open_findings(%{index: index, name: name}, review) do
+    blocking =
+      review["findings"]
+      |> Enum.filter(&(&1["blocking"] == true))
+      |> Enum.uniq_by(& &1["id"])
+      |> Enum.sort_by(& &1["id"], :asc)
+
+    cond do
+      blocking != [] ->
+        Enum.map(blocking, &open_finding(name, index, &1))
+
+      review["approved"] == false ->
+        [
+          %{
+            reviewer: name,
+            reviewer_index: index,
+            id: "__codex_loops_no_blocking_finding__",
+            issue: "Reviewer did not approve but returned no blocking finding.",
+            fix:
+              "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
+          }
+        ]
+
+      true ->
+        []
+    end
+  end
+
+  defp gate_role_failure(address, role, %Agent{} = agent, attempts, reason, opts) do
+    gate_role_failure(address, role, %{name: nil, index: nil}, agent, attempts, reason, opts)
+  end
+
+  defp gate_role_failure(address, role, role_owner, %Agent{} = agent, attempts, reason, opts) do
+    %{
+      address: address,
+      role: role,
+      role_address: agent.address,
+      round: nil,
+      reviewer: Map.get(role_owner, :name),
+      reviewer_index: nil,
+      attempts: attempts,
+      reason: reason,
+      detail: Keyword.get(opts, :detail),
+      usage: Keyword.get(opts, :usage),
+      activity: Keyword.get(opts, :activity, [])
+    }
+  end
+
+  defp gate_role_malformed_reason(:repair, reason), do: {:repair_failed, reason}
+  defp gate_role_malformed_reason(_role, reason), do: {:malformed_output, reason}
+
+  defp gate_role_provider_reason(:repair, kind, detail),
+    do: {:repair_failed, {:provider_failure, kind, detail}}
+
+  defp gate_role_provider_reason(_role, kind, detail), do: {:provider_failure, kind, detail}
+
+  defp cold_read_prompt(base, projection, _run_id, _address) do
+    RenderText.render!([], [
+      {:text, base},
+      {:text, "\n\n--- CODEX LOOPS REFINE COLD READ INPUT ---\n"},
+      {:text, "artifact-bytes: #{byte_size(projection.artifact)}\n"},
+      {:text, "artifact:\n"},
+      {:text, projection.artifact},
+      {:text, "\nopen-finding-count: #{length(projection.open_findings)}\n"},
+      {:text, serialize_findings(projection.open_findings)},
+      {:text, "role-failure-count: #{length(projection.role_failures)}\n"},
+      {:text, serialize_role_failures(projection.role_failures)},
+      {:text, "--- END CODEX LOOPS REFINE COLD READ INPUT ---"}
+    ])
+  end
+
+  defp repair_prompt(base, projection, _run_id, _address) do
+    reviser_prompt(
+      base,
+      projection.final_round,
+      projection.artifact,
+      projection.open_findings ++ cold_read_open_findings(projection.cold_read),
+      projection.role_failures
+    )
+  end
+
+  defp cold_read_open_findings(%{state: :completed, open_findings: open_findings}),
+    do: open_findings
+
+  defp cold_read_open_findings(_cold_read), do: []
+
   defp run_refine_reviser(
          %Refine{} = node,
          round,
          artifact,
          open_findings,
+         role_failures,
          run_id,
          provider,
          prior,
@@ -665,7 +1445,7 @@ defmodule Workflow.Run.Writer do
        ) do
     reviser = %{
       node.reviser
-      | prompt: reviser_prompt(node.reviser.prompt, round, artifact, open_findings)
+      | prompt: reviser_prompt(node.reviser.prompt, round, artifact, open_findings, role_failures)
     }
 
     case commit_role_agent(
@@ -685,57 +1465,129 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp refine_decision(%Refine{} = node, _round, artifact, reviews) do
+  defp refine_decision(%Refine{} = node, _round, artifact, settlements) do
     decisions =
       node.reviewers
-      |> Enum.zip(reviews)
-      |> Enum.map(fn {%{index: index, name: name}, review} ->
-        approved = Map.fetch!(review, "approved")
-        clear = approved and not Enum.any?(review["findings"], &(&1["blocking"] == true))
-        %{reviewer: name, reviewer_index: index, approved: approved, clear: clear}
+      |> Enum.zip(settlements)
+      |> Enum.map(fn
+        {%{index: index, name: name} = reviewer, {:completed, review}} ->
+          approved = Map.fetch!(review, "approved")
+          clear = approved and not Enum.any?(review["findings"], &(&1["blocking"] == true))
+
+          %{
+            reviewer: name,
+            reviewer_index: index,
+            approved: approved,
+            clear: clear,
+            adapter: Map.get(reviewer, :adapter, ReviewerAdapter.default()),
+            status: :completed
+          }
+
+        {%{index: index, name: name} = reviewer, {:failed, _failure}} ->
+          %{
+            reviewer: name,
+            reviewer_index: index,
+            approved: false,
+            clear: false,
+            adapter: Map.get(reviewer, :adapter, ReviewerAdapter.default()),
+            status: :failed
+          }
       end)
 
     open_findings =
       node.reviewers
-      |> Enum.zip(reviews)
-      |> Enum.flat_map(fn {%{index: index, name: name}, review} ->
-        blocking =
-          review["findings"]
-          |> Enum.filter(&(&1["blocking"] == true))
-          |> Enum.uniq_by(& &1["id"])
-          |> Enum.sort_by(& &1["id"], :asc)
+      |> Enum.zip(settlements)
+      |> Enum.flat_map(fn
+        {%{index: index, name: name}, {:completed, review}} ->
+          blocking =
+            review["findings"]
+            |> Enum.filter(&(&1["blocking"] == true))
+            |> Enum.uniq_by(& &1["id"])
+            |> Enum.sort_by(& &1["id"], :asc)
 
-        cond do
-          blocking != [] ->
-            Enum.map(blocking, &open_finding(name, index, &1))
+          cond do
+            blocking != [] ->
+              Enum.map(blocking, &open_finding(name, index, &1))
 
-          review["approved"] == false ->
-            [
-              %{
-                reviewer: name,
-                reviewer_index: index,
-                id: "__codex_loops_no_blocking_finding__",
-                issue: "Reviewer did not approve but returned no blocking finding.",
-                fix:
-                  "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
-              }
-            ]
+            review["approved"] == false ->
+              [
+                %{
+                  reviewer: name,
+                  reviewer_index: index,
+                  id: "__codex_loops_no_blocking_finding__",
+                  issue: "Reviewer did not approve but returned no blocking finding.",
+                  fix:
+                    "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
+                }
+              ]
 
-          true ->
-            []
-        end
+            true ->
+              []
+          end
+
+        {_reviewer, {:failed, _failure}} ->
+          []
       end)
 
+    role_failures = role_failures(settlements)
     approval_count = Enum.count(decisions, & &1.clear)
 
     %{
-      consensus: approval_count == length(decisions),
+      consensus: approval_count == length(decisions) and role_failures == [],
       approval_count: approval_count,
       total: length(decisions),
       reviewer_decisions: decisions,
       artifact: artifact,
-      open_findings: open_findings
+      open_findings: open_findings,
+      role_failures: role_failures,
+      failed_reviewers: failed_reviewers(role_failures),
+      report_snippets: report_snippets(settlements)
     }
+  end
+
+  defp role_failures(settlements) do
+    settlements
+    |> Enum.flat_map(fn
+      {:failed, failure} -> [failure]
+      {:completed, _review} -> []
+    end)
+  end
+
+  defp failed_reviewers(role_failures) do
+    role_failures
+    |> Enum.map(& &1.reviewer)
+    |> Enum.reject(&is_nil/1)
+    |> Enum.uniq()
+  end
+
+  defp reviewer_role_failure(
+         %Refine{} = refine,
+         %{index: index, name: name, agent: %Agent{} = agent},
+         round,
+         attempts,
+         reason,
+         opts
+       ) do
+    %{
+      address: refine.address,
+      role: :reviewer,
+      role_address: agent.address,
+      round: round,
+      reviewer: name,
+      reviewer_index: index,
+      attempts: attempts,
+      reason: reason,
+      detail: Keyword.get(opts, :detail),
+      usage: Keyword.get(opts, :usage),
+      activity: Keyword.get(opts, :activity, [])
+    }
+  end
+
+  defp report_snippets(settlements) do
+    Enum.flat_map(settlements, fn
+      {:completed, review} -> Map.get(review, "report_snippets", [])
+      {:failed, _failure} -> []
+    end)
   end
 
   defp open_finding(name, index, finding) do
@@ -760,7 +1612,7 @@ defmodule Workflow.Run.Writer do
     ])
   end
 
-  defp reviser_prompt(base, round, artifact, open_findings) do
+  defp reviser_prompt(base, round, artifact, open_findings, role_failures) do
     RenderText.render!([], [
       {:text, base},
       {:text, "\n\n--- CODEX LOOPS REFINE REVISION INPUT ---\n"},
@@ -770,6 +1622,8 @@ defmodule Workflow.Run.Writer do
       {:text, artifact},
       {:text, "\nblocking-finding-count: #{length(open_findings)}\n"},
       {:text, serialize_findings(open_findings)},
+      {:text, "reviewer-role-failure-count: #{length(role_failures)}\n"},
+      {:text, serialize_role_failures(role_failures)},
       {:text, "--- END CODEX LOOPS REFINE REVISION INPUT ---"}
     ])
   end
@@ -793,6 +1647,24 @@ defmodule Workflow.Run.Writer do
         "fix-bytes: #{byte_size(finding.fix)}\n",
         "fix:\n",
         finding.fix,
+        "\n"
+      ]
+    end)
+  end
+
+  defp serialize_role_failures(role_failures) do
+    role_failures
+    |> Enum.with_index(1)
+    |> Enum.map_join(fn {failure, index} ->
+      [
+        "role-failure #{index}:\n",
+        "reviewer: #{failure.reviewer}\n",
+        "reviewer-index: #{failure.reviewer_index}\n",
+        "reason:\n",
+        inspect(failure.reason),
+        "\n",
+        "detail:\n",
+        inspect(failure.detail),
         "\n"
       ]
     end)
@@ -832,6 +1704,27 @@ defmodule Workflow.Run.Writer do
     end
   end
 
+  defp commit_refine_role_failed(
+         run_id,
+         seq,
+         prior,
+         %Event{
+           payload: %{address: address, role: role, round: round, role_address: role_address}
+         } =
+           event
+       ) do
+    if Enum.any?(
+         prior,
+         &(&1.type == :refine_role_failed and &1.payload.address == address and
+             &1.payload.role == role and &1.payload.round == round and
+             &1.payload.role_address == role_address)
+       ) do
+      seq
+    else
+      commit(run_id, seq, event)
+    end
+  end
+
   defp journaled_refine_decision(prior, address, round) do
     case Enum.find(
            prior,
@@ -839,7 +1732,28 @@ defmodule Workflow.Run.Writer do
                &1.payload.round == round)
          ) do
       nil -> :none
-      event -> {:ok, Map.delete(event.payload, :address) |> Map.delete(:round)}
+      event -> {:ok, replayed_refine_decision(event.payload)}
+    end
+  end
+
+  defp replayed_refine_decision(payload) do
+    payload
+    |> Map.delete(:address)
+    |> Map.delete(:round)
+    |> Map.put_new(:role_failures, [])
+    |> Map.put_new(:failed_reviewers, [])
+    |> Map.put_new(:report_snippets, [])
+  end
+
+  defp journaled_refine_role_failure(prior, address, round, %{agent: %Agent{} = agent}) do
+    case Enum.find(
+           prior,
+           &(&1.type == :refine_role_failed and &1.payload.address == address and
+               &1.payload.role == :reviewer and &1.payload.round == round and
+               &1.payload.role_address == agent.address)
+         ) do
+      nil -> :none
+      event -> {:ok, event.payload}
     end
   end
 
@@ -877,6 +1791,22 @@ defmodule Workflow.Run.Writer do
       nil -> {:ok, seq, Enum.reverse(results)}
       reason -> {:halt, seq, reason}
     end
+  end
+
+  defp commit_reviewer_lanes(outcomes, run_id, prior, seq) do
+    {seq, settlements} =
+      Enum.reduce(outcomes, {seq, []}, fn
+        {:ok, events, review}, {seq, settlements} ->
+          {commit_all(run_id, seq, events), settlements ++ [{:completed, review}]}
+
+        {:role_failed, events, failure}, {seq, settlements} ->
+          seq = commit_all(run_id, seq, events)
+          event = Event.refine_role_failed(failure)
+          seq = commit_refine_role_failed(run_id, seq, prior, event)
+          {seq, settlements ++ [{:failed, failure}]}
+      end)
+
+    {:ok, seq, settlements}
   end
 
   defp synthesis_prompt(%Synthesize{inputs: inputs, prompt: prompt}),
@@ -1034,7 +1964,14 @@ defmodule Workflow.Run.Writer do
     |> Enum.map(fn {:ok, result} -> result end)
   end
 
-  defp run_refine_reviewers_concurrently(reviewers, cap, timeout, iteration, fun) do
+  defp run_refine_reviewers_concurrently(
+         %Refine{} = refine,
+         reviewers,
+         cap,
+         timeout,
+         iteration,
+         fun
+       ) do
     Task.Supervisor.async_stream_nolink(
       Workflow.TaskSupervisor,
       reviewers,
@@ -1050,30 +1987,32 @@ defmodule Workflow.Run.Writer do
         result
 
       {{:exit, :timeout}, reviewer} ->
-        failed_refine_reviewer(reviewer, iteration, {:reviewer_timeout, timeout})
+        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_timeout, timeout},
+          detail: timeout
+        )
+
+      {{:exit, {%_{} = exception, stacktrace}}, _reviewer} when is_list(stacktrace) ->
+        reraise exception, stacktrace
 
       {{:exit, reason}, reviewer} ->
-        failed_refine_reviewer(reviewer, iteration, {:reviewer_crashed, reason})
+        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_crashed, reason},
+          detail: reason
+        )
     end)
   end
 
-  defp safe_refine_reviewer(reviewer, iteration, fun) do
+  defp safe_refine_reviewer(reviewer, _iteration, fun) do
     fun.(reviewer)
-  rescue
-    exception ->
-      failed_refine_reviewer(
-        reviewer,
-        iteration,
-        {:reviewer_crashed, Exception.message(exception)}
-      )
-  catch
-    kind, reason ->
-      failed_refine_reviewer(reviewer, iteration, {:reviewer_crashed, {kind, reason}})
   end
 
-  defp failed_refine_reviewer(%{agent: %Agent{} = agent}, iteration, reason) do
-    {:failed, [Event.agent_failed(agent, iteration, 1, reason)],
-     {:malformed_output, agent.address, reason}}
+  defp failed_refine_reviewer(
+         %Refine{} = refine,
+         %{agent: %Agent{}} = reviewer,
+         iteration,
+         reason,
+         opts
+       ) do
+    {:role_failed, [], reviewer_role_failure(refine, reviewer, iteration, 1, reason, opts)}
   end
 
   defp refine_reviewer_timeout do
@@ -1151,75 +2090,89 @@ defmodule Workflow.Run.Writer do
     key = key(run_id, node.address, iteration, attempt)
     {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
 
-    {:ok, result, usage, activity} =
-      call_provider(
-        provider,
-        node.prompt,
-        nil,
-        key,
-        activity_sink
-      )
+    case call_provider(provider, node.prompt, nil, key, activity_sink) do
+      {:ok, result, usage, activity} ->
+        activity = finalize_activity.(activity)
 
-    activity = finalize_activity.(activity)
+        seq =
+          commit(
+            run_id,
+            ctx.seq,
+            Event.agent_committed(node, iteration, key, result, usage, activity)
+          )
 
-    seq =
-      commit(
-        run_id,
-        ctx.seq,
-        Event.agent_committed(node, iteration, key, result, usage, activity)
-      )
+        {:cont, %{ctx | seq: seq, last_result: result}}
 
-    {:cont, %{ctx | seq: seq, last_result: result}}
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+        reason = {:provider_failure, kind, detail}
+
+        seq =
+          commit(
+            run_id,
+            ctx.seq,
+            Event.agent_failed(node, iteration, attempt + 1, reason, usage, activity)
+          )
+
+        {:halt, %{ctx | seq: seq}, failed_turn_result(node, reason)}
+    end
   end
 
   defp commit_attempt(%Agent{} = node, run_id, provider, ctx, iteration, attempt) do
     key = key(run_id, node.address, iteration, attempt)
     {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
 
-    {:ok, output, usage, activity} =
-      call_provider(
-        provider,
-        node.prompt,
-        node.schema,
-        key,
-        activity_sink
-      )
+    case call_provider(provider, node.prompt, node.schema, key, activity_sink) do
+      {:ok, output, usage, activity} ->
+        activity = finalize_activity.(activity)
 
-    activity = finalize_activity.(activity)
+        case Schema.validate(node.schema, output) do
+          {:ok, validated} ->
+            seq =
+              commit(
+                run_id,
+                ctx.seq,
+                Event.agent_committed(node, iteration, key, validated, usage, activity)
+              )
 
-    case Schema.validate(node.schema, output) do
-      {:ok, validated} ->
-        seq =
-          commit(
-            run_id,
-            ctx.seq,
-            Event.agent_committed(node, iteration, key, validated, usage, activity)
-          )
+            {:cont, %{ctx | seq: seq, last_result: validated}}
 
-        {:cont, %{ctx | seq: seq, last_result: validated}}
+          {:error, reason} ->
+            seq =
+              commit(
+                run_id,
+                ctx.seq,
+                Event.agent_attempt_rejected(
+                  node,
+                  iteration,
+                  attempt,
+                  output,
+                  reason,
+                  usage,
+                  activity
+                )
+              )
 
-      {:error, reason} ->
-        seq =
-          commit(
-            run_id,
-            ctx.seq,
-            Event.agent_attempt_rejected(
-              node,
-              iteration,
-              attempt,
-              output,
-              reason,
-              usage,
-              activity
-            )
-          )
-
-        if attempt < node.retries do
-          commit_attempt(node, run_id, provider, %{ctx | seq: seq}, iteration, attempt + 1)
-        else
-          seq = commit(run_id, seq, Event.agent_failed(node, iteration, attempt + 1, reason))
-          {:halt, %{ctx | seq: seq}, {:malformed_output, node.address, reason}}
+            if attempt < node.retries do
+              commit_attempt(node, run_id, provider, %{ctx | seq: seq}, iteration, attempt + 1)
+            else
+              seq = commit(run_id, seq, Event.agent_failed(node, iteration, attempt + 1, reason))
+              {:halt, %{ctx | seq: seq}, failed_turn_result(node, reason)}
+            end
         end
+
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+        reason = {:provider_failure, kind, detail}
+
+        seq =
+          commit(
+            run_id,
+            ctx.seq,
+            Event.agent_failed(node, iteration, attempt + 1, reason, usage, activity)
+          )
+
+        {:halt, %{ctx | seq: seq}, failed_turn_result(node, reason)}
     end
   end
 
@@ -1231,11 +2184,11 @@ defmodule Workflow.Run.Writer do
         {:ok, [], result}
 
       {:failed, reason} ->
-        {:failed, [], {:malformed_output, node.address, reason}}
+        {:failed, [], failed_turn_result(node, reason)}
 
       {:exhausted, attempts, reason} ->
         {:failed, [Event.agent_failed(node, iteration, attempts, reason)],
-         {:malformed_output, node.address, reason}}
+         failed_turn_result(node, reason)}
 
       {:resume, next} ->
         build_attempt(materialize_agent(node, run_id), run_id, provider, iteration, next, [])
@@ -1245,39 +2198,65 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp build_role_agent(%Agent{} = node, run_id, provider, prior, iteration, normalizer) do
-    case resolve_agent_turn(node, prior, iteration) do
-      {:committed, result, _usage} ->
-        {:ok, [], result}
-
-      {:failed, reason} ->
-        {:failed, [], {:malformed_output, node.address, reason}}
-
-      {:exhausted, attempts, reason} ->
-        {:failed, [Event.agent_failed(node, iteration, attempts, reason)],
-         {:malformed_output, node.address, reason}}
-
-      {:resume, next} ->
-        build_role_attempt(
-          materialize_agent(node, run_id),
-          run_id,
-          provider,
-          iteration,
-          next,
-          [],
-          normalizer
-        )
+  defp build_reviewer_role_agent(
+         %Refine{} = refine,
+         %{agent: %Agent{} = node} = reviewer,
+         run_id,
+         provider,
+         prior,
+         iteration,
+         normalizer
+       ) do
+    case journaled_refine_role_failure(prior, refine.address, iteration, reviewer) do
+      {:ok, failure} ->
+        {:role_failed, [], failure}
 
       :none ->
-        build_role_attempt(
-          materialize_agent(node, run_id),
-          run_id,
-          provider,
-          iteration,
-          0,
-          [],
-          normalizer
-        )
+        case resolve_agent_turn(node, prior, iteration) do
+          {:committed, result, _usage} ->
+            {:ok, [], result}
+
+          {:failed, reason} ->
+            {:role_failed, [],
+             reviewer_role_failure(refine, reviewer, iteration, 1, {:malformed_output, reason},
+               detail: reason
+             )}
+
+          {:exhausted, attempts, reason} ->
+            {:role_failed, [],
+             reviewer_role_failure(
+               refine,
+               reviewer,
+               iteration,
+               attempts,
+               {:malformed_output, reason},
+               detail: reason
+             )}
+
+          {:resume, next} ->
+            build_reviewer_role_attempt(
+              refine,
+              reviewer,
+              run_id,
+              provider,
+              iteration,
+              next,
+              [],
+              normalizer
+            )
+
+          :none ->
+            build_reviewer_role_attempt(
+              refine,
+              reviewer,
+              run_id,
+              provider,
+              iteration,
+              0,
+              [],
+              normalizer
+            )
+        end
     end
   end
 
@@ -1287,11 +2266,11 @@ defmodule Workflow.Run.Writer do
         {:cont, ctx, result}
 
       {:failed, reason} ->
-        {:halt, ctx, {:malformed_output, node.address, reason}}
+        {:halt, ctx, failed_turn_result(node, reason)}
 
       {:exhausted, attempts, reason} ->
         seq = commit(run_id, ctx.seq, Event.agent_failed(node, iteration, attempts, reason))
-        {:halt, %{ctx | seq: seq}, {:malformed_output, node.address, reason}}
+        {:halt, %{ctx | seq: seq}, failed_turn_result(node, reason)}
 
       {:resume, next} ->
         commit_role_attempt(
@@ -1321,89 +2300,140 @@ defmodule Workflow.Run.Writer do
     key = key(run_id, node.address, iteration, attempt)
     {activity_sink, finalize_activity} = local_activity_tracker()
 
-    {:ok, output, usage, activity} =
-      call_provider(provider, node.prompt, node.schema, key, activity_sink)
+    case call_provider(provider, node.prompt, node.schema, key, activity_sink) do
+      {:ok, output, usage, activity} ->
+        activity = finalize_activity.(activity)
 
-    activity = finalize_activity.(activity)
+        with {:ok, validated} <- Schema.validate(node.schema, output),
+             {:ok, normalized} <- normalizer.(validated) do
+          seq =
+            commit(
+              run_id,
+              ctx.seq,
+              Event.agent_committed(node, iteration, key, normalized, usage, activity)
+            )
 
-    with {:ok, validated} <- Schema.validate(node.schema, output),
-         {:ok, normalized} <- normalizer.(validated) do
-      seq =
-        commit(
-          run_id,
-          ctx.seq,
-          Event.agent_committed(node, iteration, key, normalized, usage, activity)
-        )
+          {:cont, %{ctx | seq: seq}, normalized}
+        else
+          {:error, reason} ->
+            seq =
+              commit(
+                run_id,
+                ctx.seq,
+                Event.agent_attempt_rejected(
+                  node,
+                  iteration,
+                  attempt,
+                  output,
+                  reason,
+                  usage,
+                  activity
+                )
+              )
 
-      {:cont, %{ctx | seq: seq}, normalized}
-    else
-      {:error, reason} ->
+            if attempt < node.retries do
+              commit_role_attempt(
+                node,
+                run_id,
+                provider,
+                %{ctx | seq: seq},
+                iteration,
+                attempt + 1,
+                normalizer
+              )
+            else
+              seq = commit(run_id, seq, Event.agent_failed(node, iteration, attempt + 1, reason))
+              {:halt, %{ctx | seq: seq}, failed_turn_result(node, reason)}
+            end
+        end
+
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+        reason = {:provider_failure, kind, detail}
+
         seq =
           commit(
             run_id,
             ctx.seq,
-            Event.agent_attempt_rejected(
-              node,
-              iteration,
-              attempt,
-              output,
-              reason,
-              usage,
-              activity
-            )
+            Event.agent_failed(node, iteration, attempt + 1, reason, usage, activity)
           )
 
-        if attempt < node.retries do
-          commit_role_attempt(
-            node,
-            run_id,
-            provider,
-            %{ctx | seq: seq},
-            iteration,
-            attempt + 1,
-            normalizer
-          )
-        else
-          seq = commit(run_id, seq, Event.agent_failed(node, iteration, attempt + 1, reason))
-          {:halt, %{ctx | seq: seq}, {:malformed_output, node.address, reason}}
-        end
+        {:halt, %{ctx | seq: seq}, failed_turn_result(node, reason)}
     end
   end
 
-  defp build_role_attempt(%Agent{} = node, run_id, provider, iteration, attempt, acc, normalizer) do
+  defp build_reviewer_role_attempt(
+         %Refine{} = refine,
+         %{agent: %Agent{} = node} = reviewer,
+         run_id,
+         provider,
+         iteration,
+         attempt,
+         acc,
+         normalizer
+       ) do
     key = key(run_id, node.address, iteration, attempt)
     {activity_sink, finalize_activity} = local_activity_tracker()
 
-    {:ok, output, usage, activity} =
-      call_provider(provider, node.prompt, node.schema, key, activity_sink)
+    case call_provider(provider, node.prompt, node.schema, key, activity_sink) do
+      {:ok, output, usage, activity} ->
+        activity = finalize_activity.(activity)
 
-    activity = finalize_activity.(activity)
-
-    with {:ok, validated} <- Schema.validate(node.schema, output),
-         {:ok, normalized} <- normalizer.(validated) do
-      committed = Event.agent_committed(node, iteration, key, normalized, usage, activity)
-      {:ok, Enum.reverse([committed | acc]), normalized}
-    else
-      {:error, reason} ->
-        rejected =
-          Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity)
-
-        if attempt < node.retries do
-          build_role_attempt(
-            node,
-            run_id,
-            provider,
-            iteration,
-            attempt + 1,
-            [rejected | acc],
-            normalizer
-          )
+        with {:ok, validated} <- Schema.validate(node.schema, output),
+             {:ok, normalized} <- normalizer.(validated) do
+          committed = Event.agent_committed(node, iteration, key, normalized, usage, activity)
+          {:ok, Enum.reverse([committed | acc]), normalized}
         else
-          failed = Event.agent_failed(node, iteration, attempt + 1, reason)
+          {:error, reason} ->
+            rejected =
+              Event.agent_attempt_rejected(
+                node,
+                iteration,
+                attempt,
+                output,
+                reason,
+                usage,
+                activity
+              )
 
-          {:failed, Enum.reverse([failed, rejected | acc]),
-           {:malformed_output, node.address, reason}}
+            if attempt < node.retries do
+              build_reviewer_role_attempt(
+                refine,
+                reviewer,
+                run_id,
+                provider,
+                iteration,
+                attempt + 1,
+                [rejected | acc],
+                normalizer
+              )
+            else
+              failure =
+                reviewer_role_failure(
+                  refine,
+                  reviewer,
+                  iteration,
+                  attempt + 1,
+                  {:malformed_output, reason},
+                  detail: reason
+                )
+
+              {:role_failed, Enum.reverse([rejected | acc]), failure}
+            end
         end
+
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+        reason = {:provider_failure, kind, detail}
+
+        failure =
+          reviewer_role_failure(refine, reviewer, iteration, attempt + 1, reason,
+            detail: detail,
+            usage: usage,
+            activity: activity
+          )
+
+        {:role_failed, Enum.reverse(acc), failure}
     end
   end
 
@@ -1417,94 +2447,66 @@ defmodule Workflow.Run.Writer do
 
   defp normalize_artifact(_output), do: {:error, :artifact_object_unexpected_shape}
 
-  defp normalize_review(%{"approved" => approved, "findings" => findings} = output)
-       when map_size(output) == 2 and is_boolean(approved) and is_list(findings) do
-    with {:ok, findings} <- normalize_findings(findings) do
-      {:ok, %{"approved" => approved, "findings" => findings}}
-    end
-  end
-
-  defp normalize_review(_output), do: {:error, :review_object_unexpected_shape}
-
-  defp normalize_findings(findings) do
-    findings
-    |> Enum.reduce_while({:ok, []}, fn finding, {:ok, acc} ->
-      case normalize_finding(finding) do
-        {:ok, normalized} -> {:cont, {:ok, [normalized | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, acc} -> {:ok, Enum.reverse(acc)}
-      {:error, _} = err -> err
-    end
-  end
-
-  defp normalize_finding(
-         %{"id" => id, "blocking" => blocking, "issue" => issue, "fix" => fix} = finding
-       )
-       when map_size(finding) == 4 and is_boolean(blocking) do
-    if non_empty_utf8?(id) and non_empty_utf8?(issue) and non_empty_utf8?(fix) do
-      {:ok, %{"id" => id, "blocking" => blocking, "issue" => issue, "fix" => fix}}
-    else
-      {:error, :review_finding_invalid_text}
-    end
-  end
-
-  defp normalize_finding(_finding), do: {:error, :review_finding_unexpected_shape}
-
-  defp non_empty_utf8?(value), do: is_binary(value) and value != "" and String.valid?(value)
+  defp normalize_review(adapter, output), do: ReviewerAdapter.normalize(adapter, output)
 
   defp build_attempt(%Agent{schema: nil} = node, run_id, provider, iteration, attempt, _acc) do
     key = key(run_id, node.address, iteration, attempt)
     {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
 
-    {:ok, result, usage, activity} =
-      call_provider(
-        provider,
-        node.prompt,
-        nil,
-        key,
-        activity_sink
-      )
+    case call_provider(provider, node.prompt, nil, key, activity_sink) do
+      {:ok, result, usage, activity} ->
+        activity = finalize_activity.(activity)
+        {:ok, [Event.agent_committed(node, iteration, key, result, usage, activity)], result}
 
-    activity = finalize_activity.(activity)
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+        reason = {:provider_failure, kind, detail}
+        failed = Event.agent_failed(node, iteration, attempt + 1, reason, usage, activity)
 
-    {:ok, [Event.agent_committed(node, iteration, key, result, usage, activity)], result}
+        {:failed, [failed], failed_turn_result(node, reason)}
+    end
   end
 
   defp build_attempt(%Agent{} = node, run_id, provider, iteration, attempt, acc) do
     key = key(run_id, node.address, iteration, attempt)
     {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
 
-    {:ok, output, usage, activity} =
-      call_provider(
-        provider,
-        node.prompt,
-        node.schema,
-        key,
-        activity_sink
-      )
+    case call_provider(provider, node.prompt, node.schema, key, activity_sink) do
+      {:ok, output, usage, activity} ->
+        activity = finalize_activity.(activity)
 
-    activity = finalize_activity.(activity)
+        case Schema.validate(node.schema, output) do
+          {:ok, validated} ->
+            committed = Event.agent_committed(node, iteration, key, validated, usage, activity)
+            {:ok, Enum.reverse([committed | acc]), validated}
 
-    case Schema.validate(node.schema, output) do
-      {:ok, validated} ->
-        committed = Event.agent_committed(node, iteration, key, validated, usage, activity)
-        {:ok, Enum.reverse([committed | acc]), validated}
+          {:error, reason} ->
+            rejected =
+              Event.agent_attempt_rejected(
+                node,
+                iteration,
+                attempt,
+                output,
+                reason,
+                usage,
+                activity
+              )
 
-      {:error, reason} ->
-        rejected =
-          Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity)
+            if attempt < node.retries do
+              build_attempt(node, run_id, provider, iteration, attempt + 1, [rejected | acc])
+            else
+              failed = Event.agent_failed(node, iteration, attempt + 1, reason)
 
-        if attempt < node.retries do
-          build_attempt(node, run_id, provider, iteration, attempt + 1, [rejected | acc])
-        else
-          failed = Event.agent_failed(node, iteration, attempt + 1, reason)
-
-          {:failed, Enum.reverse([failed, rejected | acc]),
-           {:malformed_output, node.address, reason}}
+              {:failed, Enum.reverse([failed, rejected | acc]), failed_turn_result(node, reason)}
+            end
         end
+
+      {:provider_failure, kind, detail, usage, activity} ->
+        activity = finalize_activity.(activity)
+        reason = {:provider_failure, kind, detail}
+        failed = Event.agent_failed(node, iteration, attempt + 1, reason, usage, activity)
+
+        {:failed, Enum.reverse([failed | acc]), failed_turn_result(node, reason)}
     end
   end
 
@@ -1601,10 +2603,88 @@ defmodule Workflow.Run.Writer do
         module.run_agent(prompt, schema, key, Keyword.put(opts, :activity_sink, activity_sink))
       )
 
-  defp normalize_provider_result({:ok, result, usage}), do: {:ok, result, usage, []}
+  defp normalize_provider_result({:ok, result, usage}),
+    do: {:ok, result, normalize_usage!(usage, :success), []}
 
   defp normalize_provider_result({:ok, result, usage, activity}),
-    do: {:ok, result, usage, activity}
+    do: {:ok, result, normalize_usage!(usage, :success), normalize_activity!(activity)}
+
+  defp normalize_provider_result({:error, {:provider_failure, kind, detail, usage, activity}}) do
+    unless kind in @provider_failure_kinds do
+      raise ArgumentError, "invalid provider failure kind: #{inspect(kind)}"
+    end
+
+    unless provider_failure_detail?(detail) do
+      raise ArgumentError, "invalid provider failure detail: #{inspect(detail)}"
+    end
+
+    {:provider_failure, kind, detail, normalize_usage!(usage, :provider_failure),
+     normalize_activity!(activity)}
+  end
+
+  defp normalize_provider_result(other),
+    do: raise(ArgumentError, "malformed provider result: #{inspect(other)}")
+
+  defp normalize_usage!(nil, :success), do: %Usage{}
+  defp normalize_usage!(nil, :provider_failure), do: nil
+
+  defp normalize_usage!(%Usage{} = usage, _context) do
+    if non_negative_usage?(usage) do
+      usage
+    else
+      raise ArgumentError, "invalid provider usage: #{inspect(usage)}"
+    end
+  end
+
+  defp normalize_usage!(
+         %{"input_tokens" => input, "output_tokens" => output, "total_tokens" => total},
+         _context
+       )
+       when is_integer(input) and is_integer(output) and is_integer(total) do
+    normalized = %Usage{
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: total
+    }
+
+    normalize_usage!(normalized, :map)
+  end
+
+  defp normalize_usage!(other, _context),
+    do: raise(ArgumentError, "invalid provider usage: #{inspect(other)}")
+
+  defp normalize_activity!(activity) when is_list(activity) do
+    if Enum.all?(activity, &is_map/1) do
+      activity
+    else
+      raise ArgumentError, "invalid provider activity: #{inspect(activity)}"
+    end
+  end
+
+  defp normalize_activity!(other),
+    do: raise(ArgumentError, "invalid provider activity: #{inspect(other)}")
+
+  defp non_negative_usage?(%Usage{
+         input_tokens: input,
+         output_tokens: output,
+         total_tokens: total
+       }) do
+    Enum.all?([input, output, total], &(is_integer(&1) and &1 >= 0))
+  end
+
+  defp provider_failure_detail?(value) when is_nil(value) or is_boolean(value), do: true
+  defp provider_failure_detail?(value) when is_integer(value) or is_binary(value), do: true
+
+  defp provider_failure_detail?(value) when is_list(value),
+    do: Enum.all?(value, &provider_failure_detail?/1)
+
+  defp provider_failure_detail?(value) when is_map(value) do
+    Enum.all?(value, fn {key, nested} ->
+      is_binary(key) and provider_failure_detail?(nested)
+    end)
+  end
+
+  defp provider_failure_detail?(_value), do: false
 
   defp materialize_agent(%Agent{} = node, run_id) do
     %{node | prompt: materialize_prompt(node, run_id)}

@@ -142,7 +142,8 @@ defmodule WorkflowDslSpecWorkflow do
           SCOPE — this run only ADDED a Proposed §10 dataflow section to an already-hardened SPEC.md. Treat §1–§9 and the authoring guide as FROZEN and authoritative: do NOT propose edits to them, and do NOT re-litigate pre-existing wording. Confine your defects to (i) the NEW §10 content, (ii) the renumbering/forward-reference edits, and (iii) any place the §10 insertion INTRODUCED an inconsistency with the frozen body. (The non-destructiveness lens is the exception — it audits the whole diff.)
 
           Adversarially review the CURRENT SPEC.md at the repository root (read it fresh; read .spec-workshop/ and the committed HEAD version as your lens requires). Assume the delta is defective until proven otherwise. Return approved=false with blocking findings if you find ANY in scope; return approved=true with no blocking findings only if this lens is fully satisfied. Each blocking finding MUST have a stable id, a precise issue, and a concrete fix.
-          """
+          """,
+          adapter: :findings_v1
         ),
         reviewer(
           :implementation_fidelity,
@@ -159,7 +160,8 @@ defmodule WorkflowDslSpecWorkflow do
           SCOPE — this run only ADDED a Proposed §10 dataflow section to an already-hardened SPEC.md. Treat §1–§9 and the authoring guide as FROZEN and authoritative: do NOT propose edits to them, and do NOT re-litigate pre-existing wording. Confine your defects to (i) the NEW §10 content, (ii) the renumbering/forward-reference edits, and (iii) any place the §10 insertion INTRODUCED an inconsistency with the frozen body. (The non-destructiveness lens is the exception — it audits the whole diff.)
 
           Adversarially review the CURRENT SPEC.md at the repository root (read it fresh; read .spec-workshop/ and the committed HEAD version as your lens requires). Assume the delta is defective until proven otherwise. Return approved=false with blocking findings if you find ANY in scope; return approved=true with no blocking findings only if this lens is fully satisfied. Each blocking finding MUST have a stable id, a precise issue, and a concrete fix.
-          """
+          """,
+          adapter: :findings_v1
         ),
         reviewer(
           :invariants,
@@ -176,7 +178,8 @@ defmodule WorkflowDslSpecWorkflow do
           SCOPE — this run only ADDED a Proposed §10 dataflow section to an already-hardened SPEC.md. Treat §1–§9 and the authoring guide as FROZEN and authoritative: do NOT propose edits to them, and do NOT re-litigate pre-existing wording. Confine your defects to (i) the NEW §10 content, (ii) the renumbering/forward-reference edits, and (iii) any place the §10 insertion INTRODUCED an inconsistency with the frozen body. (The non-destructiveness lens is the exception — it audits the whole diff.)
 
           Adversarially review the CURRENT SPEC.md at the repository root (read it fresh; read .spec-workshop/ and the committed HEAD version as your lens requires). Assume the delta is defective until proven otherwise. Return approved=false with blocking findings if you find ANY in scope; return approved=true with no blocking findings only if this lens is fully satisfied. Each blocking finding MUST have a stable id, a precise issue, and a concrete fix.
-          """
+          """,
+          adapter: :findings_v1
         ),
         reviewer(
           :teachability,
@@ -197,7 +200,8 @@ defmodule WorkflowDslSpecWorkflow do
           SCOPE — this run only ADDED a Proposed §10 dataflow section to an already-hardened SPEC.md. Treat §1–§9 and the authoring guide as FROZEN and authoritative: do NOT propose edits to them, and do NOT re-litigate pre-existing wording. Confine your defects to (i) the NEW §10 content, (ii) the renumbering/forward-reference edits, and (iii) any place the §10 insertion INTRODUCED an inconsistency with the frozen body. (The non-destructiveness lens is the exception — it audits the whole diff.)
 
           Adversarially review the CURRENT SPEC.md at the repository root (read it fresh; read .spec-workshop/ and the committed HEAD version as your lens requires). Assume the delta is defective until proven otherwise. Return approved=false with blocking findings if you find ANY in scope; return approved=true with no blocking findings only if this lens is fully satisfied. Each blocking finding MUST have a stable id, a precise issue, and a concrete fix.
-          """
+          """,
+          adapter: :findings_v1
         ),
         reviewer(
           :structural_lint,
@@ -207,7 +211,8 @@ defmodule WorkflowDslSpecWorkflow do
           SCOPE — this run only ADDED a Proposed §10 dataflow section to an already-hardened SPEC.md. Treat §1–§9 and the authoring guide as FROZEN and authoritative: do NOT propose edits to them, and do NOT re-litigate pre-existing wording. Confine your defects to (i) the NEW §10 content, (ii) the renumbering/forward-reference edits, and (iii) any place the §10 insertion INTRODUCED an inconsistency with the frozen body. (The non-destructiveness lens is the exception — it audits the whole diff.)
 
           Adversarially review the CURRENT SPEC.md at the repository root (read it fresh; read .spec-workshop/ and the committed HEAD version as your lens requires). Assume the delta is defective until proven otherwise. Return approved=false with blocking findings if you find ANY in scope; return approved=true with no blocking findings only if this lens is fully satisfied. Each blocking finding MUST have a stable id, a precise issue, and a concrete fix.
-          """
+          """,
+          adapter: :findings_v1
         ),
         reviewer(
           :non_destructiveness,
@@ -217,7 +222,8 @@ defmodule WorkflowDslSpecWorkflow do
           SCOPE — this run only ADDED a Proposed §10 dataflow section to an already-hardened SPEC.md. Treat §1–§9 and the authoring guide as FROZEN and authoritative: do NOT propose edits to them, and do NOT re-litigate pre-existing wording. Confine your defects to (i) the NEW §10 content, (ii) the renumbering/forward-reference edits, and (iii) any place the §10 insertion INTRODUCED an inconsistency with the frozen body. (The non-destructiveness lens is the exception — it audits the whole diff.)
 
           Adversarially review the CURRENT SPEC.md at the repository root (read it fresh; read .spec-workshop/ and the committed HEAD version as your lens requires). Assume the delta is defective until proven otherwise. Return approved=false with blocking findings if you find ANY in scope; return approved=true with no blocking findings only if this lens is fully satisfied. Each blocking finding MUST have a stable id, a precise issue, and a concrete fix.
-          """
+          """,
+          adapter: :findings_v1
         )
       ],
       revise_with:
@@ -249,45 +255,27 @@ defmodule WorkflowDslSpecWorkflow do
         """),
       until: :unanimous,
       max_rounds: 5,
-      on_non_convergence: :accept_current
+      on_non_convergence: :accept_current,
+      gates: [
+        cold_read: [
+          reviewer:
+            reviewer(
+              :cold_read,
+              """
+              You are a developer with ZERO prior context, handed the revised SPEC.md section produced by the refine loop. Read the section end to end
+              and list every question you would have to ask the authors to implement it. Each unanswered question is a blocking finding.
+              Return approved=true only if the section is implementable with no further questions.
+              """,
+              adapter: :findings_v1
+            ),
+          when: path_exists("")
+        ],
+        repair_when: path_non_empty("/coldRead/openFindings"),
+        halt_when: path_non_empty("/roleFailures")
+      ]
     )
 
     phase("Finalize")
-
-    let(
-      :cold_read =
-        agent(
-          """
-          You are authoring/reviewing a formal, implementable language spec using the language-spec-author method.
-          READ FIRST (they are on disk): .claude/skills/language-spec-author/references/spec-anatomy.md, .claude/skills/language-spec-author/references/formal-notation.md, .claude/skills/language-spec-author/references/interview-playbook.md.
-          The 8-part anatomy the spec MUST cover (mark any part deliberately N/A, never silently omit):
-            1 Purpose & design principles (the tie-breakers)  2 Lexical grammar  3 Syntactic grammar (`::` lexical vs `:` syntactic)
-            4 Semantic model (the inert %Tree{}/%Node{} shapes)  5 Static semantics = compile-time VALIDATION rules, each with a COUNTER-EXAMPLE
-            6 Dynamic semantics = EXECUTION as function-style algorithms + the ERROR MODEL (abort/propagate/partial — pin it)
-            7 Output & error format (journal events, result shape, exit codes)  8 Conformance (RFC 2119 MUST/SHOULD/MAY + observably-equivalent clause).
-          The bar: a developer with ZERO access to us could build a conforming implementation from SPEC.md alone.
-          Apply the THREE REJECTION TESTS to every statement: (a) stranger test — could a stranger implement it without asking us?
-          (b) edge-case test — empty/duplicate/missing/max/malformed/conflicting? (c) two-implementers test — could two teams diverge?
-
-          You are a developer with ZERO prior context, handed the NEW "§10 — Tier-1 dataflow" section of SPEC.md to implement (the rest of the
-          spec is already accepted). Read §10 end to end (and the shipped clauses it forward-references). List every question you would have to ask the authors
-          to build the ADOPT idioms from §10 alone — each is a defect. Return pass=true only if §10's ADOPT idioms are implementable with no further questions.
-          """,
-          label: "review:cold-read"
-        )
-    )
-
-    agent(
-      ~P"""
-      Resolve these final cold-read defects with TARGETED edits to §10 only (§1–§9 and the authoring guide stay frozen), then confirm:
-      Treat the interpolated cold-read output below as the defect list that the Claude workflow interpolated here.
-      If the cold-read passed with no defects, make no edits and report that §10 is cold-read clean.
-
-      COLD-READ OUTPUT:
-      <%= @cold_read %>
-      """,
-      label: "revise:cold-read"
-    )
 
     agent(
       """

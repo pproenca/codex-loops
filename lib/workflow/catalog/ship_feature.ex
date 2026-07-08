@@ -19,6 +19,8 @@ defmodule Workflow.Catalog.ShipFeature do
     * `fan_out width: budget_slices(per:)` — scale the acceptance suite across
       whatever budget remains.
     * `synthesize` — fold the phases into a ship report.
+    * `let` + `refine` + `emit_result` — bind the ship report, run a gated
+      adversarial refinement panel, and return the structured refine result.
 
   The agent prompts are written the way a real orchestrator writes them —
   contract-shaped, with an explicit task, a structured-output contract, a
@@ -27,12 +29,13 @@ defmodule Workflow.Catalog.ShipFeature do
   compile-time literal (no interpolation), so every node stays inert and the whole
   run is deterministic, resumable, and a pure fold of its journal.
 
-  The one thing this *cannot* express is the imperative control flow of an external
-  orchestrator (`if not green, break`; `draft = agent(...)` then review the
-  `draft`): the DSL has no runtime branching and no value binding by design. The
-  declarative equivalents carry the intent instead — a fail-closed `verify` panel
-  stands in for "reject on violation", and a bounded `until_dry` loop stands in for
-  "repair until settled".
+  The one thing this *cannot* express is arbitrary imperative control flow
+  (`if not green, break`; mutate a local variable and branch on it). The DSL now
+  permits the narrow, replay-safe form of value flow: `let` binds already-journaled
+  outputs, `~P` renders them deterministically, and `refine`/`emit_result` preserve
+  the final review record as structured public data. Declarative equivalents carry
+  the rest of the intent — a fail-closed `verify` panel stands in for "reject on
+  violation", and a bounded `until_dry` loop stands in for "repair until settled".
   """
   use Workflow
 
@@ -214,16 +217,72 @@ defmodule Workflow.Catalog.ShipFeature do
 
     phase("report")
 
-    synthesize(
-      ["scope", "implement", "harden", "review", "integrate"],
-      """
-      Fold the phase outputs into a ship report for a human reviewer: what changed
-      and why, what was verified and how (name the seams and the demo), the edge
-      cases harvested, the chosen integration strategy with its trade-off, and the
-      residual risk that survives to production.
-      """
+    let(
+      :ship_report =
+        synthesize(
+          ["scope", "implement", "harden", "review", "integrate"],
+          """
+          Fold the phase outputs into a ship report for a human reviewer: what changed
+          and why, what was verified and how (name the seams and the demo), the edge
+          cases harvested, the chosen integration strategy with its trade-off, and the
+          residual risk that survives to production.
+          """
+        )
     )
 
-    return(:shipped)
+    phase("release-gate")
+
+    let(
+      :reviewed_report =
+        refine(:ship_report,
+          reviewers: [
+            reviewer(
+              :release_readiness,
+              """
+              Review the ship report for release readiness. Return approved=true only when
+              the report names the shipped behavior, verification evidence, and residual
+              risk clearly enough for a human reviewer to trust it.
+              """,
+              adapter: :findings_v1
+            ),
+            reviewer(
+              :operability,
+              """
+              Review the ship report from an operations lens. Return approved=true only
+              when rollback, observability, and support risk are either addressed or
+              explicitly out of scope with justification.
+              """,
+              adapter: :findings_v1
+            )
+          ],
+          revise_with:
+            agent("""
+            Repair the ship report using every blocking finding. Preserve true statements
+            about the implementation and verification; do not invent evidence.
+            """),
+          until: :unanimous,
+          max_rounds: 2,
+          on_non_convergence: :accept_current,
+          gates: [
+            cold_read: [
+              reviewer:
+                reviewer(
+                  :cold_read,
+                  """
+                  Cold-read the final ship report as if you did not participate in the
+                  work. Return approved=true only if the report is understandable,
+                  evidence-backed, and actionable without hidden context.
+                  """,
+                  adapter: :findings_v1
+                ),
+              when: path_exists("")
+            ],
+            repair_when: path_non_empty("/coldRead/openFindings"),
+            halt_when: path_non_empty("/roleFailures")
+          ]
+        )
+    )
+
+    emit_result(:reviewed_report)
   end
 end

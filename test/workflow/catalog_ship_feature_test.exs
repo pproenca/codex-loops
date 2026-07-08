@@ -45,9 +45,32 @@ defmodule Workflow.Catalog.ShipFeatureTest do
           Workflow.Node.Judge,
           Workflow.Node.FanOut,
           Workflow.Node.Synthesize,
-          Workflow.Node.Return
+          Workflow.Node.Refine,
+          Workflow.Node.EmitResult
         ] do
       assert node_mod in kinds, "expected the flagship to use #{inspect(node_mod)}"
     end
+  end
+
+  test "it uses gated refine and emits the structured refine result" do
+    %Tree{nodes: nodes} = ShipFeature.__workflow__(:tree)
+
+    assert %Workflow.Node.Refine{
+             input: {:binding, :ship_report, {:node, _ship_report_address}},
+             reviewers: reviewers,
+             gates: gates,
+             address: refine_address
+           } = Enum.find(nodes, &match?(%Workflow.Node.Refine{}, &1))
+
+    assert Enum.map(reviewers, & &1.adapter) == [:findings_v1, :findings_v1]
+    assert gates.cold_read.reviewer.adapter == :findings_v1
+    assert gates.cold_read.predicate == {:path_exists, ""}
+    assert gates.repair.predicate == {:path_non_empty, "/coldRead/openFindings"}
+    assert gates.halt.predicate == {:path_non_empty, "/roleFailures"}
+
+    assert %Workflow.Node.EmitResult{
+             binding: :reviewed_report,
+             ref: {:refine, ^refine_address}
+           } = List.last(nodes)
   end
 end

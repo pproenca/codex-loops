@@ -25,7 +25,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     assert prompts =~ "SURGICAL EDIT — DO NOT REWRITE SPEC.md"
     assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
     assert prompts =~ "The adversarial refine panel found blocking defects"
-    assert prompts =~ "Resolve these final cold-read defects with TARGETED edits to §10 only"
+    assert prompts =~ "Read the section end to end"
 
     assert prompts =~
              "Finalize the SPEC.md §10 insertion for HUMAN REVIEW — do NOT commit anything"
@@ -38,14 +38,13 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
              "read:spec-structure",
              "read:dataflow",
              "draft:spec",
+             "cold_read",
              "spec_completeness",
              "implementation_fidelity",
              "invariants",
              "teachability",
              "structural_lint",
              "non_destructiveness",
-             "review:cold-read",
-             "revise:cold-read",
              "verify:final"
            ]
   end
@@ -58,7 +57,8 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
              until: :unanimous,
              max_rounds: 5,
              on_non_convergence: :accept_current,
-             reviewers: reviewers
+             reviewers: reviewers,
+             gates: gates
            } = Enum.find(nodes, &match?(%Refine{}, &1))
 
     assert Enum.map(reviewers, & &1.name) == [
@@ -70,22 +70,34 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
              :non_destructiveness
            ]
 
+    assert Enum.all?(reviewers, &(&1.adapter == :findings_v1))
+    assert gates.cold_read.reviewer.name == :cold_read
+    assert gates.cold_read.reviewer.adapter == :findings_v1
+    assert gates.cold_read.predicate == {:path_exists, ""}
+    assert gates.repair.predicate == {:path_non_empty, "/coldRead/openFindings"}
+    assert gates.halt.predicate == {:path_non_empty, "/roleFailures"}
+
     prompts = reviewers |> Enum.map(& &1.prompt) |> Enum.join("\n---PROMPT---\n")
     assert prompts =~ "Return approved=false with blocking findings"
     assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
   end
 
-  test "final cold-read revision receives the bound cold-read output" do
+  test "final cold-read is modeled as a refine gate instead of an ad-hoc bound agent" do
     assert {:ok, %Tree{} = tree} = Script.load_tree(@script_path)
 
-    assert %Agent{
-             prompt: %Workflow.Template{assigns: ["cold_read"], segments: segments},
-             bindings: %{cold_read: {:node, _address}}
-           } = Enum.find(agents(tree), &match?(%Agent{label: "revise:cold-read"}, &1))
+    refute Enum.any?(agents(tree), &match?(%Agent{label: "revise:cold-read"}, &1))
 
-    prompt = Enum.join(segments, "<cold_read>")
-    assert prompt =~ "COLD-READ OUTPUT:"
-    assert prompt =~ "<cold_read>"
+    refute Enum.any?(
+             agents(tree),
+             &match?(%Agent{prompt: %Workflow.Template{assigns: ["cold_read"]}}, &1)
+           )
+
+    assert %Refine{gates: %{cold_read: cold_read, repair: repair, halt: halt}} =
+             tree.nodes |> Enum.find(&match?(%Refine{}, &1))
+
+    assert cold_read.reviewer.agent.label == "cold_read"
+    assert repair.agent.prompt =~ "The adversarial refine panel found blocking defects"
+    assert halt.predicate == {:path_non_empty, "/roleFailures"}
   end
 
   defp phase_names(nodes) do
@@ -116,12 +128,16 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_prompts(%Refine{
          input: {:producer, producer},
          reviewers: reviewers,
-         reviser: reviser
-       }),
-       do: agent_prompts([producer, reviser | Enum.map(reviewers, & &1.agent)])
+         reviser: reviser,
+         gates: gates
+       }) do
+    [producer, reviser | refine_gate_agents(gates)]
+    |> Kernel.++(Enum.map(reviewers, & &1.agent))
+    |> agent_prompts()
+  end
 
-  defp agent_prompts(%Refine{reviewers: reviewers, reviser: reviser}),
-    do: agent_prompts([reviser | Enum.map(reviewers, & &1.agent)])
+  defp agent_prompts(%Refine{reviewers: reviewers, reviser: reviser, gates: gates}),
+    do: agent_prompts([reviser | refine_gate_agents(gates)] ++ Enum.map(reviewers, & &1.agent))
 
   defp agent_prompts(_node), do: []
 
@@ -165,12 +181,16 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_labels(%Refine{
          input: {:producer, producer},
          reviewers: reviewers,
-         reviser: reviser
-       }),
-       do: agent_labels([producer, reviser | Enum.map(reviewers, & &1.agent)])
+         reviser: reviser,
+         gates: gates
+       }) do
+    [producer, reviser | refine_gate_agents(gates)]
+    |> Kernel.++(Enum.map(reviewers, & &1.agent))
+    |> agent_labels()
+  end
 
-  defp agent_labels(%Refine{reviewers: reviewers, reviser: reviser}),
-    do: agent_labels([reviser | Enum.map(reviewers, & &1.agent)])
+  defp agent_labels(%Refine{reviewers: reviewers, reviser: reviser, gates: gates}),
+    do: agent_labels([reviser | refine_gate_agents(gates)] ++ Enum.map(reviewers, & &1.agent))
 
   defp agent_labels(_node), do: []
 
@@ -192,11 +212,29 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agents(%UntilDry{body: body}), do: agents(body)
   defp agents(%WhileBudget{body: body}), do: agents(body)
 
-  defp agents(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser}),
-    do: agents([producer, reviser | Enum.map(reviewers, & &1.agent)])
+  defp agents(%Refine{
+         input: {:producer, producer},
+         reviewers: reviewers,
+         reviser: reviser,
+         gates: gates
+       }) do
+    [producer, reviser | refine_gate_agents(gates)]
+    |> Kernel.++(Enum.map(reviewers, & &1.agent))
+    |> agents()
+  end
 
-  defp agents(%Refine{reviewers: reviewers, reviser: reviser}),
-    do: agents([reviser | Enum.map(reviewers, & &1.agent)])
+  defp agents(%Refine{reviewers: reviewers, reviser: reviser, gates: gates}),
+    do: agents([reviser | refine_gate_agents(gates)] ++ Enum.map(reviewers, & &1.agent))
 
   defp agents(_node), do: []
+
+  defp refine_gate_agents(gates) do
+    gates
+    |> Map.values()
+    |> Enum.flat_map(fn
+      %{reviewer: %{agent: agent}} -> [agent]
+      %{agent: agent} -> [agent]
+      _gate -> []
+    end)
+  end
 end

@@ -26,6 +26,7 @@ release:
 	mkdir -p "$(PLUGIN_SCHEDULER_DIR)"
 	rm -rf "$(PLUGIN_SCHEDULER_DIR)/bin" "$(PLUGIN_SCHEDULER_DIR)"/erts-* "$(PLUGIN_SCHEDULER_DIR)/lib" "$(PLUGIN_SCHEDULER_DIR)/releases"
 	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(PLUGIN_SCHEDULER_DIR)/"
+	scripts/harden-release.py "$(PLUGIN_SCHEDULER_DIR)" "$(RELEASE_NAME)"
 	test -x "$(PLUGIN_SCHEDULER_DIR)/bin/$(RELEASE_NAME)"
 
 proof: release

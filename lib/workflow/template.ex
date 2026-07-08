@@ -305,6 +305,7 @@ defmodule Workflow.Template do
   defp binding_part({:node, _address} = ref), do: {:bound_value, ref}
   defp binding_part({:refine, _address} = ref), do: {:bound_value, ref}
   defp binding_part({:map, _address} = ref), do: {:bound_list, ref}
+  defp binding_part({:fanout, _address, _scope} = ref), do: {:bound_list, ref}
 
   defp hole_part(%Hole{op: :identity}, value_part), do: value_part
   defp hole_part(%Hole{} = hole, value_part), do: {:formatter, hole, value_part}

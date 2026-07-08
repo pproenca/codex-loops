@@ -15,11 +15,19 @@ defmodule Workflow.LoopRunTest do
 
   alias Workflow.{Run, Journal, Status, Ledger, Accumulator, IdempotencyKey}
   alias Workflow.Catalog.{LoopUntilBudget, LoopUntilDry}
-  alias Workflow.Test.{EchoProvider, ScriptedProvider, LoopProvider}
+  alias Workflow.Test.{EchoProvider, ExplodingProvider, ScriptedProvider, LoopProvider}
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
   defp events(id, type), do: Journal.fold(id) |> Enum.filter(&(&1.type == type))
+  defp decisions(id), do: events(id, :loop_decision) |> Enum.map(& &1.payload.decision)
+
+  defp decision_shapes(id) do
+    events(id, :loop_decision)
+    |> Enum.map(
+      &Map.take(&1.payload, [:decision, :predicate_result, :exhausted, :source_address])
+    )
+  end
 
   defp await_lease_released(run_id, tries \\ 200) do
     cond do
@@ -53,8 +61,41 @@ defmodule Workflow.LoopRunTest do
     refute_received {:agent_called, _}
 
     # Every continue/stop decision is journaled: four continues + one terminal stop.
-    decisions = events(id, :loop_decision) |> Enum.map(& &1.payload.decision)
-    assert decisions == [:continue, :continue, :continue, :continue, :stop]
+    assert decisions(id) == [:continue, :continue, :continue, :continue, {:stop, :until}]
+
+    assert decision_shapes(id) == [
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: {:stop, :until},
+               predicate_result: true,
+               exhausted: false,
+               source_address: nil
+             }
+           ]
+
     assert length(events(id, :iteration_started)) == 4
     assert :loop_completed in types(id)
 
@@ -122,8 +163,7 @@ defmodule Workflow.LoopRunTest do
     added = events(id, :accumulate) |> Enum.map(&length(&1.payload.added))
     assert added == [2, 1, 0, 0]
 
-    decisions = events(id, :loop_decision) |> Enum.map(& &1.payload.decision)
-    assert decisions == [:continue, :continue, :continue, :continue, :stop]
+    assert decisions(id) == [:continue, :continue, :continue, :continue, {:stop, :until}]
 
     status = Status.of(id)
     assert status.state == :completed
@@ -190,6 +230,19 @@ defmodule Workflow.LoopRunTest do
     end
   end
 
+  defmodule DryPredicateStop do
+    use Workflow
+
+    workflow "dry-predicate-stop" do
+      while_budget reserve: 0, until: dry(rounds: 1, seen_by: [:id]) do
+        agent("emit", schema: %{"type" => "array"})
+        collect(into: :items)
+      end
+
+      return(:ok)
+    end
+  end
+
   test "a while_budget `until` predicate stops the loop when count(:acc) is reached" do
     id = run_id()
     {:ok, script} = ScriptedProvider.start([[%{"id" => 1}], [%{"id" => 2}]])
@@ -206,9 +259,324 @@ defmodule Workflow.LoopRunTest do
 
     assert Accumulator.of(id) == %{items: [%{"id" => 1}, %{"id" => 2}]}
 
-    decisions = events(id, :loop_decision) |> Enum.map(& &1.payload.decision)
-    assert decisions == [:continue, :continue, :stop]
+    assert decisions(id) == [:continue, :continue, {:stop, :until}]
 
     assert Status.of(id).state == :completed
+  end
+
+  test "a while_budget dry predicate stops after one dry round and drives collect seen_by" do
+    id = run_id()
+
+    {:ok, script} =
+      ScriptedProvider.start([
+        [%{"id" => 1, "value" => "first"}],
+        [%{"id" => 1, "value" => "duplicate-by-id"}]
+      ])
+
+    assert {:ok, ^id} =
+             Run.run(DryPredicateStop,
+               run_id: id,
+               provider: {ScriptedProvider, script: script, sink: self()}
+             )
+
+    # Iteration 0 adds one item; iteration 1 is dry after :id dedupe; iteration 2
+    # sees a dry streak of 1 and stops before another provider call.
+    for _ <- 1..2, do: assert_received({:agent_called, "emit"})
+    refute_received {:agent_called, _}
+
+    assert Accumulator.of(id) == %{items: [%{"id" => 1, "value" => "first"}]}
+
+    accumulate_events = events(id, :accumulate)
+    assert Enum.map(accumulate_events, & &1.payload.seen_by) == [[:id], [:id]]
+    assert Enum.map(accumulate_events, &length(&1.payload.added)) == [1, 0]
+
+    assert decisions(id) == [:continue, :continue, {:stop, :until}]
+
+    assert Status.of(id).state == :completed
+  end
+
+  # --- generic loop core ---
+
+  defmodule GenericMaxLoop do
+    use Workflow
+
+    workflow "generic-max-loop" do
+      loop max_iterations: 2 do
+        agent("tick")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule BodyUntilStop do
+    use Workflow
+
+    workflow "body-until-stop" do
+      loop max_iterations: 5 do
+        agent("emit", schema: %{"type" => "array"})
+        collect(into: :items)
+        until(count(:items) >= 2)
+        agent("after")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule HeaderUntilStop do
+    use Workflow
+
+    workflow "header-until-stop" do
+      loop max_iterations: 5, until: count(:items) >= 2 do
+        agent("emit", schema: %{"type" => "array"})
+        collect(into: :items)
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule ExhaustFail do
+    use Workflow
+
+    workflow "generic-loop-exhaust-fail" do
+      loop max_iterations: 1, on_exhausted: :fail do
+        agent("tick")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule BodyUntilFanoutStop do
+    use Workflow
+
+    workflow "body-until-fanout-stop" do
+      loop max_iterations: 3 do
+        fanout width: 2, bind: :checks do
+          agent("check")
+        end
+
+        until(agree(:checks, path: "/echo", equals: "check", threshold: :all))
+        agent("after")
+      end
+
+      return(:ok)
+    end
+  end
+
+  test "generic loop runs until max_iterations and journals exhausted completion" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(GenericMaxLoop, run_id: id, provider: {EchoProvider, sink: self()})
+
+    for _ <- 1..2, do: assert_received({:agent_called, "tick"})
+    refute_received {:agent_called, _}
+
+    assert decisions(id) == [:continue, :continue, {:exhausted, :stop}]
+
+    assert decision_shapes(id) == [
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: {:exhausted, :stop},
+               predicate_result: nil,
+               exhausted: true,
+               source_address: nil
+             }
+           ]
+
+    assert [%{payload: completed}] = events(id, :loop_completed)
+
+    assert completed == %{
+             address: [0],
+             iterations: 2,
+             exhausted: true,
+             reason: :max_iterations
+           }
+
+    assert Status.of(id).state == :completed
+  end
+
+  test "generic loop header until stops from the journaled predicate decision" do
+    id = run_id()
+    {:ok, script} = ScriptedProvider.start([[%{"id" => 1}], [%{"id" => 2}]])
+
+    assert {:ok, ^id} =
+             Run.run(HeaderUntilStop,
+               run_id: id,
+               provider: {ScriptedProvider, script: script, sink: self()}
+             )
+
+    for _ <- 1..2, do: assert_received({:agent_called, "emit"})
+    refute_received {:agent_called, _}
+
+    assert Accumulator.of(id) == %{items: [%{"id" => 1}, %{"id" => 2}]}
+    assert decisions(id) == [:continue, :continue, {:stop, :until}]
+
+    assert decision_shapes(id) == [
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: {:stop, :until},
+               predicate_result: true,
+               exhausted: false,
+               source_address: nil
+             }
+           ]
+
+    assert [%{payload: %{iterations: 2, exhausted: false, reason: :until}}] =
+             events(id, :loop_completed)
+
+    assert Status.of(id).state == :completed
+  end
+
+  test "body-local until stops at its source position and skips later body nodes" do
+    id = run_id()
+
+    {:ok, script} =
+      ScriptedProvider.start([
+        [%{"id" => 1}],
+        %{"after" => true},
+        [%{"id" => 2}]
+      ])
+
+    assert {:ok, ^id} =
+             Run.run(BodyUntilStop,
+               run_id: id,
+               provider: {ScriptedProvider, script: script, sink: self()}
+             )
+
+    assert_received {:agent_called, "emit"}
+    assert_received {:agent_called, "after"}
+    assert_received {:agent_called, "emit"}
+    refute_received {:agent_called, "after"}
+    refute_received {:agent_called, _}
+
+    assert Accumulator.of(id) == %{items: [%{"id" => 1}, %{"id" => 2}]}
+
+    assert decision_shapes(id) == [
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: [0, 2]
+             },
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: {:stop, :until},
+               predicate_result: true,
+               exhausted: false,
+               source_address: [0, 2]
+             }
+           ]
+
+    assert [%{payload: completed}] = events(id, :loop_completed)
+    assert completed.iterations == 2
+    assert completed.exhausted == false
+    assert completed.reason == :until
+  end
+
+  test "on_exhausted fail emits loop_exhausted and folds to the spec failure outcome" do
+    id = run_id()
+
+    assert {:error, {:loop_exhausted, [0], 1}} =
+             Run.run(ExhaustFail, run_id: id, provider: {EchoProvider, sink: self()})
+
+    assert_received {:agent_called, "tick"}
+    refute_received {:agent_called, _}
+
+    assert types(id) == [
+             :run_started,
+             :loop_decision,
+             :iteration_started,
+             :agent_committed,
+             :loop_decision,
+             :loop_exhausted
+           ]
+
+    assert decisions(id) == [:continue, {:exhausted, :fail}]
+
+    assert [%{payload: exhausted}] = events(id, :loop_exhausted)
+    assert exhausted == %{address: [0], iterations: 1, reason: :max_iterations}
+
+    status = Status.of(id)
+    assert status.state == :failed
+
+    assert status.failure == %{
+             address: [0],
+             iteration: 1,
+             attempts: 0,
+             reason: {:loop_exhausted, [0], 1}
+           }
+
+    event_count = Journal.fold(id) |> length()
+
+    assert {:error, {:loop_exhausted, [0], 1}} =
+             Run.run(ExhaustFail, run_id: id, provider: {ExplodingProvider, []})
+
+    assert Journal.fold(id) |> length() == event_count
+  end
+
+  test "body-local until can stop from a loop-local fanout binding" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(BodyUntilFanoutStop, run_id: id, provider: {EchoProvider, sink: self()})
+
+    for _ <- 1..2, do: assert_received({:agent_called, "check"})
+    refute_received {:agent_called, "after"}
+    refute_received {:agent_called, _}
+
+    assert decision_shapes(id) == [
+             %{
+               decision: :continue,
+               predicate_result: false,
+               exhausted: false,
+               source_address: nil
+             },
+             %{
+               decision: {:stop, :until},
+               predicate_result: true,
+               exhausted: false,
+               source_address: [0, 1]
+             }
+           ]
+
+    assert [%{payload: %{iterations: 1, reason: :until, exhausted: false}}] =
+             events(id, :loop_completed)
   end
 end

@@ -38,6 +38,7 @@ defmodule Workflow.Run.Writer do
     Ledger,
     Accumulator,
     BoundValue,
+    BoundList,
     Predicate,
     PubSub,
     RenderText,
@@ -58,14 +59,18 @@ defmodule Workflow.Run.Writer do
     Parallel,
     Pipeline,
     Collect,
+    Loop,
+    Until,
     WhileBudget,
     UntilDry,
     Verify,
     Refine,
     Judge,
     Synthesize,
+    GenericFanout,
     FanOut,
-    BudgetSlices
+    BudgetSlices,
+    PathCount
   }
 
   @refine_artifact_schema %{
@@ -130,6 +135,15 @@ defmodule Workflow.Run.Writer do
   defp failed_run_result(%{reason: {:did_not_converge, address, reason}}),
     do: {:error, {:did_not_converge, address, reason}}
 
+  defp failed_run_result(%{reason: {:fanout_failed, address, iteration, reason}}),
+    do: {:error, {:fanout_failed, address, iteration, reason}}
+
+  defp failed_run_result(%{reason: {:fanout_failed, address, reason}}),
+    do: {:error, {:fanout_failed, address, nil, reason}}
+
+  defp failed_run_result(%{reason: {:loop_exhausted, address, iteration}}),
+    do: {:error, {:loop_exhausted, address, iteration}}
+
   defp failed_run_result(%{address: address, reason: {:provider_failure, kind, detail}}),
     do: {:error, {:provider_failure, address, kind, detail}}
 
@@ -156,7 +170,7 @@ defmodule Workflow.Run.Writer do
         do: commit(run_id, seq, Event.run_started(tree, budget, script_path)),
         else: seq
 
-    ctx = %{seq: seq, return: nil, last_result: nil, iteration: 0, seen_by: []}
+    ctx = %{seq: seq, return: nil, last_result: nil, iteration: 0, seen_by: [], loop_address: nil}
 
     case run_nodes(tree.nodes, run_id, provider, prior, ctx) do
       {:cont, ctx} ->
@@ -174,6 +188,7 @@ defmodule Workflow.Run.Writer do
     Enum.reduce_while(nodes, {:cont, ctx}, fn node, {:cont, ctx} ->
       case run_node(node, run_id, provider, prior, ctx) do
         {:cont, ctx} -> {:cont, {:cont, ctx}}
+        {:loop_stop, ctx, reason} -> {:halt, {:loop_stop, ctx, reason}}
         {:halt, ctx, reason} -> {:halt, {:halt, ctx, reason}}
       end
     end)
@@ -262,11 +277,19 @@ defmodule Workflow.Run.Writer do
     end
   end
 
+  defp run_node(%Until{} = node, run_id, _provider, prior, ctx) do
+    run_until(node, run_id, prior, ctx)
+  end
+
+  # Generic bounded loop core.
+  defp run_node(%Loop{} = node, run_id, provider, prior, ctx),
+    do: loop(node, loop_seen_by(node.until), run_id, provider, prior, ctx, 0)
+
   # `while_budget`: loop while the ledger's `remaining` exceeds `reserve` (and any
   # `until` predicate stays false). Termination is guaranteed — `remaining` only
   # falls — and bounded by `max_iterations` regardless.
   defp run_node(%WhileBudget{} = node, run_id, provider, prior, ctx),
-    do: loop(node, [], run_id, provider, prior, ctx, 0)
+    do: loop(node, while_budget_seen_by(node), run_id, provider, prior, ctx, 0)
 
   # `until_dry`: loop until `rounds` consecutive iterations add nothing new,
   # deduping by `seen_by`; bounded by `max_iterations`.
@@ -394,6 +417,39 @@ defmodule Workflow.Run.Writer do
   defp run_node(%Synthesize{} = node, run_id, provider, prior, ctx) do
     agent = %Agent{address: node.address, prompt: synthesis_prompt(node), schema: nil, retries: 0}
     run_node(agent, run_id, provider, prior, ctx)
+  end
+
+  # Generic fixed-width fanout: decide (and journal) the width once, repeat the
+  # single lane across concrete branch addresses, then commit lane events in branch
+  # order. Top-level fanouts carry marker iteration nil; loop-body fanouts use the
+  # current loop iteration so their width/result binding is loop-local.
+  defp run_node(%GenericFanout{} = node, run_id, provider, prior, ctx) do
+    fanout_iteration = if ctx.loop_address, do: ctx.iteration, else: nil
+    lane_iteration = ctx.iteration
+    {width, seq} = decide_fanout_width(node, run_id, prior, ctx.seq, fanout_iteration)
+
+    if width == 0 and node.on_zero == :fail do
+      seq = commit(run_id, seq, Event.fanout_failed(node, :zero_width, fanout_iteration))
+      reason = {:fanout_failed, node.address, fanout_iteration, :zero_width}
+      {:halt, %{ctx | seq: seq}, reason}
+    else
+      branches = materialize_fanout_branches(node, width)
+      cap = node.max_concurrency || max(width, 1)
+
+      results =
+        run_concurrently(branches, cap, fn lane ->
+          run_lane(lane, run_id, provider, prior, lane_iteration)
+        end)
+
+      case commit_lanes(results, run_id, seq) do
+        {:ok, seq} ->
+          seq = commit_fanout_completed(run_id, seq, prior, node, fanout_iteration)
+          {:cont, %{ctx | seq: seq}}
+
+        {:halt, seq, reason} ->
+          {:halt, %{ctx | seq: seq}, reason}
+      end
+    end
   end
 
   # Budget-scaled fan-out: decide (and journal) the width once, then run that many
@@ -1817,6 +1873,68 @@ defmodule Workflow.Run.Writer do
         {:literal, inputs}
       ])
 
+  # --- Generic fanout width (a journaled runtime decision) ---
+
+  defp decide_fanout_width(%GenericFanout{} = node, run_id, prior, seq, iteration) do
+    case journaled_fanout_width(prior, node.address, iteration) do
+      {:ok, width} ->
+        {width, seq}
+
+      :none ->
+        width = compute_fanout_width(node.width, run_id)
+        {width, commit(run_id, seq, Event.fanout_started(node, width, iteration))}
+    end
+  end
+
+  defp compute_fanout_width(width, _run_id) when is_integer(width), do: width
+  defp compute_fanout_width(%BudgetSlices{} = width, run_id), do: compute_width(width, run_id)
+
+  defp compute_fanout_width(%PathCount{ref: ref, pointer: pointer, max: max}, run_id) do
+    events = Journal.fold(run_id)
+
+    case resolve_binding_ref(events, ref) do
+      {:ok, value} ->
+        value
+        |> path_resolve(pointer)
+        |> path_count()
+        |> min(max)
+
+      {:error, reason} ->
+        raise ArgumentError, "unable to resolve path_count fanout width: #{inspect(reason)}"
+    end
+  end
+
+  defp journaled_fanout_width(prior, address, iteration) do
+    case Enum.find(
+           prior,
+           &(&1.type == :fanout_started and &1.payload.address == address and
+               Map.get(&1.payload, :iteration) == iteration)
+         ) do
+      nil -> :none
+      event -> {:ok, event.payload.width}
+    end
+  end
+
+  defp commit_fanout_completed(run_id, seq, prior, %GenericFanout{} = node, iteration) do
+    if journaled_fanout_marker?(prior, :fanout_completed, node.address, iteration) do
+      seq
+    else
+      commit(run_id, seq, Event.fanout_completed(node, iteration))
+    end
+  end
+
+  defp journaled_fanout_marker?(prior, type, address, iteration) do
+    Enum.any?(
+      prior,
+      &(&1.type == type and &1.payload.address == address and
+          Map.get(&1.payload, :iteration) == iteration)
+    )
+  end
+
+  defp materialize_fanout_branches(%GenericFanout{repeated: true, lanes: [lane]} = node, width) do
+    for i <- 0..(width - 1)//1, do: rebase_body(lane, node.address ++ [i])
+  end
+
   # --- Budget-scaled fan-out width (a journaled runtime decision) ---
 
   # Decide the width once and journal it; a resume replays the journaled width rather
@@ -1833,15 +1951,21 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp compute_width(%BudgetSlices{per: per}, run_id) do
+  defp compute_width(%BudgetSlices{per: per, max: cap}, run_id) do
     case Ledger.remaining(Ledger.of(run_id)) do
       :infinity ->
         raise ArgumentError, "budget_slices requires a bounded run (no budget target set)"
 
       remaining ->
-        div(max(remaining, 0), per)
+        remaining
+        |> max(0)
+        |> div(per)
+        |> cap_width(cap)
     end
   end
+
+  defp cap_width(width, nil), do: width
+  defp cap_width(width, cap), do: min(width, cap)
 
   defp journaled_fan_out_width(prior, address) do
     case Enum.find(prior, fn e -> e.type == :fan_out_started and e.payload.address == address end) do
@@ -1864,19 +1988,53 @@ defmodule Workflow.Run.Writer do
   # iteration's key (its committed turns replay on resume); a `:stop` closes the loop
   # bracket.
   defp loop(node, seen_by, run_id, provider, prior, ctx, iteration) do
-    {decision, ctx} = decide(node, run_id, prior, ctx, iteration)
+    {control, ctx} = decide(node, run_id, prior, ctx, iteration)
 
-    case decision do
-      :stop ->
+    case control.decision do
+      {:stop, reason} ->
         {:cont,
          %{
            ctx
-           | seq: commit_marker(run_id, ctx.seq, prior, Event.loop_completed(node, iteration))
+           | seq:
+               commit_marker(
+                 run_id,
+                 ctx.seq,
+                 prior,
+                 Event.loop_completed(node, iteration, exhausted: false, reason: reason)
+               )
+         }}
+
+      {:exhausted, :fail} ->
+        seq = commit(run_id, ctx.seq, Event.loop_exhausted(node, iteration, :max_iterations))
+        {:halt, %{ctx | seq: seq}, {:loop_exhausted, node.address, iteration}}
+
+      {:exhausted, action} when action in [:stop, :accept_current] ->
+        {:cont,
+         %{
+           ctx
+           | seq:
+               commit_marker(
+                 run_id,
+                 ctx.seq,
+                 prior,
+                 Event.loop_completed(node, iteration,
+                   exhausted: true,
+                   reason: :max_iterations
+                 )
+               )
          }}
 
       :continue ->
         seq = iteration_marker(run_id, ctx.seq, prior, node, iteration)
-        body_ctx = %{ctx | seq: seq, iteration: iteration, seen_by: seen_by, last_result: nil}
+
+        body_ctx = %{
+          ctx
+          | seq: seq,
+            iteration: iteration,
+            loop_address: node.address,
+            seen_by: seen_by,
+            last_result: nil
+        }
 
         case run_nodes(node.body, run_id, provider, prior, body_ctx) do
           {:cont, body_ctx} ->
@@ -1890,6 +2048,22 @@ defmodule Workflow.Run.Writer do
               iteration + 1
             )
 
+          {:loop_stop, body_ctx, reason} ->
+            {:cont,
+             %{
+               ctx
+               | seq:
+                   commit_marker(
+                     run_id,
+                     body_ctx.seq,
+                     prior,
+                     Event.loop_completed(node, iteration + 1,
+                       exhausted: false,
+                       reason: reason
+                     )
+                   )
+             }}
+
           {:halt, body_ctx, reason} ->
             {:halt, %{ctx | seq: body_ctx.seq}, reason}
         end
@@ -1899,37 +2073,276 @@ defmodule Workflow.Run.Writer do
   # Replay a journaled decision verbatim; only compute (and journal) a fresh one when
   # this iteration has never been decided.
   defp decide(node, run_id, prior, ctx, iteration) do
-    case journaled_decision(prior, node.address, iteration) do
-      {:ok, decision} ->
-        {decision, ctx}
+    case journaled_decision(prior, node.address, iteration, nil) do
+      {:ok, payload} ->
+        {replayed_control(payload), ctx}
 
       :none ->
-        decision = fresh_decision(node, run_id, iteration)
+        control = fresh_decision(node, run_id, iteration)
 
-        {decision,
-         %{ctx | seq: commit(run_id, ctx.seq, Event.loop_decision(node, iteration, decision))}}
+        {control,
+         %{
+           ctx
+           | seq:
+               commit(
+                 run_id,
+                 ctx.seq,
+                 Event.loop_decision(node, iteration, control.decision,
+                   predicate_result: control.predicate_result,
+                   exhausted: control.exhausted,
+                   source_address: nil
+                 )
+               )
+         }}
+    end
+  end
+
+  defp run_until(%Until{} = node, run_id, prior, %{loop_address: loop_address} = ctx)
+       when is_list(loop_address) and is_integer(ctx.iteration) do
+    case journaled_decision(prior, loop_address, ctx.iteration, node.address) do
+      {:ok, payload} ->
+        case replayed_control(payload).decision do
+          {:stop, reason} -> {:loop_stop, ctx, reason}
+          :continue -> {:cont, ctx}
+        end
+
+      :none ->
+        result =
+          Predicate.evaluate(
+            node.predicate,
+            predicate_context(run_id, loop_address, ctx.iteration, node.predicate)
+          )
+
+        decision = if result, do: {:stop, :until}, else: :continue
+
+        seq =
+          commit(
+            run_id,
+            ctx.seq,
+            Event.loop_decision(loop_address, ctx.iteration, decision,
+              predicate_result: result,
+              exhausted: false,
+              source_address: node.address
+            )
+          )
+
+        ctx = %{ctx | seq: seq}
+
+        if result, do: {:loop_stop, ctx, :until}, else: {:cont, ctx}
     end
   end
 
   defp fresh_decision(%WhileBudget{} = node, run_id, iteration) do
     cond do
-      iteration >= node.max_iterations -> :stop
-      node.until && Predicate.evaluate(node.until, predicate_context(run_id)) -> :stop
-      Ledger.remaining(Ledger.of(run_id)) > node.reserve -> :continue
-      true -> :stop
+      iteration >= node.max_iterations ->
+        control({:exhausted, :stop}, nil, true)
+
+      while_budget_stop?(node, run_id, iteration) ->
+        control({:stop, :until}, true, false)
+
+      Ledger.remaining(Ledger.of(run_id)) > node.reserve ->
+        control(:continue, false, false)
+
+      true ->
+        control({:stop, :until}, true, false)
     end
   end
 
   defp fresh_decision(%UntilDry{} = node, run_id, iteration) do
+    result = dry_streak(run_id, node.address, iteration) >= node.rounds
+
     cond do
-      iteration >= node.max_iterations -> :stop
-      dry_streak(run_id, node.address, iteration) >= node.rounds -> :stop
-      true -> :continue
+      iteration >= node.max_iterations -> control({:exhausted, :stop}, nil, true)
+      result -> control({:stop, :until}, true, false)
+      true -> control(:continue, false, false)
     end
   end
 
-  defp predicate_context(run_id) do
-    %{accumulators: Accumulator.of(run_id), remaining: Ledger.remaining(Ledger.of(run_id))}
+  defp fresh_decision(%Loop{} = node, run_id, iteration) do
+    cond do
+      iteration >= node.max_iterations ->
+        control({:exhausted, node.on_exhausted}, nil, true)
+
+      node.until ->
+        result =
+          Predicate.evaluate(
+            node.until,
+            predicate_context(run_id, node.address, iteration, node.until)
+          )
+
+        if result,
+          do: control({:stop, :until}, true, false),
+          else: control(:continue, false, false)
+
+      true ->
+        control(:continue, false, false)
+    end
+  end
+
+  defp while_budget_stop?(%WhileBudget{until: nil}, _run_id, _iteration), do: false
+
+  defp while_budget_stop?(%WhileBudget{} = node, run_id, iteration) do
+    Predicate.evaluate(node.until, predicate_context(run_id, node.address, iteration, node.until))
+  end
+
+  defp control(decision, predicate_result, exhausted) do
+    %{decision: decision, predicate_result: predicate_result, exhausted: exhausted}
+  end
+
+  defp replayed_control(payload) do
+    decision =
+      case payload.decision do
+        :stop -> {:stop, Map.get(payload, :reason, :until)}
+        other -> other
+      end
+
+    %{
+      decision: decision,
+      predicate_result: Map.get(payload, :predicate_result),
+      exhausted: Map.get(payload, :exhausted, false)
+    }
+  end
+
+  defp predicate_context(run_id, loop_address, iteration, predicate) do
+    %{
+      accumulators: Accumulator.of(run_id),
+      remaining: Ledger.remaining(Ledger.of(run_id)),
+      dry_streak: dry_streak(run_id, loop_address, iteration),
+      bindings: predicate_bindings(run_id, predicate, iteration)
+    }
+  end
+
+  defp while_budget_seen_by(%WhileBudget{until: nil}), do: []
+
+  defp while_budget_seen_by(%WhileBudget{until: predicate}) do
+    loop_seen_by(predicate)
+  end
+
+  defp loop_seen_by(nil), do: []
+
+  defp loop_seen_by(predicate) do
+    case Predicate.dry_seen_by(predicate) do
+      {:ok, seen_by} -> seen_by
+      {:error, :conflicting_seen_by} -> raise ArgumentError, "conflicting dry seen_by lists"
+    end
+  end
+
+  defp predicate_bindings(_run_id, nil, _iteration), do: %{}
+
+  defp predicate_bindings(run_id, predicate, iteration) do
+    events = Journal.fold(run_id)
+
+    predicate
+    |> predicate_binding_refs()
+    |> Enum.uniq()
+    |> Enum.reduce(%{}, fn ref, acc ->
+      case resolve_binding_ref(events, ref, iteration) do
+        {:ok, value} -> Map.put(acc, ref, value)
+        {:error, _reason} -> acc
+      end
+    end)
+  end
+
+  defp predicate_binding_refs(%Predicate.Compare{left: %Predicate.PathCount{ref: ref}}), do: [ref]
+  defp predicate_binding_refs(%Predicate.Compare{}), do: []
+  defp predicate_binding_refs(%Predicate.PathExists{ref: ref}), do: [ref]
+  defp predicate_binding_refs(%Predicate.PathNonEmpty{ref: ref}), do: [ref]
+  defp predicate_binding_refs(%Predicate.PathEquals{ref: ref}), do: [ref]
+  defp predicate_binding_refs(%Predicate.Agree{ref: ref}), do: [ref]
+
+  defp predicate_binding_refs(%Predicate.AllOf{predicates: predicates}),
+    do: Enum.flat_map(predicates, &predicate_binding_refs/1)
+
+  defp predicate_binding_refs(%Predicate.AnyOf{predicates: predicates}),
+    do: Enum.flat_map(predicates, &predicate_binding_refs/1)
+
+  defp predicate_binding_refs(_predicate), do: []
+
+  defp resolve_binding_ref(events, ref, iteration \\ nil)
+
+  defp resolve_binding_ref(events, {:node, _address} = ref, _iteration),
+    do: BoundValue.fold(events, ref)
+
+  defp resolve_binding_ref(events, {:refine, _address} = ref, _iteration),
+    do: BoundValue.fold(events, ref)
+
+  defp resolve_binding_ref(events, {:map, _address} = ref, _iteration),
+    do: BoundList.fold(events, ref)
+
+  defp resolve_binding_ref(events, {:fanout, _address, :global} = ref, _iteration),
+    do: BoundList.fold(events, ref)
+
+  defp resolve_binding_ref(
+         events,
+         {:fanout, _address, {:loop_local, _loop_address}} = ref,
+         iteration
+       )
+       when is_integer(iteration),
+       do: BoundList.fold(events, ref, iteration)
+
+  defp resolve_binding_ref(
+         _events,
+         {:fanout, _address, {:loop_local, _loop_address}} = ref,
+         _iteration
+       ),
+       do: {:error, {:unbound, ref}}
+
+  defp path_resolve(value, ""), do: {:present, value}
+
+  defp path_resolve(value, "/" <> rest) do
+    rest
+    |> String.split("/")
+    |> Enum.map(&unescape_pointer_token/1)
+    |> Enum.reduce_while({:present, value}, fn token, {:present, current} ->
+      case path_step(current, token) do
+        {:present, _value} = present -> {:cont, present}
+        :missing -> {:halt, :missing}
+      end
+    end)
+  end
+
+  defp path_resolve(_value, _pointer), do: :missing
+
+  defp path_step(current, token) when is_map(current) do
+    case Map.fetch(current, token) do
+      {:ok, value} ->
+        {:present, value}
+
+      :error ->
+        case Enum.find(current, fn {key, _value} ->
+               is_atom(key) and Atom.to_string(key) == token
+             end) do
+          {_key, value} -> {:present, value}
+          nil -> :missing
+        end
+    end
+  end
+
+  defp path_step(current, token) when is_list(current) do
+    with true <- canonical_index?(token),
+         {index, ""} <- Integer.parse(token),
+         {:ok, value} <- Enum.fetch(current, index) do
+      {:present, value}
+    else
+      _other -> :missing
+    end
+  end
+
+  defp path_step(_current, _token), do: :missing
+
+  defp path_count(:missing), do: 0
+  defp path_count({:present, nil}), do: 0
+  defp path_count({:present, value}) when is_list(value), do: length(value)
+  defp path_count({:present, value}) when is_map(value), do: map_size(value)
+  defp path_count({:present, _scalar}), do: 1
+
+  defp canonical_index?("0"), do: true
+  defp canonical_index?(token), do: String.match?(token, ~r/^[1-9][0-9]*$/)
+
+  defp unescape_pointer_token(token) do
+    token
+    |> String.replace("~1", "/")
+    |> String.replace("~0", "~")
   end
 
   # Consecutive most-recent iterations (ending at `iteration - 1`) whose `collect`s
@@ -2740,13 +3153,14 @@ defmodule Workflow.Run.Writer do
     end)
   end
 
-  defp journaled_decision(prior, address, iteration) do
+  defp journaled_decision(prior, address, iteration, source_address) do
     case Enum.find(prior, fn event ->
            event.type == :loop_decision and event.payload.address == address and
-             event.payload.iteration == iteration
+             event.payload.iteration == iteration and
+             Map.get(event.payload, :source_address) == source_address
          end) do
       nil -> :none
-      event -> {:ok, event.payload.decision}
+      event -> {:ok, event.payload}
     end
   end
 

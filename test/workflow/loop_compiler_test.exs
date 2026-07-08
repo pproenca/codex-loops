@@ -9,11 +9,182 @@ defmodule Workflow.LoopCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Agent, Collect, WhileBudget, UntilDry}
-  alias Workflow.Predicate.{Compare, Count}
+  alias Workflow.Node.{Agent, Collect, GenericFanout, Loop, Until, WhileBudget, UntilDry}
+  alias Workflow.Predicate.{Agree, AllOf, Compare, Count, Dry}
 
   defp env, do: %{__ENV__ | file: "workflows/loops.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
+
+  describe "generic loop" do
+    test "compiles a bounded loop with a header predicate and exhaustion policy" do
+      {:ok, tree} =
+        parse("""
+        loop max_iterations: 3, until: count(:items) >= 2, on_exhausted: :fail do
+          agent "work", schema: %{"type" => "array"}
+          collect into: :items
+        end
+        return :ok
+        """)
+
+      assert [
+               %Loop{
+                 address: [0],
+                 max_iterations: 3,
+                 on_exhausted: :fail,
+                 until: %Compare{op: :>=, left: %Count{acc: :items}, right: 2},
+                 body: [
+                   %Agent{address: [0, 0], prompt: "work"},
+                   %Collect{address: [0, 1], into: :items}
+                 ]
+               },
+               _return
+             ] = tree.nodes
+
+      refute contains_function?(tree)
+    end
+
+    test "compiles one body-local until at its source address" do
+      {:ok, tree} =
+        parse("""
+        loop max_iterations: 5 do
+          agent "work", schema: %{"type" => "array"}
+          collect into: :items
+          until count(:items) >= 2
+          log "after"
+        end
+        return :ok
+        """)
+
+      assert [
+               %Loop{
+                 until: nil,
+                 body: [
+                   %Agent{address: [0, 0]},
+                   %Collect{address: [0, 1]},
+                   %Until{
+                     address: [0, 2],
+                     predicate: %Compare{op: :>=, left: %Count{acc: :items}, right: 2}
+                   },
+                   _
+                 ]
+               },
+               _return
+             ] = tree.nodes
+    end
+
+    test "body-local until can see earlier loop-local fanout bindings" do
+      {:ok, tree} =
+        parse("""
+        loop max_iterations: 2 do
+          fanout width: 1, bind: :checks do
+            agent "check"
+          end
+
+          until agree(:checks, path: "/echo", equals: "check", threshold: :all)
+        end
+        return :ok
+        """)
+
+      assert [
+               %Loop{
+                 body: [
+                   %GenericFanout{address: [0, 0], bind: :checks},
+                   %Until{
+                     predicate: %Agree{
+                       binding: :checks,
+                       ref: {:fanout, [0, 0], {:loop_local, [0]}}
+                     }
+                   }
+                 ]
+               },
+               _return
+             ] = tree.nodes
+    end
+
+    test "requires literal max_iterations and validates on_exhausted" do
+      assert {:error, %Finding{} = f} =
+               parse("""
+               loop until: count(:items) >= 1 do
+                 agent "work"
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "max_iterations"
+
+      assert {:error, %Finding{} = f} =
+               parse("""
+               loop max_iterations: 0 do
+                 agent "work"
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "max_iterations"
+
+      assert {:error, %Finding{} = f} =
+               parse("""
+               loop max_iterations: 1, on_exhausted: :explode do
+                 agent "work"
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "on_exhausted"
+    end
+
+    test "rejects conflicting header and body until predicates" do
+      assert {:error, %Finding{} = f} =
+               parse("""
+               loop max_iterations: 5, until: count(:items) >= 3 do
+                 agent "work", schema: %{"type" => "array"}
+                 collect into: :items
+                 until count(:items) >= 1
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "must not combine"
+    end
+
+    test "rejects multiple body until statements and dry predicates in body until" do
+      assert {:error, %Finding{} = f} =
+               parse("""
+               loop max_iterations: 5 do
+                 until count(:items) >= 1
+                 until count(:items) >= 2
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "at most one"
+
+      assert {:error, %Finding{} = f} =
+               parse("""
+               loop max_iterations: 5 do
+                 until dry(rounds: 1, seen_by: [:id])
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "must not contain `dry`"
+    end
+
+    test "body until is only accepted in generic loop bodies" do
+      assert {:error, %Finding{} = f} = parse("until count(:items) >= 1\nreturn :ok")
+      assert f.message =~ "inside a generic `loop` body"
+
+      assert {:error, %Finding{} = f} =
+               parse("""
+               while_budget reserve: 1 do
+                 until count(:items) >= 1
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "inside a generic `loop` body"
+    end
+  end
 
   describe "while_budget" do
     test "compiles into an inert node with an addressed, closure-free body" do
@@ -58,6 +229,77 @@ defmodule Workflow.LoopCompilerTest do
                tree.nodes
 
       refute contains_function?(tree)
+    end
+
+    test "accepts dry predicates in until and keeps them inert" do
+      {:ok, tree} =
+        parse("""
+        while_budget reserve: 0, until: dry(rounds: 1, seen_by: [:id]) do
+          agent "work", schema: %{"type" => "array"}
+          collect into: :items
+        end
+        return :ok
+        """)
+
+      assert [
+               %WhileBudget{until: %Dry{rounds: 1, seen_by: [:id]}},
+               _return
+             ] = tree.nodes
+
+      refute contains_function?(tree)
+    end
+
+    test "rejects conflicting dry seen_by lists inside nested predicates" do
+      assert {:error, %Finding{} = f} =
+               parse("""
+               while_budget reserve: 0,
+                            until: all([
+                              dry(rounds: 1, seen_by: [:id]),
+                              any_of([dry(rounds: 1, seen_by: [:url])])
+                            ]) do
+                 agent "work", schema: %{"type" => "array"}
+                 collect into: :items
+               end
+               return :ok
+               """)
+
+      assert f.message =~ "conflicting `dry` seen_by"
+    end
+
+    test "allows matching dry seen_by lists inside nested predicates" do
+      {:ok, tree} =
+        parse("""
+        while_budget reserve: 0,
+                     until: all([
+                       dry(rounds: 1, seen_by: [:id]),
+                       any([dry(rounds: 2, seen_by: [:id])])
+                     ]) do
+          agent "work", schema: %{"type" => "array"}
+          collect into: :items
+        end
+        return :ok
+        """)
+
+      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %Workflow.Predicate.AnyOf{}]}}, _] =
+               tree.nodes
+    end
+
+    test "allows all dry seen_by lists to be omitted" do
+      {:ok, tree} =
+        parse("""
+        while_budget reserve: 0,
+                     until: all([
+                       dry(rounds: 1),
+                       any([dry(rounds: 2)])
+                     ]) do
+          agent "work", schema: %{"type" => "array"}
+          collect into: :items
+        end
+        return :ok
+        """)
+
+      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %Workflow.Predicate.AnyOf{}]}}, _] =
+               tree.nodes
     end
 
     test "requires reserve" do

@@ -10,7 +10,12 @@ defmodule Workflow.Node do
   """
 
   @type address :: [non_neg_integer()]
-  @type binding_ref :: {:node, address()} | {:map, address()} | {:refine, address()}
+  @type fanout_scope :: :global | {:loop_local, address()}
+  @type binding_ref ::
+          {:node, address()}
+          | {:map, address()}
+          | {:refine, address()}
+          | {:fanout, address(), fanout_scope()}
 end
 
 defmodule Workflow.Node.Emit do
@@ -161,6 +166,36 @@ defmodule Workflow.Node.Collect do
   defstruct [:address, :into]
 
   @type t :: %__MODULE__{address: Workflow.Node.address(), into: atom()}
+end
+
+defmodule Workflow.Node.Loop do
+  @moduledoc """
+  The generic bounded loop core. It runs `body` repeatedly until a header predicate
+  or body-local `%Workflow.Node.Until{}` stops it, or until `max_iterations` is
+  exhausted under the declared `on_exhausted` policy.
+  """
+  @enforce_keys [:address, :body, :max_iterations]
+  defstruct [:address, :body, :max_iterations, until: nil, on_exhausted: :stop]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          until: struct() | nil,
+          body: [struct()],
+          max_iterations: pos_integer(),
+          on_exhausted: :stop | :fail | :accept_current
+        }
+end
+
+defmodule Workflow.Node.Until do
+  @moduledoc """
+  Body-local loop stop. The predicate is evaluated at this node's source address;
+  when true it stops the enclosing loop and skips later body nodes for that
+  iteration.
+  """
+  @enforce_keys [:address, :predicate]
+  defstruct [:address, :predicate]
+
+  @type t :: %__MODULE__{address: Workflow.Node.address(), predicate: struct()}
 end
 
 defmodule Workflow.Node.WhileBudget do
@@ -366,9 +401,60 @@ defmodule Workflow.Node.BudgetSlices do
   resume.
   """
   @enforce_keys [:per]
-  defstruct [:per]
+  defstruct [:per, max: nil]
 
-  @type t :: %__MODULE__{per: pos_integer()}
+  @type t :: %__MODULE__{per: pos_integer(), max: pos_integer() | nil}
+end
+
+defmodule Workflow.Node.PathCount do
+  @moduledoc """
+  A runtime-owned fanout width helper over a lexically preceding binding.
+
+  The compiler resolves `binding` to an explicit journal ref and records the JSON
+  pointer plus a required structural cap. Runtime folds that ref from the journal,
+  counts the pointed value, and journals the concrete width before any branch runs.
+  """
+  @enforce_keys [:binding, :ref, :pointer, :max]
+  defstruct [:binding, :ref, :pointer, :max]
+
+  @type t :: %__MODULE__{
+          binding: atom(),
+          ref: Workflow.Node.binding_ref(),
+          pointer: String.t(),
+          max: pos_integer()
+        }
+end
+
+defmodule Workflow.Node.GenericFanout do
+  @moduledoc """
+  Generic core fanout over inert agent lanes. This first runtime slice supports a
+  fixed integer width with one repeated lane: the compiler stores that lane once
+  and the writer rebases it to `parent ++ [branch, stage]` for each branch.
+
+  The struct is named `GenericFanout` to coexist with the legacy `%FanOut{}` node
+  on case-insensitive filesystems; the DSL and journal surface remain `fanout` and
+  `fanout_*`.
+  """
+  @enforce_keys [:address, :width, :lanes]
+  defstruct [
+    :address,
+    :width,
+    :lanes,
+    bind: nil,
+    max_concurrency: nil,
+    on_zero: :complete,
+    repeated: true
+  ]
+
+  @type t :: %__MODULE__{
+          address: Workflow.Node.address(),
+          width: non_neg_integer() | Workflow.Node.BudgetSlices.t() | Workflow.Node.PathCount.t(),
+          lanes: [[Workflow.Node.Agent.t()]],
+          bind: atom() | nil,
+          max_concurrency: pos_integer() | nil,
+          on_zero: :complete | :fail,
+          repeated: boolean()
+        }
 end
 
 defmodule Workflow.Node.FanOut do

@@ -35,11 +35,165 @@ asks for another path.
 - `agent "prompt"` runs one provider turn.
 - `agent "prompt", schema: %{...}, retries: n` requests structured output and
   fails closed after invalid attempts.
+- `let :name = agent(...)`, `let :name = synthesize(...)`, and
+  `let :name = refine(...)` bind a top-level producer's journaled output for
+  later dataflow rendering.
+- `agent(~P"... <%= @name %> ...")` injects earlier explicit bindings into a
+  later top-level agent prompt. Template prompts are not allowed in nested
+  agents such as `parallel`, `pipeline`, `fanout`, `fan_out`, or loop bodies.
+- `emit(~P"... <%= @name %> ...")` sets the final terminal value to rendered
+  text from earlier bindings.
+- `emit_result(:name)` sets the final terminal value to a structured public
+  projection from a result-capable binding. The shipped result-capable producer
+  is `refine`.
 - `return value` sets the run result.
-- Higher-level combinators such as `parallel`, `pipeline`, `collect`,
-  `while_budget`, `until_dry`, `verify`, `judge`, `synthesize`, and `fan_out`
-  are available in the Elixir DSL and should be used only when the orchestration
-  genuinely needs them.
+- `loop max_iterations: n, until: predicate do ... end` is the generic bounded
+  loop core.
+- `fanout width: n do ... end` is the generic repeated-lane fan-out core.
+- Higher-level combinators such as `parallel`, `pipeline`, `collect`, `verify`,
+  `judge`, and `synthesize` are available in the Elixir DSL and should be used
+  only when the orchestration genuinely needs them.
+- `while_budget`, `until_dry`, and `fan_out` remain useful
+  sugar/compatibility surfaces. Prefer modeling new orchestration with generic
+  `loop`, generic `fanout`, and closed predicates first.
+- `gather` and `map` are specified for a future dataflow extension but are not
+  available in the shipped compiler. Keep them out of executable workflows.
+
+## Generic Loop And Fanout Core
+
+The live dynamic core is generic `loop`, generic `fanout`, and closed
+predicates. Legacy `while_budget`, `until_dry`, and `fan_out` still work, but
+they are compatibility/sugar forms, not the whole model.
+
+Use `loop` for bounded repetition:
+
+```elixir
+loop max_iterations: 3, until: count(:items) >= 2, on_exhausted: :fail do
+  agent "find items", schema: %{"type" => "array"}
+  collect into: :items
+end
+```
+
+`loop max_iterations:` requires a positive integer. It may use either a header
+`until:` predicate or one body-local `until(predicate)`, but not both. A
+body-local `until` stops the loop at that point in the body and skips later body
+nodes for the current iteration; it cannot contain `dry(...)`, and only one
+body-local `until` is allowed.
+
+Use `fanout` for repeated agent lanes:
+
+```elixir
+fanout width: 2, bind: :reviews, max_concurrency: 2 do
+  agent "Review the current plan and return JSON."
+end
+
+emit ~P"Reviews: <%= @reviews %>"
+```
+
+`fanout` supports `width:` as an integer, `budget_slices(per: n, max: m)`, or
+`path_count(:binding, "/json/pointer", max: m)`. It also supports optional
+`bind:`, `max_concurrency:`, and `on_zero: :complete | :fail`. A `bind:` name
+produces the ordered lane result list for later top-level templates and
+predicates. Inside a generic loop, a previous `fanout bind:` can be used by a
+later body-local `until`:
+
+```elixir
+loop max_iterations: 2 do
+  fanout width: 2, bind: :checks do
+    agent "Check the draft.",
+      schema: %{
+        "type" => "object",
+        "properties" => %{"approved" => %{"type" => "boolean"}},
+        "required" => ["approved"]
+      }
+  end
+
+  until agree(:checks, path: "/approved", equals: true, threshold: :all)
+end
+```
+
+User-authored heterogeneous `lanes([...])` are not available in the shipped
+compiler. Deferred dataflow `gather` and `map` also remain unavailable.
+
+Closed predicate examples that match the live parser/evaluator. For `agree`
+over a fanout binding, each lane result must be a structured map, usually from a
+schema-backed agent:
+
+```elixir
+all([count(:items) >= 2, budget_remaining() > 10])
+any([path_exists(:reviews, "/0"), path_non_empty(:draft, "/summary")])
+dry(rounds: 2, seen_by: [:id])
+agree(:reviews, path: "/approved", equals: true, threshold: :all)
+path_count(:draft, "/items") >= 2
+path_equals(:draft, "/status", "ready")
+```
+
+`all_of` and `any_of` are legacy aliases for `all` and `any`.
+
+## Dataflow Core
+
+The implemented dataflow core is deliberately narrow: bind a previous producer
+with `let`, render it through a `~P` template in a later top-level `agent` or
+final `emit`, or return a structured result with `emit_result`.
+
+Use `~P` holes like `<%= @draft %>` for dataflow. Do not use Elixir string
+interpolation (`"#{...}"`), variables, helper calls, or control-flow tags inside
+prompts. Bindings are define-before-use: a top-level template may reference
+earlier in-scope bindings from `let` or top-level `fanout bind:` names. A
+loop-local `fanout bind:` name is only available to later body-local `until`
+predicates in that same generic loop body.
+
+Valid text-producing example:
+
+```elixir
+defmodule DraftImproveWorkflow do
+  use Workflow
+
+  workflow "draft-improve" do
+    let :draft = agent("Draft a concise project update. Return prose.")
+
+    let :improved = agent(~P"""
+    Improve this draft for clarity and actionability.
+
+    Draft:
+    <%= @draft %>
+    """)
+
+    emit(~P"""
+    # Project Update
+
+    <%= @improved %>
+    """)
+  end
+end
+```
+
+Valid structured-result example:
+
+```elixir
+defmodule ReviewWorkflow do
+  use Workflow
+
+  workflow "review-loop" do
+    let :final = refine(agent("Draft a migration plan."),
+      reviewers: [
+        reviewer(:spec, "Check the plan against the spec."),
+        reviewer(:runtime, "Check runtime and test risks.")
+      ],
+      revise_with: agent("Revise the plan using the review findings."),
+      until: :unanimous,
+      max_rounds: 1
+    )
+
+    emit_result(:final)
+  end
+end
+```
+
+`let :summary = synthesize([...], "...")` is also bindable for later `~P`
+rendering, but `synthesize` itself still takes literal inputs and a literal
+prompt. The deferred `gather(~P"...")` and `map :item, over: :items, ...`
+forms remain unavailable.
 
 ## Authoring Loop
 

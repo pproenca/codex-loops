@@ -44,14 +44,18 @@ defmodule Workflow.Compiler do
     Parallel,
     Pipeline,
     Collect,
+    Loop,
+    Until,
     WhileBudget,
     UntilDry,
     Verify,
     Refine,
     Judge,
     Synthesize,
+    GenericFanout,
     FanOut,
-    BudgetSlices
+    BudgetSlices,
+    PathCount
   }
 
   alias Workflow.Compiler.Finding
@@ -68,12 +72,15 @@ defmodule Workflow.Compiler do
     :emit,
     :emit_result,
     :collect,
+    :loop,
+    :until,
     :while_budget,
     :until_dry,
     :verify,
     :refine,
     :judge,
     :synthesize,
+    :fanout,
     :fan_out
   ]
 
@@ -107,10 +114,10 @@ defmodule Workflow.Compiler do
 
   @pick_strategies [:max_score, :min_score]
 
-  # Combinators a loop body may contain. Loops, fan-out, and `return` are rejected
-  # inside a body, so the per-iteration key stays a single integer and each loop
-  # provably terminates on its own budget/dryness bound.
-  @body_combinators [:agent, :log, :phase, :collect]
+  # Combinators a loop body may contain. The generic core admits body `until` and
+  # generic fanout. Legacy loop sugar keeps the older compatibility subset.
+  @generic_body_combinators [:agent, :log, :phase, :until, :fanout, :collect]
+  @legacy_body_combinators [:agent, :log, :phase, :collect]
 
   # Options an `agent` accepts, and the default retry budget when `retries:` is
   # omitted (total attempts = retries + 1). `label:` is display metadata only; it
@@ -167,6 +174,27 @@ defmodule Workflow.Compiler do
     else
       build(rest, index + 1, [phase | acc], MapSet.put(seen, name), env, binding_env)
     end
+  end
+
+  defp finish_build(
+         %GenericFanout{bind: bind} = fanout,
+         _stmt,
+         rest,
+         index,
+         acc,
+         seen,
+         env,
+         binding_env
+       )
+       when not is_nil(bind) do
+    build(
+      rest,
+      index + 1,
+      [fanout | acc],
+      seen,
+      env,
+      Map.put(binding_env, bind, {:fanout, fanout.address, :global})
+    )
   end
 
   defp finish_build(%node{} = built, stmt, rest, index, acc, seen, env, binding_env)
@@ -367,15 +395,39 @@ defmodule Workflow.Compiler do
   defp node({:pipeline, _meta, [items, stages, opts]} = form, address, env, binding_env),
     do: pipeline(items, stages, opts, address, form, env, binding_env)
 
+  # `loop max_iterations: N[, until: <predicate>][, on_exhausted: policy] do <body> end`
+  # — the generic bounded loop core.
+  defp node({:loop, _meta, args} = form, address, env, binding_env) do
+    with {:ok, opts, block} <- loop_call(args, form, env),
+         :ok <- only_keys(opts, [:max_iterations, :until, :on_exhausted], form, env),
+         {:ok, cap} <- required_integer(opts, :max_iterations, 1, form, env),
+         {:ok, until_pred} <- optional_predicate(opts, form, env, binding_env),
+         {:ok, on_exhausted} <- on_exhausted(opts, form, env),
+         {:ok, body} <-
+           parse_body(block, address, form, env, binding_env,
+             mode: :generic,
+             header_until?: not is_nil(until_pred)
+           ) do
+      {:ok,
+       %Loop{
+         address: address,
+         until: until_pred,
+         body: body,
+         max_iterations: cap,
+         on_exhausted: on_exhausted
+       }}
+    end
+  end
+
   # `while_budget reserve: N[, until: <predicate>][, max_iterations: N] do <body> end`
   # — a dynamic loop whose body runs while the ledger's `remaining` exceeds `reserve`.
   defp node({:while_budget, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:reserve, :until, :max_iterations], form, env),
          {:ok, reserve} <- required_integer(opts, :reserve, 0, form, env),
-         {:ok, until_pred} <- optional_predicate(opts, env),
+         {:ok, until_pred} <- optional_predicate(opts, form, env, binding_env),
          {:ok, cap} <- max_iterations(opts, form, env),
-         {:ok, body} <- parse_body(block, address, form, env, binding_env) do
+         {:ok, body} <- parse_body(block, address, form, env, binding_env, mode: :legacy) do
       {:ok,
        %WhileBudget{
          address: address,
@@ -395,7 +447,7 @@ defmodule Workflow.Compiler do
          {:ok, rounds} <- required_integer(opts, :rounds, 1, form, env),
          {:ok, seen_by} <- seen_by_opt(opts, form, env),
          {:ok, cap} <- max_iterations(opts, form, env),
-         {:ok, body} <- parse_body(block, address, form, env, binding_env),
+         {:ok, body} <- parse_body(block, address, form, env, binding_env, mode: :legacy),
          :ok <- require_collect(body, form, env) do
       {:ok,
        %UntilDry{
@@ -517,6 +569,29 @@ defmodule Workflow.Compiler do
      )}
   end
 
+  # `fanout width: N[, max_concurrency: M][, on_zero: :complete | :fail] do <body> end`
+  # — first generic-core slice: a fixed integer width repeating one agent lane.
+  defp node({:fanout, _meta, args} = form, address, env, binding_env) do
+    with {:ok, opts, block} <- loop_call(args, form, env),
+         :ok <- only_keys(opts, [:width, :max_concurrency, :bind, :on_zero], form, env),
+         {:ok, width} <- fanout_width(opts, form, env, binding_env),
+         {:ok, cap} <- fanout_concurrency(opts, form, env),
+         {:ok, bind} <- fanout_bind(opts, form, env, binding_env),
+         {:ok, on_zero} <- fanout_on_zero(opts, form, env),
+         {:ok, lane} <- fanout_body(block, address, form, env, binding_env) do
+      {:ok,
+       %GenericFanout{
+         address: address,
+         width: width,
+         lanes: [lane],
+         bind: bind,
+         max_concurrency: cap,
+         on_zero: on_zero,
+         repeated: true
+       }}
+    end
+  end
+
   # `fan_out width: budget_slices(per: N)[, max_concurrency: M] do <body> end` —
   # run the body across `floor(remaining / N)` concurrent branches. The width is a
   # runtime-owned budget decision, never author arithmetic, so `width:` accepts only
@@ -538,6 +613,10 @@ defmodule Workflow.Compiler do
      Finding.at(env, form, "`collect` must appear inside a loop body",
        hint: "collect reduces a loop iteration's agent output into a declared accumulator"
      )}
+  end
+
+  defp node({:until, _meta, _args} = form, _address, env, _binding_env) do
+    {:error, body_until_scope_finding(env, form)}
   end
 
   # A known combinator invoked with the wrong argument shape: recoverable finding,
@@ -855,18 +934,50 @@ defmodule Workflow.Compiler do
   # The loop body is a fresh sub-tree; its nodes are addressed `parent ++ [i]` so
   # they journal and key independently while every iteration re-runs the same
   # addresses under a distinct `iteration`.
-  defp parse_body(block, loop_address, form, env, binding_env) do
-    case build_body(statements(block), loop_address, 0, [], MapSet.new(), env, binding_env) do
-      {:ok, []} -> {:error, Finding.at(env, form, "a loop body must contain at least one node")}
-      other -> other
+  defp parse_body(block, loop_address, form, env, binding_env, opts) do
+    mode = Keyword.get(opts, :mode, :legacy)
+    header_until? = Keyword.get(opts, :header_until?, false)
+
+    with {:ok, body} <-
+           build_body(
+             statements(block),
+             loop_address,
+             0,
+             [],
+             MapSet.new(),
+             env,
+             binding_env,
+             mode
+           ) do
+      body_until_count = Enum.count(body, &match?(%Until{}, &1))
+
+      cond do
+        body == [] ->
+          {:error, Finding.at(env, form, "a loop body must contain at least one node")}
+
+        header_until? and body_until_count > 0 ->
+          {:error,
+           Finding.at(
+             env,
+             form,
+             "a generic loop must not combine header `until:` with body `until(...)`"
+           )}
+
+        body_until_count > 1 ->
+          {:error,
+           Finding.at(env, form, "a generic loop body may contain at most one `until(...)`")}
+
+        true ->
+          {:ok, body}
+      end
     end
   end
 
-  defp build_body([], _loop_address, _index, acc, _seen, _env, _binding_env),
+  defp build_body([], _loop_address, _index, acc, _seen, _env, _binding_env, _mode),
     do: {:ok, Enum.reverse(acc)}
 
-  defp build_body([stmt | rest], loop_address, index, acc, seen, env, binding_env) do
-    case body_node(stmt, loop_address ++ [index], env, binding_env) do
+  defp build_body([stmt | rest], loop_address, index, acc, seen, env, binding_env, mode) do
+    case body_node(stmt, loop_address ++ [index], env, binding_env, mode) do
       {:ok, %Phase{name: name} = phase} ->
         if MapSet.member?(seen, name) do
           {:error, Finding.at(env, stmt, "duplicate phase name #{inspect(name)}")}
@@ -878,12 +989,28 @@ defmodule Workflow.Compiler do
             [phase | acc],
             MapSet.put(seen, name),
             env,
-            binding_env
+            binding_env,
+            mode
           )
         end
 
+      {:ok, %GenericFanout{bind: bind} = fanout} when mode == :generic and not is_nil(bind) ->
+        next_binding_env =
+          Map.put(binding_env, bind, {:fanout, fanout.address, {:loop_local, loop_address}})
+
+        build_body(
+          rest,
+          loop_address,
+          index + 1,
+          [fanout | acc],
+          seen,
+          env,
+          next_binding_env,
+          mode
+        )
+
       {:ok, node} ->
-        build_body(rest, loop_address, index + 1, [node | acc], seen, env, binding_env)
+        build_body(rest, loop_address, index + 1, [node | acc], seen, env, binding_env, mode)
 
       {:error, _} = err ->
         err
@@ -893,23 +1020,55 @@ defmodule Workflow.Compiler do
   # A loop body permits the body vocabulary plus `collect`; loops, fan-out, and
   # `return` are rejected here (keeping the iteration key a single integer), while
   # closures/external calls still raise via the shared forbidden-form catalog.
-  defp body_node({:collect, _meta, [opts]} = form, address, env, _binding_env),
+  defp body_node({:collect, _meta, [opts]} = form, address, env, _binding_env, _mode),
     do: collect(opts, form, address, env)
 
-  defp body_node({:collect, _meta, _args} = form, _address, env, _binding_env),
+  defp body_node({:collect, _meta, _args} = form, _address, env, _binding_env, _mode),
     do: {:error, Finding.at(env, form, "`collect` requires `into: :name`")}
 
-  defp body_node({:let, _meta, _args} = form, _address, env, _binding_env),
+  defp body_node({:until, _meta, [predicate_ast]} = form, address, env, binding_env, :generic) do
+    with {:ok, predicate} <- Predicate.parse(predicate_ast, env, binding_env),
+         :ok <- reject_body_until_dry(predicate, form, env) do
+      {:ok, %Until{address: address, predicate: predicate}}
+    end
+  end
+
+  defp body_node({:until, _meta, _args} = form, _address, env, _binding_env, _mode),
+    do: {:error, body_until_scope_finding(env, form)}
+
+  defp body_node({:let, _meta, _args} = form, _address, env, _binding_env, _mode),
     do: {:error, Finding.at(env, form, "`let` is not allowed inside a loop body")}
 
-  defp body_node({:emit, _meta, _args} = form, _address, env, _binding_env),
+  defp body_node({:emit, _meta, _args} = form, _address, env, _binding_env, _mode),
     do: {:error, Finding.at(env, form, "`emit` is not allowed inside a loop body")}
 
-  defp body_node({:emit_result, _meta, _args} = form, _address, env, _binding_env),
+  defp body_node({:emit_result, _meta, _args} = form, _address, env, _binding_env, _mode),
     do: {:error, Finding.at(env, form, "`emit_result` is not allowed inside a loop body")}
 
-  defp body_node({combinator, _meta, _args} = form, _address, env, _binding_env)
+  defp body_node({combinator, _meta, _args} = form, _address, env, _binding_env, :legacy)
        when combinator in [
+              :loop,
+              :while_budget,
+              :until_dry,
+              :parallel,
+              :pipeline,
+              :return,
+              :verify,
+              :refine,
+              :judge,
+              :synthesize,
+              :fanout,
+              :fan_out
+            ] do
+    {:error,
+     Finding.at(env, form, "`#{combinator}` is not allowed inside a loop body",
+       hint: "a loop body may contain: #{Enum.join(@legacy_body_combinators, ", ")}"
+     )}
+  end
+
+  defp body_node({combinator, _meta, _args} = form, _address, env, _binding_env, :generic)
+       when combinator in [
+              :loop,
               :while_budget,
               :until_dry,
               :parallel,
@@ -923,11 +1082,11 @@ defmodule Workflow.Compiler do
             ] do
     {:error,
      Finding.at(env, form, "`#{combinator}` is not allowed inside a loop body",
-       hint: "a loop body may contain: #{Enum.join(@body_combinators, ", ")}"
+       hint: "a generic loop body may contain: #{Enum.join(@generic_body_combinators, ", ")}"
      )}
   end
 
-  defp body_node(stmt, address, env, binding_env) do
+  defp body_node(stmt, address, env, binding_env, _mode) do
     case node(stmt, address, env, binding_env) do
       {:ok, %Agent{prompt: %Template{}}} ->
         {:error, nested_template_prompt_finding(env, stmt, "loop body")}
@@ -989,10 +1148,58 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp optional_predicate(opts, env) do
+  defp optional_predicate(opts, _form, env, binding_env) do
     case Keyword.fetch(opts, :until) do
-      :error -> {:ok, nil}
-      {:ok, ast} -> Predicate.parse(ast, env)
+      :error ->
+        {:ok, nil}
+
+      {:ok, ast} ->
+        with {:ok, predicate} <- Predicate.parse(ast, env, binding_env),
+             {:ok, _seen_by} <- dry_seen_by(predicate, ast, env) do
+          {:ok, predicate}
+        end
+    end
+  end
+
+  defp dry_seen_by(predicate, ast, env) do
+    case Predicate.dry_seen_by(predicate) do
+      {:ok, seen_by} ->
+        {:ok, seen_by}
+
+      {:error, :conflicting_seen_by} ->
+        {:error, Finding.at(env, ast, "conflicting `dry` seen_by lists in `until:` predicate")}
+    end
+  end
+
+  defp reject_body_until_dry(predicate, form, env) do
+    if contains_dry?(predicate) do
+      {:error, Finding.at(env, form, "body `until` predicate must not contain `dry`")}
+    else
+      :ok
+    end
+  end
+
+  defp contains_dry?(%Predicate.Dry{}), do: true
+
+  defp contains_dry?(%Predicate.AllOf{predicates: predicates}),
+    do: Enum.any?(predicates, &contains_dry?/1)
+
+  defp contains_dry?(%Predicate.AnyOf{predicates: predicates}),
+    do: Enum.any?(predicates, &contains_dry?/1)
+
+  defp contains_dry?(_predicate), do: false
+
+  defp on_exhausted(opts, form, env) do
+    case Keyword.fetch(opts, :on_exhausted) do
+      :error ->
+        {:ok, :stop}
+
+      {:ok, policy} when policy in [:stop, :fail, :accept_current] ->
+        {:ok, policy}
+
+      {:ok, _} ->
+        {:error,
+         Finding.at(env, form, "`on_exhausted` must be one of :stop, :fail, or :accept_current")}
     end
   end
 
@@ -1022,6 +1229,12 @@ defmodule Workflow.Compiler do
            hint: "e.g. seen_by: [:file, :line] — a list so validation can see it"
          )}
     end
+  end
+
+  defp body_until_scope_finding(env, form) do
+    Finding.at(env, form, "`until` is only allowed inside a generic `loop` body",
+      hint: "use `loop max_iterations: N do ... until(predicate) ... end`"
+    )
   end
 
   # --- Quality combinators: verify / judge / synthesize / fan_out ---
@@ -1773,6 +1986,201 @@ defmodule Workflow.Compiler do
         {:literal, candidate}
       ])
 
+  defp fanout_width(opts, form, env, binding_env) do
+    case Keyword.fetch(opts, :width) do
+      {:ok, n} when is_integer(n) and n >= 0 ->
+        {:ok, n}
+
+      {:ok, {:budget_slices, _meta, [budget_opts]}} ->
+        fanout_budget_slices_width(budget_opts, form, env)
+
+      {:ok, {:path_count, _meta, [binding, pointer, path_opts]} = path_form} ->
+        fanout_path_count_width(binding, pointer, path_opts, path_form, env, binding_env)
+
+      {:ok, {:path_count, _meta, _args}} ->
+        {:error,
+         Finding.at(env, form, "`path_count` fanout width requires `max:`",
+           hint: ~s|path_count(:items, "/rows", max: 100)|
+         )}
+
+      {:ok, _} ->
+        {:error,
+         Finding.at(env, form, "`fanout` width must be a closed WidthExpr",
+           hint:
+             ~s|use an integer, budget_slices(per: N, max: M), or path_count(:binding, "/pointer", max: M)|
+         )}
+
+      :error ->
+        {:error, Finding.at(env, form, "`fanout` requires `width:`")}
+    end
+  end
+
+  defp fanout_budget_slices_width(opts, form, env) do
+    with {:ok, opts} <-
+           width_keyword(opts, [:per, :max], [:per], form, env, "`budget_slices`"),
+         {:ok, per} <- positive_width_integer(Keyword.fetch!(opts, :per), :per, form, env),
+         {:ok, max} <- optional_positive_width_integer(Keyword.get(opts, :max), :max, form, env) do
+      {:ok, %BudgetSlices{per: per, max: max}}
+    end
+  end
+
+  defp fanout_path_count_width(binding, pointer, opts, form, env, binding_env) do
+    with {:ok, opts} <- width_keyword(opts, [:max], [:max], form, env, "`path_count`"),
+         {:ok, binding, ref} <- fanout_width_binding_ref(binding, form, env, binding_env),
+         {:ok, pointer} <- fanout_width_pointer(pointer, form, env),
+         {:ok, max} <- positive_width_integer(Keyword.fetch!(opts, :max), :max, form, env) do
+      {:ok, %PathCount{binding: binding, ref: ref, pointer: pointer, max: max}}
+    end
+  end
+
+  defp width_keyword(opts, allowed, required, form, env, label) do
+    keys = if Keyword.keyword?(opts), do: Keyword.keys(opts), else: []
+    duplicates = keys -- Enum.uniq(keys)
+
+    cond do
+      not (keyword_literal?(opts) and Keyword.keyword?(opts)) ->
+        {:error, Finding.at(env, form, "#{label} options must be a keyword list")}
+
+      duplicates != [] ->
+        {:error,
+         Finding.at(env, form, "#{label} has duplicate option #{inspect(hd(duplicates))}")}
+
+      Enum.any?(keys, &(&1 not in allowed)) ->
+        {:error,
+         Finding.at(env, form, "invalid #{label} options",
+           hint: "allowed options: #{Enum.join(allowed, ", ")}"
+         )}
+
+      Enum.any?(required, &(&1 not in keys)) ->
+        missing = required -- keys
+        {:error, Finding.at(env, form, "#{label} requires `#{hd(missing)}:`")}
+
+      true ->
+        {:ok, opts}
+    end
+  end
+
+  defp fanout_width_binding_ref(binding, form, env, binding_env)
+       when is_atom(binding) and not is_boolean(binding) and not is_nil(binding) do
+    case Map.fetch(binding_env, binding) do
+      {:ok, {:fanout, _address, {:loop_local, _loop_address}}} ->
+        {:error, Finding.at(env, form, "`path_count` fanout width requires a global binding")}
+
+      {:ok, ref} ->
+        if binding_ref?(ref) do
+          {:ok, binding, ref}
+        else
+          {:error,
+           Finding.at(env, form, "binding #{inspect(binding)} does not resolve to a binding ref")}
+        end
+
+      :error ->
+        {:error, Finding.at(env, form, "unknown binding #{inspect(binding)}")}
+    end
+  end
+
+  defp fanout_width_binding_ref(_binding, form, env, _binding_env),
+    do: {:error, Finding.at(env, form, "`path_count` binding must be a literal binding atom")}
+
+  defp fanout_width_pointer(pointer, form, env) when is_binary(pointer) do
+    if Gate.valid_pointer?(pointer) do
+      {:ok, pointer}
+    else
+      {:error,
+       Finding.at(
+         env,
+         form,
+         "`path_count` JSON pointer must be \"\" or start with \"/\" and use RFC 6901 escapes"
+       )}
+    end
+  end
+
+  defp fanout_width_pointer(_pointer, form, env),
+    do: {:error, Finding.at(env, form, "`path_count` JSON pointer must be a literal string")}
+
+  defp positive_width_integer(n, _key, _form, _env) when is_integer(n) and n > 0,
+    do: {:ok, n}
+
+  defp positive_width_integer(_value, key, form, env),
+    do: {:error, Finding.at(env, form, "`#{key}` must be a positive integer")}
+
+  defp optional_positive_width_integer(nil, _key, _form, _env), do: {:ok, nil}
+
+  defp optional_positive_width_integer(value, key, form, env),
+    do: positive_width_integer(value, key, form, env)
+
+  defp binding_ref?({kind, address})
+       when kind in [:node, :map, :refine] and is_list(address),
+       do: address?(address)
+
+  defp binding_ref?({:fanout, address, :global}) when is_list(address), do: address?(address)
+
+  defp binding_ref?({:fanout, address, {:loop_local, loop_address}})
+       when is_list(address) and is_list(loop_address),
+       do: address?(address) and address?(loop_address)
+
+  defp binding_ref?(_ref), do: false
+
+  defp address?(address), do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
+
+  defp fanout_concurrency(opts, form, env) do
+    case Keyword.fetch(opts, :max_concurrency) do
+      :error -> {:ok, nil}
+      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
+      {:ok, _} -> {:error, Finding.at(env, form, "`max_concurrency` must be a positive integer")}
+    end
+  end
+
+  defp fanout_bind(opts, form, env, binding_env) do
+    case Keyword.fetch(opts, :bind) do
+      :error ->
+        {:ok, nil}
+
+      {:ok, name} when is_atom(name) and not is_boolean(name) and not is_nil(name) ->
+        cond do
+          not String.match?(Atom.to_string(name), ~r/^[a-z_][a-zA-Z0-9_]*$/) ->
+            {:error,
+             Finding.at(env, form, "inadmissible binding name #{inspect(name)}",
+               hint: "binding names must look like `:reviews` or `:results`"
+             )}
+
+          Map.has_key?(binding_env, name) ->
+            {:error,
+             Finding.at(env, form, "`fanout bind:` name #{inspect(name)} is already bound")}
+
+          true ->
+            {:ok, name}
+        end
+
+      {:ok, _other} ->
+        {:error, Finding.at(env, form, "`fanout bind:` expects a literal binding atom")}
+    end
+  end
+
+  defp fanout_on_zero(opts, form, env) do
+    case Keyword.fetch(opts, :on_zero) do
+      :error -> {:ok, :complete}
+      {:ok, policy} when policy in [:complete, :fail] -> {:ok, policy}
+      {:ok, _} -> {:error, Finding.at(env, form, "`on_zero` must be :complete or :fail")}
+    end
+  end
+
+  defp fanout_body(block, address, form, env, binding_env) do
+    case agent_lane(statements(block), address, env, binding_env, "fanout") do
+      {:ok, []} ->
+        {:error,
+         Finding.at(env, form, "`fanout` requires at least one body step",
+           hint: "the body is a lane of agent turns, e.g. fanout width: 2 do agent(\"...\") end"
+         )}
+
+      {:ok, agents} ->
+        {:ok, agents}
+
+      {:error, _} = err ->
+        err
+    end
+  end
+
   # `width:` accepts only `budget_slices(per: N)` — the runtime-owned width helper —
   # so authors cannot smuggle in arbitrary arithmetic.
   defp fan_out_width(opts, form, env) do
@@ -1805,7 +2213,7 @@ defmodule Workflow.Compiler do
   # The fan_out body is a lane of agent turns (like a pipeline stage list), parsed at
   # a placeholder address and re-addressed per branch at runtime.
   defp fan_out_body(block, address, form, env, binding_env) do
-    case agent_lane(statements(block), address, env, binding_env) do
+    case agent_lane(statements(block), address, env, binding_env, "fan_out") do
       {:ok, []} ->
         {:error,
          Finding.at(env, form, "`fan_out` requires at least one body step",
@@ -1821,15 +2229,15 @@ defmodule Workflow.Compiler do
     end
   end
 
-  # Parse a list of statements that must each be an `agent` turn (shared by fan_out).
+  # Parse a list of statements that must each be an `agent` turn (shared by fanouts).
   # Reuses `node/3`, so a closure/external call still raises via the forbidden-form
   # catalog and any malformed agent surfaces its own located finding.
-  defp agent_lane(stmts, address, env, binding_env) do
+  defp agent_lane(stmts, address, env, binding_env, combinator) do
     stmts
     |> Enum.reduce_while({:ok, []}, fn stmt, {:ok, acc} ->
       case node(stmt, address, env, binding_env) do
         {:ok, %Agent{prompt: %Template{}}} ->
-          {:halt, {:error, nested_template_prompt_finding(env, stmt, "fan_out body")}}
+          {:halt, {:error, nested_template_prompt_finding(env, stmt, "#{combinator} body")}}
 
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
@@ -1837,7 +2245,7 @@ defmodule Workflow.Compiler do
         {:ok, _other} ->
           {:halt,
            {:error,
-            Finding.at(env, stmt, "`fan_out` body steps must be `agent` turns",
+            Finding.at(env, stmt, "`#{combinator}` body steps must be `agent` turns",
               hint: "each step is one agent call, e.g. agent(\"...\")"
             )}}
 
@@ -1923,7 +2331,8 @@ defmodule Workflow.Compiler do
           {:halt,
            {:error,
             Finding.at(env, form, "unbound template assign @#{assign}",
-              hint: "bind it earlier with `let :#{assign} = agent(...)` or `synthesize(...)`"
+              hint:
+                "bind it earlier with `let :#{assign} = agent(...)`, `synthesize(...)`, or `fanout bind: :#{assign}`"
             )}}
       end
     end)
@@ -1960,7 +2369,9 @@ defmodule Workflow.Compiler do
   end
 
   defp binding_kind({:node, _address}), do: "agent"
+  defp binding_kind({:refine, _address}), do: "refine"
   defp binding_kind({:map, _address}), do: "map"
+  defp binding_kind({:fanout, _address, _scope}), do: "fanout"
 
   defp nested_template_prompt_finding(env, form, context) do
     Finding.at(

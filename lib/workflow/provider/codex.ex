@@ -23,11 +23,11 @@ defmodule Workflow.Provider.Codex do
 
   ## Fail on backend fault, don't fabricate
 
-  The `Workflow.Provider` callback has no error channel: a turn either produces an
-  `{:ok, result, usage}` or it doesn't happen. So a containment failure (non-zero
-  exit, timeout) or a `turn.failed`/`error` event raises here, crashing the live
-  writer — the run's monitor observes the real reason and no phantom result is ever
-  journaled. Let it crash.
+  A containment timeout is an expected provider failure: the backend missed the
+  caller's configured deadline, but the run writer can journal that as
+  `agent_failed` with a stable `:timeout` kind. Other containment failures
+  (non-zero exit) and a `turn.failed`/`error` event are backend faults and still
+  raise, so no phantom result is ever journaled.
   """
   @behaviour Workflow.Provider
 
@@ -41,6 +41,8 @@ defmodule Workflow.Provider.Codex do
     "--skip-git-repo-check"
   ]
 
+  @timeout_detail %{"message" => "codex turn timed out"}
+
   @impl true
   def run_agent(prompt, schema, _key, opts) do
     {command, schema_file} = command(opts, schema)
@@ -52,6 +54,7 @@ defmodule Workflow.Provider.Codex do
              on_line: line_observer(opts)
            ) do
         {:ok, stdout} -> parse_turn(stdout, schema)
+        {:error, :timeout} -> {:error, {:provider_failure, :timeout, @timeout_detail, nil, []}}
         {:error, reason} -> raise "codex turn failed: #{inspect(reason)}"
       end
     after

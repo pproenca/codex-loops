@@ -390,6 +390,28 @@ defmodule Workflow.Web.SchedulerAPITest do
       wait_for_api_projection(id, attempts - 1)
   end
 
+  defp wait_for_api_state(id, state, attempts \\ 50)
+
+  defp wait_for_api_state(id, state, 0),
+    do: flunk("expected GET /api/runs/#{id} to return a #{state} projection")
+
+  defp wait_for_api_state(id, state, attempts) do
+    conn = get(json_conn(), "/api/runs/#{id}")
+
+    case json_response(conn, 200) do
+      %{"data" => %{"state" => ^state} = data} ->
+        data
+
+      _other ->
+        Process.sleep(10)
+        wait_for_api_state(id, state, attempts - 1)
+    end
+  rescue
+    ExUnit.AssertionError ->
+      Process.sleep(10)
+      wait_for_api_state(id, state, attempts - 1)
+  end
+
   defp wait_for_api_events(id, attempts \\ 50)
 
   defp wait_for_api_events(id, 0),
@@ -542,6 +564,48 @@ defmodule Workflow.Web.SchedulerAPITest do
              "log_emitted",
              "agent_committed",
              "run_completed"
+           ]
+  end
+
+  test "GET /api/runs/:id exposes loop_exhausted failures" do
+    path =
+      write_workflow(~S"""
+      workflow "scheduler-api-loop-exhausted" do
+        loop max_iterations: 1, on_exhausted: :fail do
+          agent "tick"
+        end
+
+        return :ok
+      end
+      """)
+
+    id = run_id("scheduler_api_loop_exhausted")
+
+    conn =
+      json_conn()
+      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+
+    assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
+
+    assert %{
+             "state" => "failed",
+             "failure" => %{
+               "address" => [0],
+               "attempts" => 0,
+               "reason" => reason
+             },
+             "rawRefs" => %{"journal" => raw_refs}
+           } = wait_for_api_state(id, "failed")
+
+    assert reason =~ "loop_exhausted"
+
+    assert Enum.map(raw_refs, & &1["type"]) == [
+             "run_started",
+             "loop_decision",
+             "iteration_started",
+             "agent_committed",
+             "loop_decision",
+             "loop_exhausted"
            ]
   end
 

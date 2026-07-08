@@ -28,6 +28,11 @@ defmodule Workflow.CodexProviderTest do
   [mode | rest] = System.argv()
   prompt = case IO.read(:stdio, :eof) do :eof -> ""; s -> String.trim(s) end
 
+  if mode == "timeout" do
+    Process.sleep(500)
+    System.halt(0)
+  end
+
   valid = %{"bugs" => [%{"file" => "lib/a.ex", "line" => 3}]}
   invalid = %{"bugs" => "nope"}
 
@@ -239,6 +244,38 @@ defmodule Workflow.CodexProviderTest do
            ]
 
     assert Enum.map(committed.payload.activity, & &1.activity_index) == [2, 3]
+  end
+
+  test "containment timeout is an expected provider failure with stable detail", ctx do
+    id = run_id()
+    key = %Workflow.IdempotencyKey{run_id: id, node_path: [0], iteration: 0}
+    {Workflow.Provider.Codex, opts} = codex(ctx, "timeout")
+    opts = Keyword.put(opts, :timeout, 100)
+    detail = %{"message" => "codex turn timed out"}
+
+    assert {:error, {:provider_failure, :timeout, ^detail, nil, []}} =
+             Workflow.Provider.Codex.run_agent("say hello", nil, key, opts)
+
+    assert {:error, {:provider_failure, [0], :timeout, ^detail}} =
+             Run.run(EchoWorkflow, run_id: id, provider: {Workflow.Provider.Codex, opts})
+
+    assert settled_types(id) == [:run_started, :agent_failed]
+
+    failed = Enum.find(Journal.fold(id), &(&1.type == :agent_failed))
+    assert failed.payload.reason == {:provider_failure, :timeout, detail}
+    assert failed.payload.usage == nil
+    assert failed.payload.activity == []
+
+    status = Status.of(id)
+    assert status.state == :failed
+    assert status.failure.reason == {:provider_failure, :timeout, detail}
+    assert status.usage.total_tokens == 0
+
+    assert [agent] = status.agents
+    assert agent.status == :failed
+    assert agent.usage == %Provider.Usage{}
+    assert agent.activity == []
+    assert agent.provider_failure == %{kind: :timeout, detail: detail}
   end
 
   test "a schema-backed turn against the real provider honours fail-closed retry", ctx do

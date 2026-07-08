@@ -107,9 +107,61 @@ Useful forms:
 - `log "message"`
 - `agent "prompt"`
 - `agent "prompt", schema: %{...}, retries: n`
+- `let :name = agent(...)`
+- `let :name = synthesize(...)`
+- `let :name = refine(...)`
+- `agent(~P"... <%= @name %> ...")`
+- `emit(~P"... <%= @name %> ...")`
+- `emit_result(:name)`
 - `return value`
-- Advanced orchestration: `parallel`, `pipeline`, `collect`, `while_budget`,
-  `until_dry`, `verify`, `judge`, `synthesize`, and `fan_out`.
+- Core orchestration: `loop max_iterations: n, until: predicate do ... end` and
+  `fanout width: n do ... end`.
+- Advanced orchestration: `parallel`, `pipeline`, `collect`, `verify`, `judge`,
+  and `synthesize`.
+- Compatibility/sugar surfaces: `while_budget`, `until_dry`, and `fan_out`.
+- Deferred and unavailable: `gather` and `map`.
+- Unavailable user-authored surface: explicit heterogeneous `lanes([...])`.
+
+The plugin authoring surface includes the implemented generic core from root
+`SPEC.md`: bounded `loop`, repeated-lane `fanout`, and the closed predicate
+vocabulary. `loop max_iterations:` requires a positive integer and supports a
+header `until:` predicate or one body-local `until(predicate)`, but not both.
+Body-local `until` cannot contain `dry(...)`, stops the loop at that body point,
+and may use an earlier loop-local `fanout bind:`.
+
+Generic `fanout` repeats one non-empty lane of `agent` turns. Its `width:` is an
+integer, `budget_slices(per: n, max: m)`, or
+`path_count(:binding, "/json/pointer", max: m)`. It supports optional `bind:`,
+`max_concurrency:`, and `on_zero: :complete | :fail`. A `fanout bind:` produces
+the ordered lane result list for later templates and predicates; it does not
+inject per-lane data into lane prompts.
+
+Closed predicate examples. For `agree` over a fanout binding, each lane result
+must be a structured map, usually from a schema-backed agent:
+
+```elixir
+all([count(:items) >= 2, budget_remaining() > 10])
+any([path_exists(:reviews, "/0"), path_non_empty(:draft, "/summary")])
+dry(rounds: 2, seen_by: [:id])
+agree(:reviews, path: "/approved", equals: true, threshold: :all)
+path_count(:draft, "/items") >= 2
+path_equals(:draft, "/status", "ready")
+```
+
+`all_of` and `any_of` remain legacy aliases for `all` and `any`.
+
+The plugin authoring surface includes the implemented §10 dataflow core. `let`
+binds a top-level producer's journaled output for later rendering. A later
+top-level `agent(~P...)` may inject earlier bindings through closed template
+holes such as `<%= @draft %>`. A final `emit(~P...)` returns rendered text, while
+a final `emit_result(:name)` returns a structured public projection from a
+result-capable binding. The shipped result-capable producer is `refine`.
+
+Template prompts remain narrow: no Elixir string interpolation, no arbitrary
+helper calls, and no template prompts inside nested agents such as `parallel`,
+`pipeline`, `fanout`, `fan_out`, or loop bodies. `gather` and `map` are reserved
+§10.9 future forms and must not be presented as executable plugin workflow
+syntax.
 
 Expected authoring loop:
 

@@ -3041,6 +3041,13 @@ types (the log is versioned and additive).
 
 ### 7.2 Event constructors and payload keys
 
+Unless a payload-value pin below says a payload is exact or that a key is absent, the
+table lists the keys emitted by the current constructor, not a closed payload schema for
+replay. Existing event types MAY grow additive payload keys under the same event type.
+New additive keys MUST be introduced so older events that lack the key still fold, and
+folds/readers MUST ignore unknown payload keys so the journal remains compatible with the
+additive log policy in §7.1.
+
 | `type` | Payload keys |
 |---|---|
 | `:run_started` | `tree_name, tree_version, node_count, budget, script_path` (no address) |
@@ -3062,7 +3069,7 @@ types (the log is versioned and additive).
 | `:fanout_started` / `:fanout_completed` | `address, iteration?, width_expr, width, bind` / `address, iteration?` |
 | `:fanout_failed` | `address, iteration?, reason` (terminal failure for `fanout on_zero: :fail`) |
 | `:fan_out_started` / `:fan_out_completed` | `address, per, width` / `address` (legacy sugar payload) |
-| `:refine_started` | `address, input, max_rounds, until, on_non_convergence, max_concurrency, reviewer_timeout_ms, gates, reviewers, reviser, artifact_schema_version, review_adapter_versions` |
+| `:refine_started` | `address, input, max_rounds, until, on_non_convergence, max_concurrency, reviewer_timeout_ms, gates, reviewers, reviser, artifact_schema_version, review_schema_version, review_adapter_versions` |
 | `:refine_round_started` | `address, round, artifact` |
 | `:refine_role_failed` | `address, role, role_address, round, reviewer, reviewer_index, attempts, reason, detail, usage, activity` |
 | `:refine_gate_evaluated` | `address, gate, predicate, result, input_round, input_refs` |
@@ -4198,7 +4205,7 @@ refine_started
     %{address, input, max_rounds, until: :unanimous, on_non_convergence,
       max_concurrency, reviewer_timeout_ms, gates: gate_descriptor,
       reviewers: [reviewer_descriptor],
-      reviser: reviser_descriptor, artifact_schema_version: 1,
+      reviser: reviser_descriptor, artifact_schema_version: 1, review_schema_version: 1,
       review_adapter_versions: %{findings_v1: 1, defects_v1: 1, violations_v1: 1, concerns_v1: 1}}
 
 refine_round_started

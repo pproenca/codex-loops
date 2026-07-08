@@ -9,13 +9,16 @@ defmodule Workflow.FanoutRunTest do
   use ExUnit.Case, async: true
 
   alias Workflow.{Run, Journal, Status, Idempotency, Event, IdempotencyKey}
+  alias Workflow.Node.BudgetSlices
   alias Workflow.Provider.Usage
-  alias Workflow.Test.{EchoProvider, GateProvider, ExplodingProvider}
+  alias Workflow.Test.{EchoProvider, GateProvider, ExplodingProvider, ScriptedProvider}
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp echo, do: {EchoProvider, sink: self()}
   defp gate(opts \\ []), do: {GateProvider, Keyword.merge([sink: self()], opts)}
   defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
+
+  defp event(id, type), do: Journal.fold(id) |> Enum.find(&(&1.type == type))
 
   defp committed_addresses(id) do
     Journal.fold(id)
@@ -29,6 +32,27 @@ defmodule Workflow.FanoutRunTest do
   defp gather_gated(n) do
     assert_receive {:at_agent, pid}
     [pid | gather_gated(n - 1)]
+  end
+
+  defp await_lease_released(run_id, tries \\ 200) do
+    cond do
+      Registry.lookup(Workflow.Run.Registry, run_id) == [] ->
+        :ok
+
+      tries == 0 ->
+        flunk("lease for #{run_id} was never released")
+
+      true ->
+        Process.sleep(5)
+        await_lease_released(run_id, tries - 1)
+    end
+  end
+
+  defp kill_and_await(run_id, pid) do
+    ref = Process.monitor(pid)
+    Process.exit(pid, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+    await_lease_released(run_id)
   end
 
   # --- parallel: barrier fan-out ---
@@ -257,5 +281,329 @@ defmodule Workflow.FanoutRunTest do
     refute :run_completed in kinds
 
     assert Status.of(id).state == :failed
+  end
+
+  # --- fanout: fixed-width repeated agent lane ---
+
+  defmodule GenericFanout do
+    use Workflow
+
+    workflow "generic-fanout" do
+      fanout width: 3 do
+        agent("work")
+        agent("check")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule GenericFanoutZeroComplete do
+    use Workflow
+
+    workflow "generic-fanout-zero-complete" do
+      fanout width: 0, on_zero: :complete do
+        agent("never")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule GenericFanoutZeroFail do
+    use Workflow
+
+    workflow "generic-fanout-zero-fail" do
+      fanout width: 0, on_zero: :fail do
+        agent("never")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule GenericFanoutThenGate do
+    use Workflow
+
+    workflow "generic-fanout-then-gate" do
+      fanout width: 2 do
+        agent("branch")
+      end
+
+      agent("gate")
+      return(:ok)
+    end
+  end
+
+  defmodule GenericFanoutBudgetMax do
+    use Workflow
+
+    workflow "generic-fanout-budget-max" do
+      fanout width: budget_slices(per: 10, max: 3) do
+        agent("work")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule GenericFanoutPathCountEmit do
+    use Workflow
+
+    workflow "generic-fanout-path-count-emit" do
+      let(:items = agent("items"))
+
+      fanout width: path_count(:items, "/rows", max: 2), bind: :work do
+        agent("work")
+      end
+
+      emit(~P"Rows: <%= count(@work) %>")
+    end
+  end
+
+  defmodule GenericFanoutPredicateGate do
+    use Workflow
+
+    workflow "generic-fanout-predicate-gate" do
+      fanout width: 2, bind: :checks do
+        agent("check")
+      end
+
+      while_budget reserve: 0,
+                   until: agree(:checks, path: "/echo", equals: "check", threshold: :all),
+                   max_iterations: 1 do
+        agent("loop")
+      end
+
+      return(:ok)
+    end
+  end
+
+  defmodule GenericFanoutBudgetThenGate do
+    use Workflow
+
+    workflow "generic-fanout-budget-then-gate" do
+      fanout width: budget_slices(per: 10, max: 2) do
+        agent("branch")
+      end
+
+      agent("gate")
+      return(:ok)
+    end
+  end
+
+  test "fanout runs a fixed-width repeated lane and commits lane events in input order" do
+    id = run_id()
+    assert {:ok, ^id} = Run.run(GenericFanout, run_id: id, provider: echo())
+
+    for _ <- 1..3 do
+      assert_received {:agent_called, "work"}
+      assert_received {:agent_called, "check"}
+    end
+
+    refute_received {:agent_called, _}
+
+    assert types(id) ==
+             [
+               :run_started,
+               :fanout_started,
+               :agent_committed,
+               :agent_committed,
+               :agent_committed,
+               :agent_committed,
+               :agent_committed,
+               :agent_committed,
+               :fanout_completed,
+               :run_completed
+             ]
+
+    assert event(id, :fanout_started).payload == %{
+             address: [0],
+             iteration: nil,
+             width_expr: 3,
+             width: 3,
+             bind: nil
+           }
+
+    assert committed_addresses(id) == [
+             [0, 0, 0],
+             [0, 0, 1],
+             [0, 1, 0],
+             [0, 1, 1],
+             [0, 2, 0],
+             [0, 2, 1]
+           ]
+
+    assert Status.of(id).state == :completed
+  end
+
+  test "fanout on_zero complete journals generic markers without provider calls" do
+    id = run_id()
+    assert {:ok, ^id} = Run.run(GenericFanoutZeroComplete, run_id: id, provider: echo())
+
+    refute_received {:agent_called, _}
+
+    assert types(id) == [:run_started, :fanout_started, :fanout_completed, :run_completed]
+    assert event(id, :fanout_started).payload.width == 0
+    assert event(id, :fanout_completed).payload == %{address: [0], iteration: nil}
+    assert committed_addresses(id) == []
+    assert Status.of(id).state == :completed
+  end
+
+  test "fanout on_zero fail emits fanout_failed and returns the spec outcome" do
+    id = run_id()
+
+    assert {:error, {:fanout_failed, [0], nil, :zero_width}} =
+             Run.run(GenericFanoutZeroFail, run_id: id, provider: echo())
+
+    refute_received {:agent_called, _}
+
+    assert types(id) == [:run_started, :fanout_started, :fanout_failed]
+
+    assert event(id, :fanout_failed).payload == %{
+             address: [0],
+             iteration: nil,
+             reason: :zero_width
+           }
+
+    status = Status.of(id)
+    assert status.state == :failed
+
+    assert status.failure == %{
+             address: [0],
+             iteration: nil,
+             attempts: 0,
+             reason: {:fanout_failed, [0], nil, :zero_width}
+           }
+  end
+
+  test "fanout budget_slices width is capped, journaled, and committed in input order" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(GenericFanoutBudgetMax,
+               run_id: id,
+               budget: 50,
+               provider: {EchoProvider, sink: self()}
+             )
+
+    for _ <- 1..3, do: assert_received({:agent_called, "work"})
+    refute_received {:agent_called, _}
+
+    assert event(id, :fanout_started).payload == %{
+             address: [0],
+             iteration: nil,
+             width_expr: %BudgetSlices{per: 10, max: 3},
+             width: 3,
+             bind: nil
+           }
+
+    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [0, 2, 0]]
+  end
+
+  test "fanout path_count width reads a bound value with an explicit structural cap" do
+    id = run_id()
+    {:ok, script} = ScriptedProvider.start([%{"rows" => [1, 2, 3]}, %{}, %{}])
+
+    assert {:ok, ^id} =
+             Run.run(GenericFanoutPathCountEmit,
+               run_id: id,
+               provider: {ScriptedProvider, script: script, sink: self()}
+             )
+
+    assert_received {:agent_called, "items"}
+    for _ <- 1..2, do: assert_received({:agent_called, "work"})
+    refute_received {:agent_called, _}
+
+    assert event(id, :fanout_started).payload.width == 2
+
+    assert %Event{payload: %{value: "Rows: 2"}} =
+             Enum.find(Journal.fold(id), &(&1.type == :run_completed))
+  end
+
+  test "fanout bindings feed supported predicates through explicit binding refs" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(GenericFanoutPredicateGate,
+               run_id: id,
+               provider: {EchoProvider, sink: self()}
+             )
+
+    for _ <- 1..2, do: assert_received({:agent_called, "check"})
+    refute_received {:agent_called, "loop"}
+    refute_received {:agent_called, _}
+
+    assert Status.of(id).state == :completed
+  end
+
+  @tag :capture_log
+  test "fanout resumes past completed lanes without re-emitting markers or re-invoking lanes" do
+    id = run_id()
+
+    {:ok, ^id, pid} =
+      Run.start(GenericFanoutThenGate,
+        run_id: id,
+        provider: {GateProvider, sink: self(), gate_on: "gate"}
+      )
+
+    for _ <- 1..2, do: assert_receive({:agent_called, "branch"})
+    assert_receive {:agent_called, "gate"}
+    assert_receive {:at_agent, ^pid}
+
+    assert Enum.count(types(id), &(&1 == :fanout_started)) == 1
+    assert Enum.count(types(id), &(&1 == :fanout_completed)) == 1
+
+    kill_and_await(id, pid)
+
+    assert {:ok, ^id} =
+             Run.run(GenericFanoutThenGate, run_id: id, provider: {EchoProvider, sink: self()})
+
+    refute_received {:agent_called, "branch"}
+    assert_received {:agent_called, "gate"}
+    refute_received {:agent_called, _}
+
+    assert Enum.count(types(id), &(&1 == :fanout_started)) == 1
+    assert Enum.count(types(id), &(&1 == :fanout_completed)) == 1
+    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [1]]
+    assert Status.of(id).state == :completed
+  end
+
+  @tag :capture_log
+  test "dynamic fanout resumes exactly once after a journaled budget width decision" do
+    id = run_id()
+
+    {:ok, ^id, pid} =
+      Run.start(GenericFanoutBudgetThenGate,
+        run_id: id,
+        budget: 20,
+        provider: {GateProvider, sink: self(), gate_on: "gate"}
+      )
+
+    for _ <- 1..2, do: assert_receive({:agent_called, "branch"})
+    assert_receive {:agent_called, "gate"}
+    assert_receive {:at_agent, ^pid}
+
+    assert event(id, :fanout_started).payload.width == 2
+    assert Enum.count(types(id), &(&1 == :fanout_started)) == 1
+    assert Enum.count(types(id), &(&1 == :fanout_completed)) == 1
+
+    kill_and_await(id, pid)
+
+    assert {:ok, ^id} =
+             Run.run(GenericFanoutBudgetThenGate,
+               run_id: id,
+               budget: 0,
+               provider: {EchoProvider, sink: self()}
+             )
+
+    refute_received {:agent_called, "branch"}
+    assert_received {:agent_called, "gate"}
+    refute_received {:agent_called, _}
+
+    assert Enum.count(types(id), &(&1 == :fanout_started)) == 1
+    assert Enum.count(types(id), &(&1 == :fanout_completed)) == 1
+    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [1]]
+    assert Status.of(id).state == :completed
   end
 end

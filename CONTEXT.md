@@ -35,3 +35,7 @@ _Avoid_: raw event, raw payload
 **Install command**:
 A user-invoked Codex Loops setup operation that installs or enables the Codex plugin and verifies the local runtime is available.
 _Avoid_: plugin postinstall hook, automatic dependency install
+
+**Plugin lifecycle**:
+Codex-owned installation, enablement, and update state for the Codex Loops plugin, separate from the Homebrew-owned runtime package.
+_Avoid_: bundled plugin copy, Homebrew-owned plugin update

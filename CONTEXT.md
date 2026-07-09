@@ -31,3 +31,7 @@ _Avoid_: run state, writer state
 **Raw ref**:
 A client-safe pointer to a journal event, usually sequence, type, and address; it is not the raw journal payload.
 _Avoid_: raw event, raw payload
+
+**Install command**:
+A user-invoked Codex Loops setup operation that installs or enables the Codex plugin and verifies the local runtime is available.
+_Avoid_: plugin postinstall hook, automatic dependency install

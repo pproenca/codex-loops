@@ -20,18 +20,8 @@ defmodule Workflow.Application do
   """
   use Application
 
-  alias Workflow.MCP.BurritoEnvironment
-
   @impl true
   def start(_type, _args) do
-    if mcp_entrypoint?() do
-      start_mcp()
-    else
-      start_scheduler()
-    end
-  end
-
-  defp start_scheduler do
     children = [
       {Registry, keys: :unique, name: Workflow.Run.Registry},
       {Phoenix.PubSub, name: Workflow.PubSub},
@@ -43,17 +33,5 @@ defmodule Workflow.Application do
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Workflow.Supervisor)
-  end
-
-  defp start_mcp do
-    children = [
-      Workflow.MCP.ApplicationEntrypoint
-    ]
-
-    Supervisor.start_link(children, strategy: :one_for_one, name: Workflow.Supervisor)
-  end
-
-  defp mcp_entrypoint? do
-    BurritoEnvironment.mcp_entrypoint?()
   end
 end

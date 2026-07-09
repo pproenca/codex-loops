@@ -17,6 +17,21 @@ defmodule Workflow.MCPSchedulerClientTest do
     :ok
   end
 
+  test "health rejects a scheduler from a different package version" do
+    envelope = %{
+      "api_version" => "scheduler.v1",
+      "data" => %{"status" => "ok", "version" => "99.0.0"}
+    }
+
+    url = serve_once(envelope)
+    System.put_env("CODEX_LOOPS_SCHEDULER_URL", url)
+
+    assert {:error, message} = SchedulerClient.health()
+    assert message =~ "version mismatch"
+    assert message =~ Workflow.PackageVersion.version()
+    assert message =~ "99.0.0"
+  end
+
   test "get_run returns the scheduler status envelope without reshaping camelCase fields" do
     envelope = %{
       "api_version" => "scheduler.v1",

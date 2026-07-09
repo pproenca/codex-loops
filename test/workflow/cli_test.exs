@@ -1,0 +1,187 @@
+defmodule Workflow.CLITest do
+  use ExUnit.Case, async: true
+
+  alias Workflow.CLI
+  alias Workflow.PackageVersion
+
+  @version PackageVersion.version()
+  @marketplace_source "pproenca/codex-loops"
+
+  test "install --check succeeds when runtime, marketplace, and plugin match" do
+    runtime_root = runtime_fixture()
+
+    assert {:ok, result} =
+             CLI.run(["install", "--check"],
+               runtime_root: runtime_root,
+               codex_bin: "/fake/codex",
+               command: command_fixture(marketplaces: [marketplace()], plugins: [plugin()])
+             )
+
+    assert result.changed == false
+    assert result.runtime.version == @version
+    assert result.plugin.enabled == true
+    assert result.plan == []
+  end
+
+  test "install --dry-run reports the deterministic plan without mutations" do
+    runtime_root = runtime_fixture()
+    parent = self()
+
+    command =
+      command_fixture(marketplaces: [], plugins: [], notify: fn args -> send(parent, {:command, args}) end)
+
+    assert {:ok, result} =
+             CLI.run(["install", "--dry-run"],
+               runtime_root: runtime_root,
+               codex_bin: "/fake/codex",
+               command: command
+             )
+
+    assert result.changed == false
+    assert result.plan == ["add_marketplace", "install_plugin"]
+    refute_received {:command, ["plugin", "marketplace", "add", @marketplace_source | _rest]}
+    refute_received {:command, ["plugin", "add", "codex-loops@codex-loops" | _rest]}
+  end
+
+  test "install applies missing Codex Loops state and verifies the result" do
+    runtime_root = runtime_fixture()
+    {:ok, state} = Agent.start_link(fn -> %{installed?: false} end)
+
+    command = fn args ->
+      if List.last(args) == "--help" do
+        {"Usage: codex plugin --json", 0}
+      else
+        case args do
+          ["plugin", "marketplace", "add" | _rest] ->
+            Agent.update(state, &Map.put(&1, :installed?, true))
+            {~s({"ok":true}), 0}
+
+          ["plugin", "add" | _rest] ->
+            {~s({"ok":true}), 0}
+
+          ["plugin", "marketplace", "list", "--json"] ->
+            if Agent.get(state, & &1.installed?) do
+              {Jason.encode!(%{"marketplaces" => [marketplace()]}), 0}
+            else
+              {~s({"marketplaces":[]}), 0}
+            end
+
+          ["plugin", "list", "--json"] ->
+            if Agent.get(state, & &1.installed?) do
+              {Jason.encode!(%{"installed" => [plugin()], "available" => []}), 0}
+            else
+              {~s({"installed":[],"available":[]}), 0}
+            end
+
+          _other ->
+            {"unexpected", 1}
+        end
+      end
+    end
+
+    assert {:ok, result} =
+             CLI.run(["install"],
+               runtime_root: runtime_root,
+               codex_bin: "/fake/codex",
+               command: command
+             )
+
+    assert result.changed == true
+    assert result.plan == ["add_marketplace", "install_plugin"]
+  end
+
+  test "install fails closed on a marketplace owned by another source" do
+    runtime_root = runtime_fixture()
+
+    conflicting =
+      marketplace(%{
+        "marketplaceSource" => %{"sourceType" => "git", "source" => "someone/else"}
+      })
+
+    assert {:error, 4, error} =
+             CLI.run(["install", "--check"],
+               runtime_root: runtime_root,
+               codex_bin: "/fake/codex",
+               command: command_fixture(marketplaces: [conflicting], plugins: [])
+             )
+
+    assert error.code == "marketplace_conflict"
+    assert error.message =~ "someone/else"
+  end
+
+  test "install reports a stable prerequisite error when Codex is missing" do
+    runtime_root = runtime_fixture()
+
+    assert {:error, 3, error} =
+             CLI.run(["install", "--check"],
+               runtime_root: runtime_root,
+               codex_bin: nil
+             )
+
+    assert error.code == "codex_missing"
+    assert error.message =~ "brew install --cask codex"
+  end
+
+  defp command_fixture(opts) do
+    marketplaces = Keyword.fetch!(opts, :marketplaces)
+    plugins = Keyword.fetch!(opts, :plugins)
+    notify = Keyword.get(opts, :notify, fn _args -> :ok end)
+
+    fn args ->
+      notify.(args)
+
+      case args do
+        ["plugin", "marketplace", "list", "--json"] ->
+          {Jason.encode!(%{"marketplaces" => marketplaces}), 0}
+
+        ["plugin", "list", "--json"] ->
+          {Jason.encode!(%{"installed" => plugins, "available" => []}), 0}
+
+        _help ->
+          {"Usage: codex plugin --json", 0}
+      end
+    end
+  end
+
+  defp marketplace(overrides \\ %{}) do
+    Map.merge(
+      %{
+        "name" => "codex-loops",
+        "marketplaceSource" => %{
+          "sourceType" => "git",
+          "source" => "pproenca/codex-loops",
+          "ref" => "v#{@version}"
+        }
+      },
+      overrides
+    )
+  end
+
+  defp plugin do
+    %{
+      "pluginId" => "codex-loops@codex-loops",
+      "name" => "codex-loops",
+      "marketplaceName" => "codex-loops",
+      "version" => @version,
+      "installed" => true,
+      "enabled" => true,
+      "source" => %{"source" => "local", "path" => "plugins/codex-loops"}
+    }
+  end
+
+  defp runtime_fixture do
+    root =
+      Path.join(System.tmp_dir!(), "codex-loops-cli-#{System.unique_integer([:positive])}")
+
+    scheduler = Path.join(root, "scheduler/bin/agent_loops")
+    mcp = Path.join(root, "mcp/codex-loops-mcp")
+    File.mkdir_p!(Path.dirname(scheduler))
+    File.mkdir_p!(Path.dirname(mcp))
+    File.write!(scheduler, "#!/bin/sh\nexit 0\n")
+    File.write!(mcp, "#!/bin/sh\necho 'codex-loops-mcp #{@version}'\n")
+    File.chmod!(scheduler, 0o755)
+    File.chmod!(mcp, 0o755)
+    on_exit(fn -> File.rm_rf(root) end)
+    root
+  end
+end

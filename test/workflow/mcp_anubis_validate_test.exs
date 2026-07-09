@@ -10,6 +10,7 @@ defmodule Workflow.MCPAnubisValidateTest do
     previous_timeout = System.get_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS")
     previous_plugin_root = System.get_env("CODEX_LOOPS_PLUGIN_ROOT")
     previous_repo_root = System.get_env("CODEX_LOOPS_REPO_ROOT")
+    previous_runtime_root = System.get_env("CODEX_LOOPS_RUNTIME_ROOT")
     previous_scheduler_bin = System.get_env("CODEX_LOOPS_SCHEDULER_BIN")
 
     System.put_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", "1000")
@@ -19,8 +20,11 @@ defmodule Workflow.MCPAnubisValidateTest do
       restore_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", previous_timeout)
       restore_env("CODEX_LOOPS_PLUGIN_ROOT", previous_plugin_root)
       restore_env("CODEX_LOOPS_REPO_ROOT", previous_repo_root)
+      restore_env("CODEX_LOOPS_RUNTIME_ROOT", previous_runtime_root)
       restore_env("CODEX_LOOPS_SCHEDULER_BIN", previous_scheduler_bin)
     end)
+
+    System.delete_env("CODEX_LOOPS_RUNTIME_ROOT")
 
     :ok
   end
@@ -392,15 +396,12 @@ defmodule Workflow.MCPAnubisValidateTest do
   test "missing packaged scheduler release returns searched paths" do
     port = unused_local_port()
     temp_root = tmp_dir("missing-scheduler")
-    plugin_root = Path.join(temp_root, "plugin")
     repo_root = Path.join(temp_root, "repo")
 
-    File.mkdir_p!(plugin_root)
     File.mkdir_p!(repo_root)
 
     System.put_env("CODEX_LOOPS_SCHEDULER_URL", "http://127.0.0.1:#{port}")
     System.put_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", "50")
-    System.put_env("CODEX_LOOPS_PLUGIN_ROOT", plugin_root)
     System.put_env("CODEX_LOOPS_REPO_ROOT", repo_root)
     System.delete_env("CODEX_LOOPS_SCHEDULER_BIN")
 
@@ -422,7 +423,6 @@ defmodule Workflow.MCPAnubisValidateTest do
       assert error["details"]["reason"] == "No packaged scheduler release was found."
 
       assert error["details"]["searched_paths"] == [
-               Path.join([plugin_root, "scheduler", "bin", "agent_loops"]),
                Path.join([repo_root, "_build", "prod", "rel", "agent_loops", "bin", "agent_loops"])
              ]
     after

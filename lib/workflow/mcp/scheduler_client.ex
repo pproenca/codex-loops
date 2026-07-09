@@ -7,6 +7,7 @@ defmodule Workflow.MCP.SchedulerClient do
   """
 
   @default_timeout_ms 5_000
+  @package_version Workflow.PackageVersion.version()
 
   @type config :: %{
           required(:base_url) => String.t(),
@@ -33,8 +34,17 @@ defmodule Workflow.MCP.SchedulerClient do
   @spec health() :: {:ok, map()} | {:error, String.t()}
   def health do
     case request(:get, "/api/health") do
-      {:ok, 200, %{"api_version" => "scheduler.v1", "data" => %{"status" => "ok"}} = payload} ->
+      {:ok, 200,
+       %{
+         "api_version" => "scheduler.v1",
+         "data" => %{"status" => "ok", "version" => @package_version}
+       } = payload} ->
         {:ok, payload}
+
+      {:ok, 200,
+       %{"api_version" => "scheduler.v1", "data" => %{"status" => "ok", "version" => version}}} ->
+        {:error,
+         "Scheduler version mismatch: MCP #{@package_version}, scheduler #{inspect(version)}"}
 
       {:ok, status, payload} ->
         {:error, "Health check returned HTTP #{status}: #{inspect(payload)}"}

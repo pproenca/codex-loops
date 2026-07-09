@@ -10,19 +10,16 @@ defmodule Workflow.MCP.AnubisStdio do
   alias Anubis.Server.Transport.STDIO
   alias Workflow.MCP.AnubisServer
   alias Workflow.MCP.AnubisServer.ToolHelpers
-  alias Workflow.MCP.BurritoEnvironment
   alias Workflow.PackageVersion
 
   @spec main([String.t()]) :: :ok | {:error, term()} | no_return()
-  def main(args \\ BurritoEnvironment.argv()) do
+  def main(args \\ System.argv()) do
     main(args, [])
   end
 
   @doc false
   @spec main([String.t()], keyword()) :: :ok | {:error, term()} | no_return()
   def main(args, opts) when is_list(args) and is_list(opts) do
-    BurritoEnvironment.bootstrap()
-
     case args do
       [] ->
         run(opts)

@@ -30,47 +30,12 @@ defmodule CodexLoops.MixProject do
   defp releases do
     [
       agent_loops: [
-        include_executables_for: [:unix]
-      ],
-      codex_loops_mcp: [
-        steps: [:assemble, &Burrito.wrap/1],
         include_executables_for: [:unix],
         applications: [
           anubis_mcp: :load
-        ],
-        burrito: [
-          targets: [
-            native: native_burrito_target()
-          ]
         ]
       ]
     ]
-  end
-
-  defp native_burrito_target do
-    [
-      os: burrito_os(),
-      cpu: burrito_cpu()
-    ]
-  end
-
-  defp burrito_os do
-    case :os.type() do
-      {:unix, :darwin} -> :darwin
-      {:unix, _name} -> :linux
-      {:win32, _name} -> :windows
-    end
-  end
-
-  defp burrito_cpu do
-    :system_architecture
-    |> :erlang.system_info()
-    |> to_string()
-    |> case do
-      "aarch64" <> _rest -> :aarch64
-      "arm64" <> _rest -> :aarch64
-      _other -> :x86_64
-    end
   end
 
   defp deps do
@@ -82,7 +47,6 @@ defmodule CodexLoops.MixProject do
       {:exqlite, "~> 0.38.0"},
       {:bandit, "~> 1.5"},
       {:anubis_mcp, "~> 1.6", runtime: false},
-      {:burrito, "~> 1.5", runtime: false},
       {:styler, "~> 1.11", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14.1", only: [:dev, :test], runtime: false},

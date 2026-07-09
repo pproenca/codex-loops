@@ -153,8 +153,8 @@ defmodule Workflow.MCP.Lifecycle do
            last_error: health_error,
            searched_paths: candidates,
            next_steps: [
-             "Build the release with `make release`.",
-             "Or set CODEX_LOOPS_SCHEDULER_BIN to an executable scheduler release script."
+             "Run `brew reinstall pproenca/codex-loops/codex-loops`.",
+             "Then run `codex-loops install --check`."
            ]
          }), state}
     end
@@ -172,7 +172,7 @@ defmodule Workflow.MCP.Lifecycle do
     File.mkdir_p!(release_tmp)
 
     release_node = "agent_loops_mcp_#{System.os_time(:millisecond)}_#{state.release_counter}"
-    cwd = repo_root()
+    cwd = release_bin |> Path.dirname() |> Path.join("../..") |> Path.expand()
 
     env =
       [
@@ -180,9 +180,6 @@ defmodule Workflow.MCP.Lifecycle do
         {"CODEX_LOOPS_HOST", config.host},
         {"CODEX_LOOPS_PORT", Integer.to_string(config.port)},
         {"PORT", Integer.to_string(config.port)},
-        {"CODEX_LOOPS_ENTRYPOINT", nil},
-        {"__BURRITO", nil},
-        {"__BURRITO_BIN_PATH", nil},
         {"ROOTDIR", nil},
         {"BINDIR", nil},
         {"RELEASE_ROOT", nil},
@@ -378,8 +375,8 @@ defmodule Workflow.MCP.Lifecycle do
     candidates =
       [
         System.get_env("CODEX_LOOPS_SCHEDULER_BIN"),
-        Path.join([plugin_root(), "scheduler", "bin", "agent_loops"]),
-        Path.join([repo_root(), "_build", "prod", "rel", "agent_loops", "bin", "agent_loops"])
+        runtime_scheduler_bin(),
+        development_scheduler_bin()
       ]
       |> Enum.reject(&nil_or_empty?/1)
       |> Enum.map(&Path.expand/1)
@@ -403,16 +400,20 @@ defmodule Workflow.MCP.Lifecycle do
 
   defp local_autostart?(_config), do: false
 
-  defp plugin_root do
-    System.get_env("CODEX_LOOPS_PLUGIN_ROOT") ||
-      Path.expand("plugins/codex-loops", File.cwd!())
+  defp runtime_scheduler_bin do
+    case System.get_env("CODEX_LOOPS_RUNTIME_ROOT") do
+      nil -> nil
+      "" -> nil
+      root -> Path.join([root, "scheduler", "bin", "agent_loops"])
+    end
   end
 
-  defp repo_root do
-    System.get_env("CODEX_LOOPS_REPO_ROOT") ||
-      plugin_root()
-      |> Path.join("../..")
-      |> Path.expand()
+  defp development_scheduler_bin do
+    case System.get_env("CODEX_LOOPS_REPO_ROOT") do
+      nil -> nil
+      "" -> nil
+      root -> Path.join([root, "_build", "prod", "rel", "agent_loops", "bin", "agent_loops"])
+    end
   end
 
   defp maybe_put_env(env, key) do

@@ -75,12 +75,18 @@ release-mcp: release
 package-homebrew-runtime: release
 	rm -rf "$(HOMEBREW_PACKAGE_DIR)"
 	mkdir -p "$(HOMEBREW_RUNTIME_ROOT)/scheduler" "$(HOMEBREW_RUNTIME_ROOT)/mcp" "$(HOMEBREW_RUNTIME_ROOT)/bin"
+	mkdir -p "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops" "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops"
 	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(HOMEBREW_RUNTIME_ROOT)/scheduler/"
 	cp "$(HOMEBREW_RUNTIME_ROOT)/scheduler/bin/codex-loops-mcp" "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp"
 	cp "$(HOMEBREW_RUNTIME_ROOT)/scheduler/bin/codex-loops" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops"
+	cp LICENSE "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops/LICENSE"
+	cp deps/anubis_mcp/LICENSE "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops/ANUBIS_MCP_LICENSE"
+	cp plugins/codex-loops/THIRD_PARTY_NOTICES.md "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops/THIRD_PARTY_NOTICES.md"
 	chmod 755 "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops"
 	CODEX_LOOPS_RUNTIME_ROOT="$(abspath $(HOMEBREW_RUNTIME_ROOT))" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops" --version
 	CODEX_LOOPS_RUNTIME_ROOT="$(abspath $(HOMEBREW_RUNTIME_ROOT))" "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp" --version
+	test -s "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops/ANUBIS_MCP_LICENSE"
+	grep -Fq 'https://github.com/zoedsoupe/anubis-mcp' "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops/THIRD_PARTY_NOTICES.md"
 
 proof: release
 	scripts/proof-release.sh

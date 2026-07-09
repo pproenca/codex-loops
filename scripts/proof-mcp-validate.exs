@@ -32,6 +32,8 @@ defmodule ProofMCPValidate do
       "staged Homebrew runtime should include scheduler release"
     )
 
+    assert_missing_runtime!(entrypoint, temp_root)
+    assert_version_mismatch!(entrypoint, temp_root, package_version)
     assert_mcp_version!(entrypoint, runtime_root, package_version)
 
     workflow_path = Path.join(temp_root, "workflow.exs")
@@ -472,6 +474,62 @@ defmodule ProofMCPValidate do
 
       {output, status} ->
         raise("MCP --version failed with #{status}: #{inspect(output)}")
+    end
+  end
+
+  defp assert_missing_runtime!(entrypoint, temp_root) do
+    missing_root = Path.join(temp_root, "missing-runtime")
+
+    case System.cmd(entrypoint, ["--version"],
+           env: [
+             {"CODEX_LOOPS_MCP_BIN", nil},
+             {"CODEX_LOOPS_SCHEDULER_BIN", nil},
+             {"CODEX_LOOPS_RUNTIME_ROOT", missing_root},
+             {"PATH", "/usr/bin:/bin"}
+           ],
+           stderr_to_stdout: true
+         ) do
+      {output, 1} ->
+        assert!(
+          String.contains?(output, "does not contain a usable Codex Loops runtime") and
+            String.contains?(output, "brew install pproenca/codex-loops/codex-loops"),
+          "missing-runtime diagnostic was not actionable: #{inspect(output)}"
+        )
+
+      {output, status} ->
+        raise("missing-runtime proof returned #{status}: #{inspect(output)}")
+    end
+  end
+
+  defp assert_version_mismatch!(entrypoint, temp_root, version) do
+    mismatch_root = Path.join(temp_root, "mismatched-runtime")
+    mcp = Path.join(mismatch_root, "mcp/codex-loops-mcp")
+    scheduler = Path.join(mismatch_root, "scheduler/bin/agent_loops")
+    File.mkdir_p!(Path.dirname(mcp))
+    File.mkdir_p!(Path.dirname(scheduler))
+    File.write!(mcp, "#!/bin/sh\necho 'codex-loops-mcp 99.0.0'\n")
+    File.write!(scheduler, "#!/bin/sh\nexit 0\n")
+    File.chmod!(mcp, 0o755)
+    File.chmod!(scheduler, 0o755)
+
+    case System.cmd(entrypoint, ["--version"],
+           env: [
+             {"CODEX_LOOPS_MCP_BIN", nil},
+             {"CODEX_LOOPS_SCHEDULER_BIN", nil},
+             {"CODEX_LOOPS_RUNTIME_ROOT", mismatch_root}
+           ],
+           stderr_to_stdout: true
+         ) do
+      {output, 1} ->
+        assert!(
+          String.contains?(output, "plugin/runtime version mismatch") and
+            String.contains?(output, "Plugin:  #{version}") and
+            String.contains?(output, "Runtime: 99.0.0"),
+          "version-mismatch diagnostic was not actionable: #{inspect(output)}"
+        )
+
+      {output, status} ->
+        raise("version-mismatch proof returned #{status}: #{inspect(output)}")
     end
   end
 

@@ -43,6 +43,8 @@ runtime_root_for() {
       parent=$(dirname -- "$candidate_dir")
       if [ "$(basename -- "$parent")" = "scheduler" ]; then
         dirname -- "$parent"
+      elif [ -d "$parent/opt/codex-loops/libexec" ]; then
+        printf '%s\n' "$parent/opt/codex-loops/libexec"
       else
         dirname -- "$candidate_dir"
       fi
@@ -55,7 +57,7 @@ compatible_runtime() {
   candidate=$1
   root=$2
   shift 2
-  scheduler="$root/scheduler/bin/agent_loops"
+  scheduler=${CODEX_LOOPS_SCHEDULER_BIN:-"$root/scheduler/bin/agent_loops"}
 
   [ -x "$candidate" ] || return 1
   [ -x "$scheduler" ] || return 1

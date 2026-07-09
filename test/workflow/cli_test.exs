@@ -48,33 +48,37 @@ defmodule Workflow.CLITest do
     {:ok, state} = Agent.start_link(fn -> %{installed?: false} end)
 
     command = fn args ->
-      if List.last(args) == "--help" do
-        {"Usage: codex plugin --json", 0}
+      if args == ["--version"] do
+        {"codex-cli 0.142.5\n", 0}
       else
-        case args do
-          ["plugin", "marketplace", "add" | _rest] ->
-            Agent.update(state, &Map.put(&1, :installed?, true))
-            {~s({"ok":true}), 0}
+        if List.last(args) == "--help" do
+          {"Usage: codex plugin --json", 0}
+        else
+          case args do
+            ["plugin", "marketplace", "add" | _rest] ->
+              Agent.update(state, &Map.put(&1, :installed?, true))
+              {~s({"ok":true}), 0}
 
-          ["plugin", "add" | _rest] ->
-            {~s({"ok":true}), 0}
+            ["plugin", "add" | _rest] ->
+              {~s({"ok":true}), 0}
 
-          ["plugin", "marketplace", "list", "--json"] ->
-            if Agent.get(state, & &1.installed?) do
-              {Jason.encode!(%{"marketplaces" => [marketplace()]}), 0}
-            else
-              {~s({"marketplaces":[]}), 0}
-            end
+            ["plugin", "marketplace", "list", "--json"] ->
+              if Agent.get(state, & &1.installed?) do
+                {Jason.encode!(%{"marketplaces" => [marketplace()]}), 0}
+              else
+                {~s({"marketplaces":[]}), 0}
+              end
 
-          ["plugin", "list", "--json"] ->
-            if Agent.get(state, & &1.installed?) do
-              {Jason.encode!(%{"installed" => [plugin()], "available" => []}), 0}
-            else
-              {~s({"installed":[],"available":[]}), 0}
-            end
+            ["plugin", "list", "--json"] ->
+              if Agent.get(state, & &1.installed?) do
+                {Jason.encode!(%{"installed" => [plugin()], "available" => []}), 0}
+              else
+                {~s({"installed":[],"available":[]}), 0}
+              end
 
-          _other ->
-            {"unexpected", 1}
+            _other ->
+              {"unexpected", 1}
+          end
         end
       end
     end
@@ -122,6 +126,51 @@ defmodule Workflow.CLITest do
     assert error.message =~ "brew install --cask codex"
   end
 
+  test "install preserves changed state and failing step when verification fails" do
+    runtime_root = runtime_fixture()
+    {:ok, state} = Agent.start_link(fn -> :before_write end)
+
+    command = fn args ->
+      if List.last(args) == "--help" do
+        {"Usage: codex plugin --json", 0}
+      else
+        case args do
+          ["--version"] ->
+            {"codex-cli 0.142.5\n", 0}
+
+          ["plugin", "marketplace", "list", "--json"] ->
+            case Agent.get(state, & &1) do
+              :before_write -> {~s({"marketplaces":[]}), 0}
+              :after_write -> {"verification unavailable", 9}
+            end
+
+          ["plugin", "list", "--json"] ->
+            {~s({"installed":[],"available":[]}), 0}
+
+          ["plugin", "marketplace", "add" | _rest] ->
+            Agent.update(state, fn _current -> :after_write end)
+            {~s({"ok":true}), 0}
+
+          ["plugin", "add" | _rest] ->
+            {~s({"ok":true}), 0}
+
+          _other ->
+            {"unexpected", 1}
+        end
+      end
+    end
+
+    assert {:error, 5, error} =
+             CLI.run(["install"],
+               runtime_root: runtime_root,
+               codex_bin: "/fake/codex",
+               command: command
+             )
+
+    assert error.changed == true
+    assert error.step == "marketplace_list"
+  end
+
   defp command_fixture(opts) do
     marketplaces = Keyword.fetch!(opts, :marketplaces)
     plugins = Keyword.fetch!(opts, :plugins)
@@ -131,6 +180,9 @@ defmodule Workflow.CLITest do
       notify.(args)
 
       case args do
+        ["--version"] ->
+          {"codex-cli 0.142.5\n", 0}
+
         ["plugin", "marketplace", "list", "--json"] ->
           {Jason.encode!(%{"marketplaces" => marketplaces}), 0}
 

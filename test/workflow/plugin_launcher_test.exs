@@ -44,6 +44,52 @@ defmodule Workflow.PluginLauncherTest do
     assert output =~ "Runtime: 99.0.0"
   end
 
+  test "discovers a Homebrew command shim on PATH" do
+    prefix = tmp_dir("prefix")
+    runtime_root = Path.join(prefix, "opt/codex-loops/libexec")
+    File.mkdir_p!(Path.join(prefix, "bin"))
+    File.mkdir_p!(Path.dirname(runtime_root))
+    File.ln_s!(runtime_fixture(@version), runtime_root)
+
+    shim = Path.join(prefix, "bin/codex-loops-mcp")
+
+    File.write!(shim, """
+    #!/bin/sh
+    exec "#{runtime_root}/mcp/codex-loops-mcp" "$@"
+    """)
+
+    File.chmod!(shim, 0o755)
+    on_exit(fn -> File.rm_rf(prefix) end)
+
+    assert {output, 0} =
+             System.cmd("/bin/sh", [@launcher, "--stdio"],
+               env: [
+                 {"CODEX_LOOPS_RUNTIME_ROOT", nil},
+                 {"CODEX_LOOPS_MCP_BIN", nil},
+                 {"PATH", "#{prefix}/bin:/usr/bin:/bin"}
+               ]
+             )
+
+    assert output == "runtime --stdio\n"
+  end
+
+  test "supports explicit MCP and scheduler paths for custom installs" do
+    runtime_root = runtime_fixture(@version)
+    mcp = Path.join(runtime_root, "mcp/codex-loops-mcp")
+    scheduler = Path.join(runtime_root, "scheduler/bin/agent_loops")
+
+    assert {output, 0} =
+             System.cmd("/bin/sh", [@launcher, "--stdio"],
+               env: [
+                 {"CODEX_LOOPS_RUNTIME_ROOT", nil},
+                 {"CODEX_LOOPS_MCP_BIN", mcp},
+                 {"CODEX_LOOPS_SCHEDULER_BIN", scheduler}
+               ]
+             )
+
+    assert output == "runtime --stdio\n"
+  end
+
   defp runtime_fixture(version) do
     root = tmp_dir("runtime")
     mcp = Path.join(root, "mcp/codex-loops-mcp")

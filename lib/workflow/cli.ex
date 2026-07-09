@@ -52,11 +52,28 @@ defmodule Workflow.CLI do
          {:ok, runtime} <- runtime(opts),
          {:ok, codex} <- codex(opts),
          {:ok, state} <- read_state(codex),
-         {:ok, plan} <- plan(state),
-         {:ok, changed?} <- execute(mode, plan, codex),
-         {:ok, final_state} <- final_state(mode, plan, state, codex),
-         :ok <- verify(mode, plan, final_state, runtime) do
-      {:ok, success(runtime, codex, final_state, plan, changed?, mode)}
+         {:ok, plan} <- plan(state) do
+      reconcile(mode, plan, state, runtime, codex)
+    end
+  end
+
+  defp reconcile(mode, plan, state, runtime, codex) do
+    case execute(mode, plan, codex) do
+      {:ok, changed?} -> finish_reconcile(mode, plan, state, runtime, codex, changed?)
+      {:error, _status, _error} = failure -> failure
+    end
+  end
+
+  defp finish_reconcile(mode, plan, state, runtime, codex, changed?) do
+    case final_state(mode, plan, state, codex) do
+      {:ok, final_state} ->
+        case verify(mode, plan, final_state, runtime) do
+          :ok -> {:ok, success(runtime, codex, final_state, plan, changed?, mode)}
+          {:error, _status, _error} = failure -> put_changed(failure, changed?)
+        end
+
+      {:error, _status, _error} = failure ->
+        put_changed(failure, changed?)
     end
   end
 
@@ -128,24 +145,32 @@ defmodule Workflow.CLI do
     else
       command = Keyword.get(opts, :command, &System.cmd(bin, &1, stderr_to_stdout: true))
 
-      case Enum.find(@capability_commands, fn args ->
-             case command.(args) do
-               {output, 0} -> not String.contains?(output, "--json")
-               _other -> true
-             end
-           end) do
-        nil ->
-          {:ok, %{bin: bin, command: command}}
-
-        failed ->
-          error(
-            3,
-            "codex_incompatible",
-            "This Codex CLI does not support plugin marketplace installation. Update Codex, then rerun:\n  codex update",
-            %{command: Enum.join(failed, " ")}
-          )
+      case command.(["--version"]) do
+        {version_output, 0} -> check_codex_capabilities(bin, String.trim(version_output), command)
+        {_output, status} -> codex_incompatible(%{command: "--version", status: status})
       end
     end
+  end
+
+  defp check_codex_capabilities(bin, version, command) do
+    case Enum.find(@capability_commands, fn args ->
+           case command.(args) do
+             {output, 0} -> not String.contains?(output, "--json")
+             _other -> true
+           end
+         end) do
+      nil -> {:ok, %{bin: bin, version: version, command: command}}
+      failed -> codex_incompatible(%{command: Enum.join(failed, " ")})
+    end
+  end
+
+  defp codex_incompatible(details) do
+    error(
+      3,
+      "codex_incompatible",
+      "This Codex CLI does not support plugin marketplace installation. Update Codex, then rerun:\n  codex update",
+      details
+    )
   end
 
   defp read_state(codex) do
@@ -219,40 +244,20 @@ defmodule Workflow.CLI do
 
   defp execute(%{operation: :install}, plan, codex) do
     Enum.reduce_while(plan, {:ok, false}, fn action, {:ok, changed?} ->
-      case apply_action(action, codex) do
-        :ok -> {:cont, {:ok, true}}
-        {:error, _status, _error} = failure -> {:halt, put_changed(failure, changed?)}
+      case execute_action(action, codex, changed?) do
+        {:ok, next_changed?} -> {:cont, {:ok, next_changed?}}
+        {:error, _status, _error} = failure -> {:halt, failure}
       end
     end)
   end
 
-  defp apply_action(:add_marketplace, codex), do: add_marketplace(codex)
-
-  defp apply_action(:replace_marketplace, codex) do
-    case command(codex, ["plugin", "marketplace", "remove", @marketplace, "--json"]) do
-      :ok ->
-        case add_marketplace(codex) do
-          :ok -> :ok
-          {:error, _status, _error} = failure -> put_changed(failure, true)
-        end
-
-      {:error, _status, _error} = failure ->
-        failure
-    end
-  end
-
-  defp apply_action(:install_plugin, codex), do: command(codex, ["plugin", "add", @plugin_id, "--json"])
-
-  defp add_marketplace(codex) do
-    command(codex, [
-      "plugin",
-      "marketplace",
-      "add",
-      @marketplace_source,
-      "--ref",
-      release_ref(),
-      "--json"
-    ])
+  defp execute_action(action, codex, changed?) do
+    Enum.reduce_while(action_commands(action), {:ok, changed?}, fn args, {:ok, changed?} ->
+      case command(codex, args) do
+        :ok -> {:cont, {:ok, true}}
+        {:error, _status, _error} = failure -> {:halt, put_changed(failure, changed?)}
+      end
+    end)
   end
 
   defp final_state(%{operation: :install}, _plan, _state, codex), do: read_state(codex)
@@ -339,7 +344,7 @@ defmodule Workflow.CLI do
       ok: true,
       changed: changed?,
       runtime: runtime,
-      codex: %{path: codex.bin},
+      codex: %{path: codex.bin, version: codex.version},
       marketplace: marketplace_result(state.marketplace),
       plugin: plugin_result(state.plugin),
       plan: Enum.map(plan, &Atom.to_string/1),
@@ -350,19 +355,20 @@ defmodule Workflow.CLI do
   end
 
   defp planned_commands(plan) do
-    Enum.flat_map(plan, fn
-      :add_marketplace ->
-        ["codex plugin marketplace add #{@marketplace_source} --ref #{release_ref()} --json"]
-
-      :replace_marketplace ->
-        [
-          "codex plugin marketplace remove #{@marketplace} --json",
-          "codex plugin marketplace add #{@marketplace_source} --ref #{release_ref()} --json"
-        ]
-
-      :install_plugin ->
-        ["codex plugin add #{@plugin_id} --json"]
+    Enum.flat_map(plan, fn action ->
+      Enum.map(action_commands(action), &("codex " <> Enum.join(&1, " ")))
     end)
+  end
+
+  defp action_commands(:add_marketplace), do: [add_marketplace_command()]
+
+  defp action_commands(:replace_marketplace),
+    do: [["plugin", "marketplace", "remove", @marketplace, "--json"], add_marketplace_command()]
+
+  defp action_commands(:install_plugin), do: [["plugin", "add", @plugin_id, "--json"]]
+
+  defp add_marketplace_command do
+    ["plugin", "marketplace", "add", @marketplace_source, "--ref", release_ref(), "--json"]
   end
 
   defp json_command(codex, args) do
@@ -390,9 +396,17 @@ defmodule Workflow.CLI do
       5,
       "codex_command_failed",
       "Codex command failed unexpectedly.",
-      %{command: Enum.join(args, " "), detail: detail}
+      %{command: Enum.join(args, " "), detail: detail},
+      command_step(args)
     )
   end
+
+  defp command_step(["plugin", "marketplace", "list" | _rest]), do: "marketplace_list"
+  defp command_step(["plugin", "list" | _rest]), do: "plugin_list"
+  defp command_step(["plugin", "marketplace", "remove" | _rest]), do: "marketplace_remove"
+  defp command_step(["plugin", "marketplace", "add" | _rest]), do: "marketplace_add"
+  defp command_step(["plugin", "add" | _rest]), do: "plugin_install"
+  defp command_step(_args), do: "codex_preflight"
 
   defp find_marketplace(marketplaces), do: Enum.find(marketplaces, &(&1["name"] == @marketplace))
 
@@ -447,8 +461,8 @@ defmodule Workflow.CLI do
 
   defp usage_error(message), do: error(2, "usage", message <> "\n\n" <> help())
 
-  defp error(status, code, message, details \\ nil) do
-    {:error, status, %{ok: false, changed: false, code: code, message: message, details: details}}
+  defp error(status, code, message, details \\ nil, step \\ nil) do
+    {:error, status, %{ok: false, changed: false, code: code, message: message, details: details, step: step}}
   end
 
   defp put_changed({:error, status, error}, changed?), do: {:error, status, %{error | changed: changed? or error.changed}}
@@ -458,6 +472,13 @@ defmodule Workflow.CLI do
   defp print_success(result, false) do
     action = if result.changed, do: "installed", else: "ready"
 
+    commands =
+      case result.commands do
+        nil -> ""
+        [] -> "\nCommands:\n  No changes required.\n"
+        values -> "\nCommands:\n  " <> Enum.join(values, "\n  ") <> "\n"
+      end
+
     IO.puts("""
     Codex Loops is #{action}.
 
@@ -465,7 +486,7 @@ defmodule Workflow.CLI do
       Version: #{result.runtime.version}
       Scheduler: #{result.runtime.scheduler}
       MCP: #{result.runtime.mcp}
-
+    #{commands}
     Next:
       #{hd(result.next_steps)}
     """)
@@ -475,7 +496,7 @@ defmodule Workflow.CLI do
     envelope = %{
       ok: false,
       changed: error.changed,
-      error: Map.take(error, [:code, :message, :details])
+      error: Map.take(error, [:code, :message, :details, :step])
     }
 
     IO.puts(:stderr, Jason.encode!(envelope))

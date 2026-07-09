@@ -8,9 +8,7 @@ defmodule Workflow.PluginLauncherTest do
     runtime_root = runtime_fixture(@version)
 
     assert {output, 0} =
-             System.cmd("/bin/sh", [@launcher, "--stdio"],
-               env: [{"CODEX_LOOPS_RUNTIME_ROOT", runtime_root}]
-             )
+             System.cmd("/bin/sh", [@launcher, "--stdio"], env: [{"CODEX_LOOPS_RUNTIME_ROOT", runtime_root}])
 
     assert output == "runtime --stdio\n"
   end

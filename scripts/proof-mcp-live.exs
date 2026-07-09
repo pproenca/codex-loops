@@ -27,20 +27,21 @@ defmodule ProofMCPLive do
     File.cp_r!(source_plugin_root, installed_plugin_root)
 
     entrypoint = Path.join(installed_plugin_root, "mcp/codex-loops-mcp")
-    packaged_scheduler = Path.join(installed_plugin_root, "scheduler/bin/agent_loops")
+    runtime_root = Path.join(repo_root, "_build/homebrew/libexec")
+    packaged_scheduler = Path.join(runtime_root, "scheduler/bin/agent_loops")
     package_version = package_version(repo_root)
 
     assert!(
       executable_file?(entrypoint),
-      "copied plugin package should include Burrito MCP executable; run `make release-mcp`"
+      "copied source plugin should include its MCP launcher"
     )
 
     assert!(
       executable_file?(packaged_scheduler),
-      "copied plugin package should include scheduler release"
+      "staged Homebrew runtime should include scheduler release"
     )
 
-    assert_mcp_version!(entrypoint, package_version)
+    assert_mcp_version!(entrypoint, runtime_root, package_version)
 
     workflow_path = Path.join(temp_root, "live-workflow.exs")
     journal_path = Path.join(temp_root, "runs.sqlite")
@@ -56,44 +57,50 @@ defmodule ProofMCPLive do
     try do
       File.write!(workflow_path, workflow_source())
 
-      with_mcp_client(temp_root, entrypoint, repo_root, mcp_env(port, journal_path, codex_path), fn client ->
-        {initialize, client} =
-          request!(client, 1, "initialize", %{
-            "protocolVersion" => "2024-11-05",
-            "capabilities" => %{},
-            "clientInfo" => %{"name" => "proof-mcp-live", "version" => "0.0.0"}
-          })
+      with_mcp_client(
+        temp_root,
+        entrypoint,
+        repo_root,
+        mcp_env(port, journal_path, codex_path, runtime_root),
+        fn client ->
+          {initialize, client} =
+            request!(client, 1, "initialize", %{
+              "protocolVersion" => "2024-11-05",
+              "capabilities" => %{},
+              "clientInfo" => %{"name" => "proof-mcp-live", "version" => "0.0.0"}
+            })
 
-        assert_initialize!(initialize, package_version)
-        client = notify!(client, "notifications/initialized", %{})
+          assert_initialize!(initialize, package_version)
+          client = notify!(client, "notifications/initialized", %{})
 
-        {tools, client} = request!(client, 2, "tools/list", %{})
-        assert_tools_list!(tools)
+          {tools, client} = request!(client, 2, "tools/list", %{})
+          assert_tools_list!(tools)
 
-        {validation, client} =
-          call_tool!(client, 3, "workflow_validate", %{"script_path" => workflow_path})
+          {validation, client} =
+            call_tool!(client, 3, "workflow_validate", %{"script_path" => workflow_path})
 
-        assert_successful_validation!(validation, workflow_path)
+          assert_successful_validation!(validation, workflow_path)
 
-        {start, client} =
-          call_tool!(client, 4, "workflow_start", %{
-            "script_path" => workflow_path,
-            "run_id" => run_id,
-            "provider" => "codex"
-          })
+          {start, client} =
+            call_tool!(client, 4, "workflow_start", %{
+              "script_path" => workflow_path,
+              "run_id" => run_id,
+              "provider" => "codex"
+            })
 
-        assert_started_run!(start, run_id)
+          assert_started_run!(start, run_id)
 
-        {client, status_payload} = poll_completed_status!(client, run_id, 5)
-        assert_completed_status_with_usage!(status_payload, run_id)
+          {client, status_payload} = poll_completed_status!(client, run_id, 5)
+          assert_completed_status_with_usage!(status_payload, run_id)
 
-        {inspect, client} = call_tool!(client, 250, "workflow_inspect", %{"run_id" => run_id})
-        assert_inspected_live_events!(inspect, run_id)
+          {inspect, client} = call_tool!(client, 250, "workflow_inspect", %{"run_id" => run_id})
+          assert_inspected_live_events!(inspect, run_id)
 
-        client
-        |> close_input!()
-        |> await_port_exit!()
-      end)
+          client
+          |> close_input!()
+          |> await_port_exit!()
+        end
+      )
 
       assert_scheduler_stopped!(scheduler_url)
       IO.puts("MCP live Codex proof passed on #{scheduler_url}")
@@ -116,10 +123,11 @@ defmodule ProofMCPLive do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path, codex_path) do
+  defp mcp_env(port, journal_path, codex_path, runtime_root) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
       {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
+      {~c"CODEX_LOOPS_RUNTIME_ROOT", String.to_charlist(runtime_root)},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
       {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
@@ -378,10 +386,13 @@ defmodule ProofMCPLive do
 
   defp assert_initialize!(message, _version), do: raise("initialize response was not valid: #{inspect(message)}")
 
-  defp assert_mcp_version!(entrypoint, version) do
+  defp assert_mcp_version!(entrypoint, runtime_root, version) do
     expected = "codex-loops-mcp #{version}\n"
 
-    case System.cmd(entrypoint, ["--version"], stderr_to_stdout: true) do
+    case System.cmd(entrypoint, ["--version"],
+           env: [{"CODEX_LOOPS_RUNTIME_ROOT", runtime_root}],
+           stderr_to_stdout: true
+         ) do
       {^expected, 0} ->
         :ok
 

@@ -229,8 +229,15 @@ defmodule Workflow.CLI do
   defp apply_action(:add_marketplace, codex), do: add_marketplace(codex)
 
   defp apply_action(:replace_marketplace, codex) do
-    with :ok <- command(codex, ["plugin", "marketplace", "remove", @marketplace, "--json"]) do
-      add_marketplace(codex)
+    case command(codex, ["plugin", "marketplace", "remove", @marketplace, "--json"]) do
+      :ok ->
+        case add_marketplace(codex) do
+          :ok -> :ok
+          {:error, _status, _error} = failure -> put_changed(failure, true)
+        end
+
+      {:error, _status, _error} = failure ->
+        failure
     end
   end
 
@@ -262,10 +269,10 @@ defmodule Workflow.CLI do
     )
   end
 
-  defp verify(%{operation: :install}, _original_plan, state, _runtime) do
+  defp verify(%{operation: :install}, _original_plan, state, runtime) do
     case plan(state) do
       {:ok, []} ->
-        :ok
+        verify_launcher(state, runtime)
 
       {:ok, remaining} ->
         error(
@@ -280,11 +287,51 @@ defmodule Workflow.CLI do
     end
   end
 
-  defp verify(_mode, [], %{marketplace: marketplace, plugin: plugin}, _runtime)
-       when not is_nil(marketplace) and not is_nil(plugin), do: :ok
+  defp verify(_mode, [], %{marketplace: marketplace, plugin: plugin} = state, runtime)
+       when not is_nil(marketplace) and not is_nil(plugin), do: verify_launcher(state, runtime)
 
   defp verify(_mode, _plan, state, _runtime) do
     error(6, "verification_failed", "Codex Loops installation could not be verified.", state)
+  end
+
+  defp verify_launcher(state, runtime) do
+    plugin_path = get_in(state, [:plugin, "source", "path"])
+    marketplace_root = state.marketplace && state.marketplace["root"]
+
+    launcher =
+      cond do
+        is_binary(plugin_path) ->
+          plugin_path |> Path.join("mcp/codex-loops-mcp") |> Path.expand()
+
+        is_binary(marketplace_root) ->
+          marketplace_root
+          |> Path.join("plugins/codex-loops/mcp/codex-loops-mcp")
+          |> Path.expand()
+
+        true ->
+          nil
+      end
+
+    expected = "codex-loops-mcp #{PackageVersion.version()}"
+
+    with true <- is_binary(launcher),
+         true <- executable?(launcher),
+         {output, 0} <-
+           System.cmd(launcher, ["--version"],
+             env: [{"CODEX_LOOPS_RUNTIME_ROOT", runtime.root}],
+             stderr_to_stdout: true
+           ),
+         ^expected <- String.trim(output) do
+      :ok
+    else
+      _other ->
+        error(
+          6,
+          "launcher_discovery_failed",
+          "The installed Codex Loops plugin could not discover this runtime.",
+          %{launcher: launcher, runtime_root: runtime.root}
+        )
+    end
   end
 
   defp success(runtime, codex, state, plan, changed?, mode) do
@@ -297,8 +344,25 @@ defmodule Workflow.CLI do
       plugin: plugin_result(state.plugin),
       plan: Enum.map(plan, &Atom.to_string/1),
       mode: mode.operation,
-      next_steps: ["Open a new Codex thread and ask: Use the codex-loops skill."]
+      next_steps: ["Open a new Codex thread and ask: Use the codex-loops skill."],
+      commands: if(mode.verbose?, do: planned_commands(plan))
     }
+  end
+
+  defp planned_commands(plan) do
+    Enum.flat_map(plan, fn
+      :add_marketplace ->
+        ["codex plugin marketplace add #{@marketplace_source} --ref #{release_ref()} --json"]
+
+      :replace_marketplace ->
+        [
+          "codex plugin marketplace remove #{@marketplace} --json",
+          "codex plugin marketplace add #{@marketplace_source} --ref #{release_ref()} --json"
+        ]
+
+      :install_plugin ->
+        ["codex plugin add #{@plugin_id} --json"]
+    end)
   end
 
   defp json_command(codex, args) do
@@ -387,7 +451,7 @@ defmodule Workflow.CLI do
     {:error, status, %{ok: false, changed: false, code: code, message: message, details: details}}
   end
 
-  defp put_changed({:error, status, error}, changed?), do: {:error, status, %{error | changed: changed?}}
+  defp put_changed({:error, status, error}, changed?), do: {:error, status, %{error | changed: changed? or error.changed}}
 
   defp print_success(result, true), do: IO.puts(Jason.encode!(result))
 
@@ -407,7 +471,16 @@ defmodule Workflow.CLI do
     """)
   end
 
-  defp print_error(error, true), do: IO.puts(:stderr, Jason.encode!(%{ok: false, error: error}))
+  defp print_error(error, true) do
+    envelope = %{
+      ok: false,
+      changed: error.changed,
+      error: Map.take(error, [:code, :message, :details])
+    }
+
+    IO.puts(:stderr, Jason.encode!(envelope))
+  end
+
   defp print_error(error, false), do: IO.puts(:stderr, error.message)
 
   defp help do

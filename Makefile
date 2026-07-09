@@ -1,4 +1,4 @@
-.PHONY: setup format-check quality credo-check security-check audit-check package-version-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint build release release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: setup format-check quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint build release release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -16,6 +16,7 @@ format-check:
 
 quality:
 	$(MAKE) format-check
+	$(MAKE) install-docs-check
 	$(MAKE) audit-check
 	$(MAKE) build
 	$(MAKE) credo-check
@@ -35,6 +36,9 @@ audit-check:
 package-version-check:
 	mix run --no-start scripts/sync-package-version.exs --check
 	mix run --no-start scripts/check-package-version.exs --check
+
+install-docs-check:
+	scripts/check-install-docs.sh
 
 dialyzer-check:
 	mix dialyzer

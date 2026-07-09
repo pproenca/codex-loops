@@ -41,10 +41,8 @@ defmodule Workflow.MCP.SchedulerClient do
        } = payload} ->
         {:ok, payload}
 
-      {:ok, 200,
-       %{"api_version" => "scheduler.v1", "data" => %{"status" => "ok", "version" => version}}} ->
-        {:error,
-         "Scheduler version mismatch: MCP #{@package_version}, scheduler #{inspect(version)}"}
+      {:ok, 200, %{"api_version" => "scheduler.v1", "data" => %{"status" => "ok", "version" => version}}} ->
+        {:error, "Scheduler version mismatch: MCP #{@package_version}, scheduler #{inspect(version)}"}
 
       {:ok, status, payload} ->
         {:error, "Health check returned HTTP #{status}: #{inspect(payload)}"}

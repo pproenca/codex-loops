@@ -60,9 +60,9 @@ make release
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
-The release includes the generated `bin/agent_loops` script used by the MCP
-adapter and by release lifecycle commands. It does not include the old
-hyphenated compatibility CLI.
+The release includes `bin/agent_loops` for lifecycle commands plus overlay
+commands `bin/codex-loops` and `bin/codex-loops-mcp`. Both overlays enter the
+same release; ERTS and application code are packaged once.
 
 Run the scheduler server from the release by enabling the endpoint at runtime:
 
@@ -88,12 +88,14 @@ polling status snapshot and journal summaries through `/api/runs/<id>` and
 `/api/runs/<id>/events`, and verifies the `/runs/<id>` LiveView route is
 reachable.
 
-`make proof-mcp` proves the Codex-facing product path from a copied plugin
-package containing the Burrito MCP executable: MCP starts/discovers the packaged
-scheduler, validates a workflow, starts a mock run, reads polling status and
-inspection summaries, resumes, returns the UI URL, and shuts down its owned
-scheduler. `make proof-mcp-live` repeats the MCP path with `provider: "codex"`
-and asserts nonzero token usage from scheduler status.
+`make package-homebrew-runtime` stages the formula input under
+`_build/homebrew/libexec` without modifying the source-only plugin.
+`make proof-mcp` copies that source plugin into a temporary installed root and
+proves it against the external runtime: MCP starts/discovers the scheduler,
+validates a workflow, starts a mock run, reads polling status and inspection
+summaries, resumes, returns the UI URL, and shuts down its owned scheduler.
+`make proof-mcp-live` repeats the same path with `provider: "codex"` and asserts
+nonzero token usage from scheduler status.
 
 ## Journal Model
 

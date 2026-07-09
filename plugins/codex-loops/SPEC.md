@@ -67,9 +67,8 @@ MCP behavior:
 - the MCP adapter reaches the scheduler only through HTTP API calls; it does not
   read SQLite or call `Workflow.Scheduler`, `Workflow.Journal`, or runtime
   internals directly
-- `make release` assembles the scheduler release into
-  `plugins/codex-loops/scheduler/` so the MCP adapter can run from a copied
-  plugin package without a sibling source `_build` directory
+- `make package-homebrew-runtime` assembles one external runtime under
+  `_build/homebrew/libexec`; the plugin contains no generated release artifacts
 
 ## Artifact-Aware Authoring
 
@@ -203,17 +202,16 @@ make release
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
-The MCP adapter artifact is a Burrito executable:
+The MCP command is an overlay in the same OTP release:
 
 ```bash
 make release-mcp
-test -x plugins/codex-loops/mcp/codex-loops-mcp
+test -x _build/prod/rel/agent_loops/bin/codex-loops-mcp
 ```
 
-The previous transitional product path, a shell wrapper that ran
-`agent_loops eval 'Workflow.MCP.Stdio.main(["--stdio"])'`, is removed. The
-supported MCP adapter is the Anubis-backed Burrito executable only; no
-hand-rolled stdio protocol compatibility layer is shipped.
+The supported MCP adapter uses Anubis over stdio. A release overlay invokes it
+through Mix release `eval`; no hand-rolled stdio protocol layer or second ERTS
+payload is shipped.
 
 The MCP executable starts or discovers the generated `agent_loops` release
 script when it owns scheduler lifecycle.
@@ -229,12 +227,11 @@ make proof-mcp-live
 make proof-live
 ```
 
-`make proof-mcp` builds and copies the Burrito MCP executable into the plugin
-package, copies the plugin package to a temp install location, and proves MCP
-lifecycle, validation, mock start, status polling, journal inspection, resume,
-typed scheduler errors, and open-ui response against the copied package's
-scheduler release. `make proof-mcp-live` validates through MCP, starts or reuses
-the packaged scheduler through MCP lifecycle handling, starts a live
+`make proof-mcp` builds the external runtime, copies the source-only plugin to a
+temp install location, and proves MCP lifecycle, validation, mock start, status
+polling, journal inspection, resume, typed scheduler errors, and open-ui.
+`make proof-mcp-live` validates through MCP, starts or reuses the packaged
+scheduler through MCP lifecycle handling, starts a live
 `provider: "codex"` run through `workflow_start`, observes completion through
 polling `workflow_status`, and asserts nonzero token usage from the scheduler
 projection. It spends one real Codex provider turn. `make proof-live` aliases

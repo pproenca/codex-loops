@@ -2,7 +2,8 @@
 
 ## Status
 
-Accepted
+Superseded in part by ADR 0002. The Anubis MCP decision remains accepted; the
+Burrito packaging decision is replaced by one Homebrew-owned OTP release.
 
 ## Context
 

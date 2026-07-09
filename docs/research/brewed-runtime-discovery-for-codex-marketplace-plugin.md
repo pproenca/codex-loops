@@ -1,5 +1,9 @@
 # Brewed runtime discovery for the Codex marketplace plugin
 
+> Implementation update: ADR 0002 replaces the real Burrito MCP executable
+> described below with an MCP command overlay in the single OTP release. The
+> launcher discovery order and runtime-root boundary remain current.
+
 Date: 2026-07-09
 
 Wayfinder ticket: [Design brewed runtime discovery for the Codex marketplace plugin](https://github.com/pproenca/codex-loops/issues/116)

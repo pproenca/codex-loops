@@ -9,8 +9,8 @@ reachable.
 ## Install
 
 ```bash
-codex plugin marketplace add pproenca/codex-loops --ref master
-codex plugin add codex-loops@codex-loops
+brew install pproenca/codex-loops/codex-loops
+codex-loops install
 ```
 
 For a local clone:
@@ -24,10 +24,11 @@ Start a new Codex thread after installing so the `codex-loops` skill is loaded.
 
 ## MCP Surface
 
-The plugin includes a local stdio MCP entrypoint at
-`plugins/codex-loops/mcp/codex-loops-mcp`. This is a Burrito-built executable
-that runs the Anubis MCP server over stdio. It starts or discovers the packaged
-scheduler release when a tool call needs the scheduler HTTP API.
+The source-only plugin includes a tracked stdio launcher at
+`plugins/codex-loops/mcp/codex-loops-mcp`. The launcher finds the
+Homebrew-owned runtime, enforces exact plugin/runtime version compatibility,
+and executes the Anubis MCP command from that runtime. MCP starts or discovers
+the scheduler release when a tool call needs the scheduler HTTP API.
 It exposes:
 
 - `workflow_validate`: validates a workflow through `POST /api/workflows/validate`
@@ -54,14 +55,13 @@ Before the tool call, the MCP adapter checks `GET /api/health`. If the scheduler
 is unreachable, it discovers a packaged release from:
 
 1. `CODEX_LOOPS_SCHEDULER_BIN`
-2. `plugins/codex-loops/scheduler/bin/agent_loops`
-3. `_build/prod/rel/agent_loops/bin/agent_loops`
+2. `CODEX_LOOPS_RUNTIME_ROOT/scheduler/bin/agent_loops`
+3. `CODEX_LOOPS_REPO_ROOT/_build/prod/rel/agent_loops/bin/agent_loops` in
+   explicitly configured development environments
 
-`make release` builds the production scheduler Mix release and copies it into
-`plugins/codex-loops/scheduler/`. `make release-mcp` builds the Burrito MCP
-executable and copies it into `plugins/codex-loops/mcp/codex-loops-mcp`, so the
-plugin package can be copied or installed without depending on the source
-repository's `_build` directory.
+`make package-homebrew-runtime` builds one production Mix release and stages the
+formula-owned `libexec` tree. It never copies generated artifacts into this
+plugin.
 
 When it owns the scheduler lifecycle, it starts the release with
 `CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
@@ -111,17 +111,17 @@ Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite` unless
 make setup
 make test
 make release
-make release-mcp
+make package-homebrew-runtime
 make proof
 make proof-mcp
 make proof-mcp-live
 make proof-live
 ```
 
-`make proof-mcp` builds the scheduler release and Burrito MCP executable, then
-exercises MCP initialize, tools/list, lifecycle startup, validation, mock start,
-status polling, event inspection, resume, typed scheduler errors, and open-ui
-response from a copied plugin package against its packaged scheduler release.
+`make proof-mcp` builds the external runtime, copies this source-only plugin to a
+temporary installed root, then exercises MCP initialize, tools/list, lifecycle
+startup, validation, mock start, status polling, event inspection, resume,
+typed scheduler errors, and open-ui.
 `make proof-mcp-live` validates through MCP, starts or reuses the packaged
 scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
 through `workflow_start`, polls `workflow_status`, and asserts nonzero token

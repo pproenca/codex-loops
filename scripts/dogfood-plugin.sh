@@ -19,7 +19,7 @@ step "Checking required commands"
 require_cmd codex
 require_cmd mix
 
-step "Proving packaged scheduler plus MCP adapter"
+step "Proving source plugin plus external runtime"
 make proof-mcp
 
 step "Resetting codex-loops plugin install"
@@ -58,3 +58,6 @@ Then use the Codex Loops MCP tools to:
 Do not use shell commands for the workflow run; this dogfood run is meant to
 exercise the MCP tools.
 PROMPT
+
+printf '\nFor CLI dogfood, launch Codex with:\n  CODEX_LOOPS_RUNTIME_ROOT=%q codex\n' \
+  "$repo_root/_build/homebrew/libexec"

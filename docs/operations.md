@@ -24,9 +24,10 @@ For a repeatable local dogfood run, use:
 make dogfood
 ```
 
-It proves the packaged scheduler/MCP path, reinstalls `codex-loops@codex-loops`
-from the current checkout, verifies Codex sees the plugin, and prints the prompt
-to paste into a fresh thread for the actual agent-driven workflow run.
+It proves the source plugin against the staged external runtime, reinstalls
+`codex-loops@codex-loops` from the current checkout, verifies Codex sees the
+plugin, and prints the environment-aware command and prompt for a fresh CLI
+thread.
 
 ## Fast Quality Gate
 
@@ -138,8 +139,8 @@ make proof-mcp-live
 make proof-live
 ```
 
-`make proof-mcp-live` spends one live Codex provider turn through the packaged
-Burrito MCP executable, scheduler, and lifecycle path, then asserts the run
+`make proof-mcp-live` spends one live Codex provider turn through the
+source-plugin launcher, external OTP runtime, and scheduler lifecycle path, then asserts the run
 completed and recorded nonzero token usage in the scheduler projection. It
 proves the polling MCP path for live Codex completion; the realtime viewing
 surface remains the LiveView URL returned by `workflow_open_ui`.
@@ -147,11 +148,11 @@ surface remains the LiveView URL returned by `workflow_open_ui`.
 
 ## Manual MCP Smoke
 
-Build the copied plugin package first:
+Build the external runtime first:
 
 ```sh
 make release
-make release-mcp
+make package-homebrew-runtime
 ```
 
 Then, from a Codex thread with the local plugin installed, run a non-mutating

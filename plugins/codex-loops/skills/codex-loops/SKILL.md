@@ -196,9 +196,9 @@ make proof-mcp-live
 make proof-live
 ```
 
-`make proof-mcp` builds the Burrito MCP executable, proves MCP lifecycle
-handling, validation, mock start, polling status, journal inspect, resume,
-scheduler typed errors, and open-ui against a copied plugin package.
+`make proof-mcp` builds one external OTP runtime and proves the source-only
+plugin launcher, MCP lifecycle handling, validation, mock start, polling status,
+journal inspect, resume, scheduler typed errors, and open-ui.
 `make proof-mcp-live` validates through MCP, starts or reuses the packaged
 scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
 through `workflow_start`, polls `workflow_status`, and asserts nonzero token

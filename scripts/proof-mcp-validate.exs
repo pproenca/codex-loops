@@ -18,20 +18,21 @@ defmodule ProofMCPValidate do
     File.cp_r!(source_plugin_root, installed_plugin_root)
 
     entrypoint = Path.join(installed_plugin_root, "mcp/codex-loops-mcp")
-    packaged_scheduler = Path.join(installed_plugin_root, "scheduler/bin/agent_loops")
+    runtime_root = Path.join(repo_root, "_build/homebrew/libexec")
+    packaged_scheduler = Path.join(runtime_root, "scheduler/bin/agent_loops")
     package_version = package_version(repo_root)
 
     assert!(
       executable_file?(entrypoint),
-      "copied plugin package should include Burrito MCP executable; run `make release-mcp`"
+      "copied source plugin should include its MCP launcher"
     )
 
     assert!(
       executable_file?(packaged_scheduler),
-      "copied plugin package should include scheduler release"
+      "staged Homebrew runtime should include scheduler release"
     )
 
-    assert_mcp_version!(entrypoint, package_version)
+    assert_mcp_version!(entrypoint, runtime_root, package_version)
 
     workflow_path = Path.join(temp_root, "workflow.exs")
     running_workflow_path = Path.join(temp_root, "running-workflow.exs")
@@ -48,7 +49,7 @@ defmodule ProofMCPValidate do
       File.write!(running_workflow_path, running_workflow_source())
       File.write!(invalid_workflow_path, invalid_workflow_source())
 
-      with_mcp_client(temp_root, entrypoint, repo_root, mcp_env(port, journal_path), fn client ->
+      with_mcp_client(temp_root, entrypoint, repo_root, mcp_env(port, journal_path, runtime_root), fn client ->
         {initialize, client} =
           request!(client, 1, "initialize", %{
             "protocolVersion" => "2024-11-05",
@@ -183,10 +184,11 @@ defmodule ProofMCPValidate do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path) do
+  defp mcp_env(port, journal_path, runtime_root) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
       {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
+      {~c"CODEX_LOOPS_RUNTIME_ROOT", String.to_charlist(runtime_root)},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
       {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)}
@@ -458,10 +460,13 @@ defmodule ProofMCPValidate do
 
   defp assert_initialize!(message, _version), do: raise("initialize response was not valid: #{inspect(message)}")
 
-  defp assert_mcp_version!(entrypoint, version) do
+  defp assert_mcp_version!(entrypoint, runtime_root, version) do
     expected = "codex-loops-mcp #{version}\n"
 
-    case System.cmd(entrypoint, ["--version"], stderr_to_stdout: true) do
+    case System.cmd(entrypoint, ["--version"],
+           env: [{"CODEX_LOOPS_RUNTIME_ROOT", runtime_root}],
+           stderr_to_stdout: true
+         ) do
       {^expected, 0} ->
         :ok
 

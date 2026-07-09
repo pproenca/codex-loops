@@ -1,5 +1,9 @@
 # Homebrew formula layout and dependency model
 
+> Implementation update: ADR 0002 removes the second Burrito release. The
+> formula no longer needs Zig or XZ and stages both commands from one OTP
+> release. The ownership and `libexec` decisions below remain current.
+
 Date: 2026-07-09
 
 Wayfinder ticket: [Specify the Homebrew formula layout and dependency model](https://github.com/pproenca/codex-loops/issues/114)

@@ -1,5 +1,8 @@
 # Elixir, Burrito, and Homebrew distribution guidance
 
+> Historical note: ADR 0002 supersedes the Burrito packaging recommendation.
+> Homebrew now installs one OTP release with user and MCP command overlays.
+
 Date: 2026-07-09
 
 Wayfinder context: simplify Codex Loops installation so developers can use
@@ -167,4 +170,3 @@ The `codex-loops install` command should:
   what Homebrew bottle installation normally provides.
 - Exact runtime/plugin compatibility contract between the Codex marketplace
   plugin and the brewed runtime.
-

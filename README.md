@@ -6,10 +6,23 @@ Elixir/Phoenix scheduler. MCP manages local lifecycle and tool calls; Elixir
 owns runtime supervision, workflow workers, Phoenix PubSub/LiveView, and the
 SQLite journal.
 
-The packaged `agent_loops` Mix release is a scheduler runtime. It does not ship
-the old `agent-loops` CLI surface.
+The packaged `agent_loops` Mix release owns the scheduler, the user CLI, and the
+MCP stdio command. The Codex plugin is source-only and discovers that runtime
+through Homebrew.
 
-## Quick Start
+## Install
+
+The release install path is:
+
+```sh
+brew install pproenca/codex-loops/codex-loops
+codex-loops install
+```
+
+The tap is published as a separate release step. Until the first public formula
+is published, use the development path below.
+
+## Development
 
 ```sh
 make setup
@@ -34,10 +47,11 @@ on an isolated local port and journal, checks health, validates a workflow
 through the API, starts a mock run through the API, reads the polling status
 snapshot and journal summaries through the API, and fetches the LiveView run UI.
 
-For the Codex-facing product path:
+For the Codex-facing product path against a source-only plugin and an external
+Homebrew-style runtime:
 
 ```sh
-make proof-mcp       # copied plugin package, MCP lifecycle, mock run, status, inspect, resume, open UI
+make proof-mcp       # source plugin, external runtime, lifecycle, mock run, status, inspect, resume, open UI
 make proof-mcp-live  # same MCP path, one real Codex provider turn
 ```
 
@@ -93,9 +107,10 @@ make browser-e2e # run tagged PhoenixTest Playwright browser tests
 make build        # compile with warnings as errors
 make test         # run the Elixir scheduler/API/UI test suite
 make release      # build the self-contained scheduler Mix release
-make release-mcp  # build the Burrito codex-loops-mcp executable
+make release-mcp  # compatibility alias: verify MCP in the single release
+make package-homebrew-runtime # stage the formula-owned libexec tree
 make proof        # build release and prove scheduler API/UI readiness
-make proof-mcp    # prove copied plugin MCP lifecycle with mock scheduler-owned run
+make proof-mcp    # prove source-plugin MCP lifecycle against the staged runtime
 make dogfood      # prove MCP, reinstall the local plugin, and print the fresh-thread prompt
 make proof-live   # alias for proof-mcp-live; spends one real Codex provider turn through MCP
 ```
@@ -111,22 +126,10 @@ Install its Node/browser dependencies with `make browser-e2e-setup`.
 
 The repository includes `.tool-versions` for `mise`/`asdf` users.
 
-`make release-mcp` builds the Burrito MCP executable at
-`_build/prod/mcp/codex-loops-mcp` and installs it as the copied plugin package
-entrypoint at `plugins/codex-loops/mcp/codex-loops-mcp`. It requires `xz` on
-`PATH` and Zig 0.15.2. On macOS, install the versioned Homebrew formula:
-
-```sh
-brew install zig@0.15 xz
-```
-
-The target checks those prerequisites before invoking Burrito. On macOS it
-prefers `/opt/homebrew/opt/zig@0.15/bin/zig` when present because it is the most
-reliable `0.15.2` build for recent Xcode toolchains; otherwise it falls back to
-`zig` on `PATH`. You can also pass `ZIG=/path/to/zig`. After copying the
-executable into `_build/prod/mcp` and the plugin package, the target clears the
-matching local Burrito app/version cache so repeated local proofs execute the
-just-built payload.
+`make package-homebrew-runtime` builds one target-specific OTP release and
+stages `_build/homebrew/libexec/{scheduler,mcp,bin}` without changing the Codex
+plugin. `make release-mcp` remains usable, but now verifies the MCP command in
+that same release. No Zig or XZ toolchain is required.
 
 ## Runtime Data
 
@@ -138,15 +141,12 @@ For local release proofs, set `CODEX_LOOPS_PROOF_HOST`,
 `CODEX_LOOPS_PROOF_PORT`, or `CODEX_LOOPS_PROOF_JOURNAL_PATH` to override the
 default `127.0.0.1:47125` proof server and temporary journal.
 
-The MCP adapter uses `CODEX_LOOPS_SCHEDULER_HOST`,
+The MCP adapter uses `CODEX_LOOPS_RUNTIME_ROOT`, `CODEX_LOOPS_SCHEDULER_HOST`,
 `CODEX_LOOPS_SCHEDULER_PORT`, `CODEX_LOOPS_SCHEDULER_URL`, and
 `CODEX_LOOPS_SCHEDULER_BIN` when you need to point it at a specific local
-scheduler. In the packaged plugin path, it discovers
-`plugins/codex-loops/scheduler/bin/agent_loops` and starts it when needed.
-When the Burrito MCP executable is installed at
-`plugins/codex-loops/mcp/codex-loops-mcp`, it infers `CODEX_LOOPS_PLUGIN_ROOT`
-from its binary path unless `CODEX_LOOPS_PLUGIN_ROOT` or
-`CODEX_LOOPS_SCHEDULER_BIN` is already set.
+scheduler. The plugin launcher resolves the Homebrew runtime and sets
+`CODEX_LOOPS_RUNTIME_ROOT` plus `CODEX_LOOPS_SCHEDULER_BIN` before starting MCP.
+Source-tree fallback requires an explicit `CODEX_LOOPS_REPO_ROOT`.
 
 ## Packages
 

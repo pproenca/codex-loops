@@ -52,10 +52,20 @@ make security-check
 make test
 ```
 
-Sobelow runs against the explicit Phoenix router and intentionally ignores
-`Config.HTTPS` and `Config.CSP`. Codex Loops is a local loopback scheduler UI,
-not a hosted HTTPS deployment, and it does not yet ship an asset pipeline policy.
-The journal's local term decoding uses `binary_to_term(..., [:safe])`; the two
+Sobelow runs against the explicit Phoenix router at medium-or-higher confidence
+and intentionally ignores `Config.HTTPS` and `Config.CSP`. Codex Loops defaults
+the packaged scheduler to loopback (`CODEX_LOOPS_HOST=127.0.0.1`) as a local
+product surface, and it does not yet ship an asset pipeline CSP policy.
+Non-loopback binding is an explicit deployment choice and must be paired with
+the host's normal access controls, such as a trusted reverse proxy, tunnel,
+firewall, or private network boundary.
+
+Low-confidence Sobelow categories are intentionally kept out of the fast
+`make quality` gate to avoid turning the ordinary handoff loop into a noisy
+static-analysis triage queue. Review them out-of-band when changing the Phoenix
+surface, security-sensitive runtime configuration, or dependency stack, and
+promote any concrete finding into code-level skips or a stricter gate. The
+journal's local term decoding uses `binary_to_term(..., [:safe])`; the two
 remaining Sobelow term-decoding reports are skipped at the function level with
 that rationale in code.
 
@@ -79,9 +89,10 @@ make browser-e2e
 ```
 
 `make browser-e2e-setup` installs the Playwright Node package and Chromium under
-the local `assets` workspace. `make browser-e2e` starts the test endpoint on a
-local port and runs only tests tagged `:browser_e2e`. These tests use mock
-providers and isolated test state; they do not spend live Codex provider turns.
+the local `assets` workspace. `make browser-e2e` depends on that setup target,
+then starts the test endpoint on a local port and runs only tests tagged
+`:browser_e2e`. These tests use mock providers and isolated test state; they do
+not spend live Codex provider turns.
 
 The browser stack is PhoenixTest plus PhoenixTest Playwright. Recode, Green,
 Wallaby, Hound, Selenium, Cypress, and non-Elixir browser frameworks are not

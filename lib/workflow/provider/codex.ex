@@ -9,10 +9,11 @@ defmodule Workflow.Provider.Codex do
 
   `codex exec` streams JSONL `ThreadEvent`s to stdout and **exits after the single
   turn** (that is what makes it a genuine one-shot line protocol, unlike the
-  long-lived `app-server`). This provider folds that stream into `{result, usage}`:
-  the last `agent_message` item is the final response — decoded as JSON for a schema
-  turn, returned as text otherwise — and the `turn.completed` event carries token
-  usage.
+  long-lived `app-server`). This provider folds that stream into `{result, usage}`
+  while also exposing lifecycle, tool/reasoning, and assistant-output items to the
+  run's realtime activity sink. The last `agent_message` item is the final response
+  — decoded as JSON for a schema turn, returned as text otherwise — and the
+  `turn.completed` event carries token usage.
 
   It is a **pure port swap** for the mock — it satisfies the exact
   `Workflow.Provider` contract the interpreter already drives, so selecting `:codex`
@@ -283,7 +284,15 @@ defmodule Workflow.Provider.Codex do
 
   defp stream_activity_entries(event), do: activity_entry(event)
 
-  defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "agent_message"}}), do: []
+  defp activity_entry(%{"type" => event_type, "item" => %{"type" => "agent_message"} = item} = event) do
+    case message_text(event, item) do
+      "" ->
+        []
+
+      text ->
+        [%{kind: "output", label: "Assistant", summary: text, status: message_status(event_type)}]
+    end
+  end
 
   defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "reasoning"} = item}) do
     [%{kind: "reasoning", label: "Reasoning", summary: item_summary(item), status: "completed"}]
@@ -299,6 +308,31 @@ defmodule Workflow.Provider.Codex do
   end
 
   defp activity_entry(_event), do: []
+
+  defp message_text(event, item) do
+    [
+      Map.get(event, "delta"),
+      Map.get(event, "text_delta"),
+      Map.get(event, "content_delta"),
+      Map.get(event, "text"),
+      Map.get(item, "delta"),
+      Map.get(item, "text_delta"),
+      Map.get(item, "content_delta"),
+      Map.get(item, "text")
+    ]
+    |> Enum.find_value(&message_text_part/1)
+    |> case do
+      nil -> ""
+      text -> text
+    end
+  end
+
+  defp message_text_part(text) when is_binary(text), do: text
+  defp message_text_part([%{"text" => text} | _]) when is_binary(text), do: text
+  defp message_text_part(_value), do: nil
+
+  defp message_status("item.completed"), do: "completed"
+  defp message_status(_event_type), do: "running"
 
   defp item_summary(item) do
     item

@@ -184,7 +184,7 @@ defmodule Workflow.CodexProviderTest do
     assert status.state == :completed
     assert status.usage.total_tokens == 8
     assert settled_types(id) == [:run_started, :agent_committed, :run_completed]
-    assert Enum.count(types(id), &(&1 == :agent_activity)) == 2
+    assert Enum.count(types(id), &(&1 == :agent_activity)) == 3
   end
 
   test "the production default backend is the real codex exec one-shot entrypoint" do
@@ -245,10 +245,16 @@ defmodule Workflow.CodexProviderTest do
                label: "shell",
                summary: "mix test test/workflow/codex_provider_test.exs",
                status: "completed"
+             },
+             %{
+               kind: "output",
+               label: "Assistant",
+               summary: "say hello",
+               status: "completed"
              }
            ]
 
-    assert Enum.map(committed.payload.activity, & &1.activity_index) == [2, 3]
+    assert Enum.map(committed.payload.activity, & &1.activity_index) == [2, 3, 4]
   end
 
   test "containment timeout is an expected provider failure with stable detail", ctx do

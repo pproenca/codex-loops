@@ -41,7 +41,8 @@ defmodule Workflow.Status do
     Enum.reduce(events, %__MODULE__{run_id: run_id}, &apply_event/2)
   end
 
-  defp apply_event(%Event{} = event, %__MODULE__{} = status) do
+  @spec apply_event(Event.t(), t()) :: t()
+  def apply_event(%Event{} = event, %__MODULE__{} = status) do
     status
     |> append_raw_ref(event)
     |> append_tool_activity(event)

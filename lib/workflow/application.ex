@@ -6,8 +6,10 @@ defmodule Workflow.Application do
     * `Workflow.Run.Registry` — unique registry; the write lease. Exactly one live
       writer may claim a `run_id`. Registry monitors the writer, so the lease is
       released the instant it dies (no heartbeat, no pid polling).
-    * `Workflow.PubSub` — post-commit broadcast bus for live read surfaces.
-    * `Workflow.Journal` — owner of the append-only event-log ETS table.
+    * `Workflow.PubSub` — realtime run stream and post-commit broadcast bus for
+      live read surfaces.
+    * `Workflow.Journal` — owner of the append-only event-log ETS table, and a
+      subscriber that persists provider activity streamed out of band.
     * `Workflow.TaskSupervisor` — supervised, unlinked worker tasks for
       failure-isolated concurrent regions such as `refine` reviewer panels.
     * `Workflow.Run.Supervisor` — dynamic supervisor for per-run writer processes.

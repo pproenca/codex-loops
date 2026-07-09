@@ -5,7 +5,7 @@ if config_env() == :prod do
 
   port = String.to_integer(System.get_env("CODEX_LOOPS_PORT") || System.get_env("PORT", "4000"))
 
-  host = System.get_env("CODEX_LOOPS_HOST", "0.0.0.0")
+  host = System.get_env("CODEX_LOOPS_HOST", "127.0.0.1")
 
   ip =
     case :inet.parse_address(String.to_charlist(host)) do

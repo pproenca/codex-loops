@@ -20,7 +20,10 @@ defmodule Workflow.Web.RunLive do
   """
   use Phoenix.LiveView
 
+  alias Workflow.Event
+  alias Workflow.Run.Stream, as: RunStream
   alias Workflow.Scheduler
+  alias Workflow.Scheduler.RunProjection
   alias Workflow.Status
 
   @refresh_ms 1_000
@@ -30,7 +33,7 @@ defmodule Workflow.Web.RunLive do
     # Subscribe before the first fold so no commit slips through the gap between
     # folding and subscribing; the idempotent re-fold absorbs any overlap.
     if connected?(socket) do
-      Phoenix.PubSub.subscribe(Workflow.PubSub, "run:" <> run_id)
+      RunStream.subscribe(run_id)
       schedule_refresh()
     end
 
@@ -40,6 +43,10 @@ defmodule Workflow.Web.RunLive do
   @impl true
   def handle_info({:journal_committed, run_id, _event}, socket) do
     {:noreply, assign_projection(socket, run_id)}
+  end
+
+  def handle_info({:run_stream_event, run_id, %Event{} = event}, socket) do
+    {:noreply, assign_stream_event(socket, run_id, event)}
   end
 
   def handle_info(:refresh, socket) do
@@ -64,6 +71,21 @@ defmodule Workflow.Web.RunLive do
   # The single point where state enters the socket: one scheduler-owned snapshot.
   defp assign_projection(socket, run_id) do
     %{status: status, run_projection: run_projection} = scheduler_snapshot(run_id)
+    assign_projection(socket, run_id, status, run_projection)
+  end
+
+  defp assign_stream_event(socket, run_id, %Event{} = event) do
+    status = Status.apply_event(event, socket.assigns.status)
+
+    run_projection = %{
+      RunProjection.from_status(status)
+      | lifecycle_action: socket.assigns.run_projection.lifecycle_action
+    }
+
+    assign_projection(socket, run_id, status, run_projection)
+  end
+
+  defp assign_projection(socket, run_id, %Status{} = status, %RunProjection{} = run_projection) do
     user_focused_phase_id = valid_phase_id(status, socket.assigns[:user_focused_phase_id])
 
     phase_id =

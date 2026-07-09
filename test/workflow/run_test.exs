@@ -380,9 +380,12 @@ defmodule Workflow.RunTest do
 
   test "streamed activity before a settled event uses the serialized append allocator" do
     id = run_id()
+    :ok = Workflow.Run.Stream.subscribe(id)
 
     assert {:ok, ^id} =
              Run.run(DemoWorkflow, run_id: id, provider: {StreamingActivityProvider, []})
+
+    assert_receive {:run_stream_event, ^id, %Event{type: :agent_activity}}, @receive_timeout
 
     events = Journal.fold(id)
 

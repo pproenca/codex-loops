@@ -59,8 +59,7 @@ browser-e2e-setup:
 	npm --prefix assets install
 	npx --prefix assets playwright install chromium
 
-browser-e2e:
-	@test -x assets/node_modules/.bin/playwright || { echo "Playwright is not installed. Run 'make browser-e2e-setup'."; exit 1; }
+browser-e2e: browser-e2e-setup
 	CODEX_LOOPS_BROWSER_E2E=1 mix test --only browser_e2e
 
 test: spec-lint

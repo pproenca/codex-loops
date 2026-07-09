@@ -45,8 +45,11 @@ CODEX_LOOPS_JOURNAL_PATH=/tmp/codex-loops-runs.sqlite \
 _build/prod/rel/agent_loops/bin/agent_loops start
 ```
 
-`CODEX_LOOPS_HOST` defaults to `0.0.0.0` for ordinary release deployments. Set
-it to `127.0.0.1` or `localhost` for deterministic local proofs.
+`CODEX_LOOPS_HOST` defaults to `127.0.0.1` because the packaged scheduler is a
+local, path-first product surface. Set `CODEX_LOOPS_HOST=0.0.0.0` or another
+non-loopback address only when deliberately exposing the scheduler beyond the
+local machine; put that deployment behind the host's normal access controls
+such as a trusted reverse proxy, tunnel, firewall, or private network boundary.
 `CODEX_LOOPS_PORT` defaults to `PORT`, then `4000`.
 
 `make proof` is the production readiness proof for this artifact: it starts the

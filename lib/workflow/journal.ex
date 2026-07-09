@@ -18,35 +18,38 @@ defmodule Workflow.Journal do
   random and carry no order themselves.
 
   This process owns the SQLite connection under supervision; it holds no run state
-  of its own.
+  of its own. Provider activity reaches it through `Workflow.Run.Stream` after it
+  has already been broadcast to live subscribers, keeping realtime output off the
+  writer's critical path.
   """
   use GenServer
 
   alias Exqlite.Sqlite3
+  alias Workflow.Event
+  alias Workflow.Run.Stream, as: RunStream
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
   @doc "Append a single event at `seq`. Called only by the run's live writer."
-  @spec append(String.t(), non_neg_integer(), Workflow.Event.t()) :: :ok
-  def append(run_id, seq, %Workflow.Event{} = event) do
+  @spec append(String.t(), non_neg_integer(), Event.t()) :: :ok
+  def append(run_id, seq, %Event{} = event) do
     GenServer.call(__MODULE__, {:append, run_id, seq, event})
   end
 
   @doc """
   Append an event at the next available sequence number for `run_id`.
 
-  Used by live progress events that may arrive from concurrent provider turns while
-  the single writer is waiting at a fan-out barrier. SQLite serialization in this
-  process keeps `{run_id, seq}` monotonic without asking worker tasks to coordinate
-  a cursor.
+  Used by callers that need the journal to allocate the next durable sequence.
+  Realtime provider activity normally arrives through the `Workflow.Run.Stream`
+  subscription path instead of calling this from the provider callback.
   """
-  @spec append_next(String.t(), Workflow.Event.t()) :: {:ok, Workflow.Event.t()}
-  def append_next(run_id, %Workflow.Event{} = event) do
+  @spec append_next(String.t(), Event.t()) :: {:ok, Event.t()}
+  def append_next(run_id, %Event{} = event) do
     GenServer.call(__MODULE__, {:append_next, run_id, event})
   end
 
   @doc "Fold source: every event for `run_id` in commit (`seq`) order."
-  @spec fold(String.t()) :: [Workflow.Event.t()]
+  @spec fold(String.t()) :: [Event.t()]
   def fold(run_id), do: GenServer.call(__MODULE__, {:fold, run_id})
 
   @doc "Highest committed `seq` for `run_id`, or `-1` when the run has no events."
@@ -75,6 +78,7 @@ defmodule Workflow.Journal do
     {:ok, db} = Sqlite3.open(path)
     :ok = Sqlite3.set_busy_timeout(db, 5_000)
     :ok = migrate(db)
+    :ok = RunStream.subscribe_all()
     {:ok, %{db: db, path: path}}
   end
 
@@ -82,7 +86,7 @@ defmodule Workflow.Journal do
   def terminate(_reason, %{db: db}), do: Sqlite3.close(db)
 
   @impl true
-  def handle_call({:append, run_id, seq, %Workflow.Event{} = event}, _from, %{db: db} = state) do
+  def handle_call({:append, run_id, seq, %Event{} = event}, _from, %{db: db} = state) do
     sql = """
     INSERT INTO events (run_id, seq, schema, type, event_blob)
     VALUES (?, ?, ?, ?, ?)
@@ -100,7 +104,7 @@ defmodule Workflow.Journal do
     {:reply, :ok, state}
   end
 
-  def handle_call({:append_next, run_id, %Workflow.Event{} = event}, _from, %{db: db} = state) do
+  def handle_call({:append_next, run_id, %Event{} = event}, _from, %{db: db} = state) do
     event =
       case idempotent_activity_event(db, run_id, event) do
         nil ->
@@ -154,6 +158,26 @@ defmodule Workflow.Journal do
     {:reply, latest, state}
   end
 
+  @impl true
+  def handle_info({:run_stream_event, run_id, %Event{type: :agent_activity} = event}, %{db: db} = state) do
+    persisted =
+      case idempotent_activity_event(db, run_id, event) do
+        nil ->
+          seq = last_seq(db, run_id) + 1
+          event = %{event | run_id: run_id, seq: seq}
+          :ok = insert_event(db, run_id, seq, event)
+          event
+
+        existing ->
+          existing
+      end
+
+    Phoenix.PubSub.broadcast(Workflow.PubSub, "run:" <> run_id, {:journal_committed, run_id, persisted})
+    {:noreply, state}
+  end
+
+  def handle_info({:run_stream_event, _run_id, %Event{}}, state), do: {:noreply, state}
+
   defp database_path do
     System.get_env("CODEX_LOOPS_JOURNAL_PATH") ||
       :codex_loops
@@ -183,7 +207,7 @@ defmodule Workflow.Journal do
     """)
   end
 
-  defp insert_event(db, run_id, seq, %Workflow.Event{} = event) do
+  defp insert_event(db, run_id, seq, %Event{} = event) do
     sql = """
     INSERT INTO events (run_id, seq, schema, type, event_blob)
     VALUES (?, ?, ?, ?, ?)
@@ -199,7 +223,7 @@ defmodule Workflow.Journal do
   end
 
   # sobelow_skip ["Misc.BinToTerm"]
-  defp idempotent_activity_event(db, run_id, %Workflow.Event{
+  defp idempotent_activity_event(db, run_id, %Event{
          type: :agent_activity,
          payload: %{address: address, iteration: iteration, attempt: attempt, activity_index: index}
        })
@@ -210,7 +234,7 @@ defmodule Workflow.Journal do
       "agent_activity"
     ])
     |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob, [:safe]) end)
-    |> Enum.find(fn %Workflow.Event{payload: payload} ->
+    |> Enum.find(fn %Event{payload: payload} ->
       payload.address == address and payload.iteration == iteration and
         payload.attempt == attempt and Map.get(payload, :activity_index) == index
     end)

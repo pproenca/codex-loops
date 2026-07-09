@@ -68,6 +68,7 @@ defmodule Workflow.Run.Writer do
   alias Workflow.Refine.Result, as: RefineResult
   alias Workflow.Refine.ReviewerAdapter
   alias Workflow.RenderText
+  alias Workflow.Run.Stream, as: RunStream
   alias Workflow.Schema
   alias Workflow.Status
   alias Workflow.Template
@@ -2879,8 +2880,7 @@ defmodule Workflow.Run.Writer do
       activity_index = :counters.get(counter, 1) - 1
       :ets.insert(table, {activity_index, entry})
       event = Event.agent_activity(node, iteration, attempt, activity_index, entry)
-      {:ok, event} = Journal.append_next(run_id, event)
-      Phoenix.PubSub.broadcast(PubSub, "run:" <> run_id, {:journal_committed, run_id, event})
+      RunStream.emit(run_id, event)
       :ok
     end
 

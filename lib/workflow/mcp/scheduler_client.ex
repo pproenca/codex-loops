@@ -122,12 +122,13 @@ defmodule Workflow.MCP.SchedulerClient do
 
   defp url_config(raw) do
     uri = URI.parse(raw)
-    protocol = (uri.scheme || "http") <> ":"
+    scheme = uri.scheme || "http"
+    protocol = scheme <> ":"
     host = uri.host || "127.0.0.1"
     port = uri.port || default_port(protocol)
 
     %{
-      base_url: URI.to_string(%URI{scheme: uri.scheme || "http", host: host, port: port}),
+      base_url: scheme <> "://" <> format_host(host) <> ":#{port}",
       host: host,
       port: port,
       protocol: protocol

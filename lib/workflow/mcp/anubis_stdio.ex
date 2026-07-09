@@ -12,12 +12,13 @@ defmodule Workflow.MCP.AnubisStdio do
   alias Workflow.MCP.AnubisServer.ToolHelpers
   alias Workflow.MCP.BurritoEnvironment
 
-  @spec main([String.t()]) :: :ok | {:error, 2} | no_return()
+  @spec main([String.t()]) :: :ok | {:error, term()} | no_return()
   def main(args \\ BurritoEnvironment.argv()) do
     main(args, [])
   end
 
   @doc false
+  @spec main([String.t()], keyword()) :: :ok | {:error, term()} | no_return()
   def main(args, opts) when is_list(args) and is_list(opts) do
     BurritoEnvironment.bootstrap()
 
@@ -28,7 +29,7 @@ defmodule Workflow.MCP.AnubisStdio do
       ["--stdio"] ->
         run(opts)
 
-      ["--help"] ->
+      [help_arg] when help_arg in ["--help", "-h"] ->
         IO.puts(
           Keyword.get(opts, :output_device, :stdio),
           help()
@@ -130,6 +131,7 @@ defmodule Workflow.MCP.AnubisStdio do
     Options:
       --stdio   Start the MCP stdio server.
       --help    Show this help.
+      -h        Show this help.
     """)
   end
 end

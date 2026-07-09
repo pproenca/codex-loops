@@ -5,6 +5,15 @@ defmodule Workflow.MCP.ApplicationEntrypoint do
 
   require Logger
 
+  @spec child_spec(term()) :: Supervisor.child_spec()
+  def child_spec(_opts) do
+    %{
+      id: __MODULE__,
+      start: {Task, :start_link, [__MODULE__, :run, []]},
+      restart: :temporary
+    }
+  end
+
   @spec run :: no_return()
   def run do
     Logger.configure(level: :emergency)

@@ -68,6 +68,17 @@ require_tracked plugins/codex-loops/THIRD_PARTY_NOTICES.md
 require_tracked plugins/codex-loops/scheduler/releases/0.1.0/runtime.exs
 require_tracked plugins/codex-loops/mcp/codex-loops-mcp
 require_tracked plugins/codex-loops/scheduler/bin/agent_loops
+require_tracked plugins/codex-loops/scheduler/lib/codex_loops-0.1.0/ebin/Elixir.Workflow.Run.Stream.beam
+
+require_file plugins/codex-loops/scheduler/lib/codex_loops-0.1.0/ebin/Elixir.Workflow.Run.Stream.beam
+
+if ! grep -Fq "'Elixir.Workflow.Run.Stream'" plugins/codex-loops/scheduler/lib/codex_loops-0.1.0/ebin/codex_loops.app; then
+  fail "bundled scheduler app metadata is missing Workflow.Run.Stream; run make release"
+fi
+
+if ! grep -Fq "'Elixir.Workflow.Run.Stream'" plugins/codex-loops/scheduler/releases/0.1.0/start.script; then
+  fail "bundled scheduler boot script is missing Workflow.Run.Stream; run make release"
+fi
 
 tracked_scheduler_files="$(git ls-files plugins/codex-loops/scheduler | wc -l | tr -d ' ')"
 [ "$tracked_scheduler_files" -ge 30 ] ||

@@ -8,12 +8,18 @@ defmodule Workflow.MCPAnubisValidateTest do
   setup do
     previous_url = System.get_env("CODEX_LOOPS_SCHEDULER_URL")
     previous_timeout = System.get_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS")
+    previous_plugin_root = System.get_env("CODEX_LOOPS_PLUGIN_ROOT")
+    previous_repo_root = System.get_env("CODEX_LOOPS_REPO_ROOT")
+    previous_scheduler_bin = System.get_env("CODEX_LOOPS_SCHEDULER_BIN")
 
     System.put_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", "1000")
 
     on_exit(fn ->
       restore_env("CODEX_LOOPS_SCHEDULER_URL", previous_url)
       restore_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", previous_timeout)
+      restore_env("CODEX_LOOPS_PLUGIN_ROOT", previous_plugin_root)
+      restore_env("CODEX_LOOPS_REPO_ROOT", previous_repo_root)
+      restore_env("CODEX_LOOPS_SCHEDULER_BIN", previous_scheduler_bin)
     end)
 
     :ok
@@ -52,7 +58,7 @@ defmodule Workflow.MCPAnubisValidateTest do
     assert tools_by_name["workflow_validate"]["inputSchema"]["required"] == ["script_path"]
   end
 
-  test "Anubis stdio entrypoint handles help" do
+  test "Anubis stdio entrypoint handles long help" do
     {:ok, io} = StringIO.open("")
 
     assert :ok = AnubisStdio.main(["--help"], output_device: io)
@@ -60,6 +66,16 @@ defmodule Workflow.MCPAnubisValidateTest do
     {_input, output} = StringIO.contents(io)
     assert output =~ "Usage: codex-loops-mcp --stdio"
     assert output =~ "Runs the Codex Loops Anubis MCP server over stdio."
+  end
+
+  test "Anubis stdio entrypoint handles short help" do
+    {:ok, io} = StringIO.open("")
+
+    assert :ok = AnubisStdio.main(["-h"], output_device: io)
+
+    {_input, output} = StringIO.contents(io)
+    assert output =~ "Usage: codex-loops-mcp --stdio"
+    assert output =~ "-h        Show this help."
   end
 
   test "Anubis stdio entrypoint rejects invalid arguments without halting when requested" do
@@ -361,6 +377,94 @@ defmodule Workflow.MCPAnubisValidateTest do
     restore_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", previous_timeout)
   end
 
+  test "missing packaged scheduler release returns searched paths" do
+    port = unused_local_port()
+    temp_root = tmp_dir("missing-scheduler")
+    plugin_root = Path.join(temp_root, "plugin")
+    repo_root = Path.join(temp_root, "repo")
+
+    File.mkdir_p!(plugin_root)
+    File.mkdir_p!(repo_root)
+
+    System.put_env("CODEX_LOOPS_SCHEDULER_URL", "http://127.0.0.1:#{port}")
+    System.put_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", "50")
+    System.put_env("CODEX_LOOPS_PLUGIN_ROOT", plugin_root)
+    System.put_env("CODEX_LOOPS_REPO_ROOT", repo_root)
+    System.delete_env("CODEX_LOOPS_SCHEDULER_BIN")
+
+    try do
+      responses =
+        [
+          initialize(1),
+          initialized(),
+          workflow_validate(2, "demo.exs")
+        ]
+        |> run_stdio()
+        |> responses_by_id()
+
+      result = responses[2]["result"]
+      assert result["isError"] == true
+
+      error = result["structuredContent"]["error"]
+      assert error["code"] == "scheduler_unavailable"
+      assert error["details"]["reason"] == "No packaged scheduler release was found."
+
+      assert error["details"]["searched_paths"] == [
+               Path.join([plugin_root, "scheduler", "bin", "agent_loops"]),
+               Path.join([repo_root, "_build", "prod", "rel", "agent_loops", "bin", "agent_loops"])
+             ]
+    after
+      File.rm_rf(temp_root)
+    end
+  end
+
+  test "explicit scheduler binary override is used before packaged release discovery" do
+    port = unused_local_port()
+    temp_root = tmp_dir("override-scheduler")
+    plugin_root = Path.join(temp_root, "plugin")
+    repo_root = Path.join(temp_root, "repo")
+    scheduler_bin = Path.join([temp_root, "bin", "agent_loops"])
+
+    File.mkdir_p!(Path.dirname(scheduler_bin))
+
+    File.write!(scheduler_bin, """
+    #!/usr/bin/env sh
+    echo "fake scheduler invoked: $*" >&2
+    exit 23
+    """)
+
+    File.chmod!(scheduler_bin, 0o755)
+    File.mkdir_p!(Path.dirname(Path.join([plugin_root, "scheduler", "bin", "agent_loops"])))
+    File.mkdir_p!(Path.dirname(Path.join([repo_root, "_build", "prod", "rel", "agent_loops", "bin", "agent_loops"])))
+
+    System.put_env("CODEX_LOOPS_SCHEDULER_URL", "http://127.0.0.1:#{port}")
+    System.put_env("CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS", "50")
+    System.put_env("CODEX_LOOPS_PLUGIN_ROOT", plugin_root)
+    System.put_env("CODEX_LOOPS_REPO_ROOT", repo_root)
+    System.put_env("CODEX_LOOPS_SCHEDULER_BIN", scheduler_bin)
+
+    try do
+      responses =
+        [
+          initialize(1),
+          initialized(),
+          workflow_validate(2, "demo.exs")
+        ]
+        |> run_stdio()
+        |> responses_by_id()
+
+      result = responses[2]["result"]
+      assert result["isError"] == true
+
+      error = result["structuredContent"]["error"]
+      assert error["code"] == "scheduler_start_failed"
+      assert error["details"]["release_bin"] == scheduler_bin
+      assert Enum.any?(error["details"]["logs"], &String.contains?(&1, "fake scheduler invoked: start"))
+    after
+      File.rm_rf(temp_root)
+    end
+  end
+
   test "tool input validation returns readable invalid params errors" do
     parent = self()
 
@@ -520,6 +624,25 @@ defmodule Workflow.MCPAnubisValidateTest do
     request
     |> String.split("\r\n\r\n", parts: 2)
     |> List.last()
+  end
+
+  defp tmp_dir(name) do
+    Path.join([System.tmp_dir!(), "codex-loops-tests", "#{name}-#{System.unique_integer([:positive])}"])
+  end
+
+  defp unused_local_port do
+    {:ok, socket} =
+      :gen_tcp.listen(0, [
+        :binary,
+        packet: :raw,
+        active: false,
+        reuseaddr: true,
+        ip: {127, 0, 0, 1}
+      ])
+
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 
   defp restore_env(key, nil), do: System.delete_env(key)

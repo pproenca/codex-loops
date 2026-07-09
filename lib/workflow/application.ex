@@ -45,7 +45,7 @@ defmodule Workflow.Application do
 
   defp start_mcp do
     children = [
-      {Task, fn -> Workflow.MCP.ApplicationEntrypoint.run() end}
+      Workflow.MCP.ApplicationEntrypoint
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: Workflow.Supervisor)

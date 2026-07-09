@@ -46,8 +46,12 @@ It should not be accepted as-is. The production implementation should keep the c
 1. `Workflow.Run.Stream` is a useful small boundary for realtime run progress.
    It centralizes PubSub topic naming and keeps callers from scattering direct `Phoenix.PubSub.broadcast/3` calls for provider progress.
 
-2. The journal can be a subscriber.
-   `Workflow.Journal` subscribes to the global stream and persists `agent_activity` idempotently by `{address, iteration, attempt, activity_index}`. This demonstrates the user's desired shape: journal persistence is outside the provider's port-draining callback.
+2. Activity can be persisted by a subscriber.
+   `Workflow.Run.ActivityPersistenceSubscriber` subscribes to the global stream
+   and persists `agent_activity` through `Workflow.Journal` idempotently by
+   `{address, iteration, attempt, activity_index}`. This demonstrates the
+   desired shape: journal persistence is outside the provider's port-draining
+   callback.
 
 3. The writer can remain the settlement authority.
    `Workflow.Run.Writer` still commits `agent_committed`, `agent_attempt_rejected`, and `agent_failed` in its own path. Activity is merged into final settlement, but activity does not decide retry, ledger, idempotency, or terminal state.
@@ -115,20 +119,12 @@ Current prototype:
 
 If the product promise is that the entire Codex CLI output is realtime, then every Codex-backed provider call needs a stream-capable tracker, with correct role/address/attempt identity. If some internal roles should remain quiet, the product contract should say so explicitly.
 
-### 4. Make subscriber supervision explicit
+### 4. Subscriber supervision is explicit
 
-Current prototype:
-
-- `Workflow.Journal` subscribes to `Workflow.Run.Stream` in `init/1`.
-- The app supervisor is `:one_for_one` with `Phoenix.PubSub` before `Workflow.Journal`.
-
-This is acceptable for a spike, but it leaves subscription lifecycle implicit. If PubSub restarts independently, the journal process may not resubscribe. Production should either:
-
-- use a supervision strategy that restarts the journal subscriber when PubSub restarts,
-- split activity persistence into a dedicated subscriber process with explicit restart/resubscribe behavior,
-- or document and test the restart behavior that is intended.
-
-The SQLite owner can still be the final serializer. The key is that the subscription lifecycle should be deliberate.
+Production splits activity persistence into
+`Workflow.Run.ActivityPersistenceSubscriber`, a supervised subscriber with
+tested restart/resubscribe behavior. `Workflow.Journal` stays the SQLite owner
+and final serializer rather than owning PubSub subscription lifecycle.
 
 ### 5. Tighten the activity taxonomy
 
@@ -142,20 +138,17 @@ That is useful, but production should pin which Codex events become activity ent
 
 Assistant output as a final activity entry is reasonable, but it duplicates the final result. If kept, it should be bounded, labelled as completed assistant output, and tested for schema-backed turns so the UI does not accidentally expose giant JSON or sensitive raw protocol content.
 
-### 6. Resolve MCP inspect before implementation
+### 6. MCP inspect uses journalEvents
 
-`workflow_inspect` currently calls `/api/runs/:id/events`, but `ProjectionEnvelope.conform/1` strips the `"events"` field and returns only the public projection plus `rawRefs`.
-
-Before production streaming work lands, choose one:
-
-- keep inspect as projection plus ordered `rawRefs`, and update docs/tool descriptions,
-- or add an explicit public `"journalEvents"` field with safe `%{seq, type, address?}` summaries.
+`workflow_inspect` calls `/api/runs/:id/events`. `ProjectionEnvelope.conform/1`
+strips the legacy `"events"` field and returns the public projection,
+`journalEvents` summaries, and ordered `rawRefs`.
 
 Do not expose raw Codex JSONL through MCP inspect by default.
 
 ### 7. Rename UI event copy to activity copy
 
-Current LiveView copy still says "Latest event" for content that is usually an activity entry. Rename it to "Latest activity" and reserve "journal event" language for durable sequence/type/address summaries.
+The prototype LiveView copy said "Latest event" for content that was usually an activity entry. Production copy should say "Latest activity" and reserve "journal event" language for durable sequence/type/address summaries.
 
 ## Split Out
 
@@ -169,7 +162,7 @@ Keep or reject those in separate operational tickets. They should not be bundled
 
 ## Discard From Production Streaming
 
-`.codex/workflows/staff_level_elixir_adversarial_scan.exs` should not be treated as production architecture. It is a dogfood workflow with local absolute paths and prompt text that still says "Return only JSON matching the schema." That conflicts with the map decision that `--output-schema` owns structural output shape.
+`.codex/workflows/staff_level_elixir_adversarial_scan.exs` should not be treated as production architecture. It is a dogfood workflow with local absolute paths, and schema-backed prompts must avoid generic schema-shape boilerplate because `--output-schema` owns structural output shape.
 
 It can be replaced later with a portable example workflow that keeps semantic instructions in the prompt and leaves JSON shape to the schema flag.
 
@@ -178,10 +171,10 @@ It can be replaced later with a portable example workflow that keeps semantic in
 1. Provider fold: make `Workflow.Provider.Codex` parse JSONL once, stream activity as lines arrive, and settle from the same accumulator.
 2. Activity bus: keep `Workflow.Run.Stream`, but clarify it emits progress messages carrying normalized activity, not public journal events.
 3. Writer coverage: replace `local_activity_tracker/0` on user-visible Codex provider paths with a stream-aware tracker, or explicitly mark those paths as non-realtime.
-4. Subscriber durability: make activity persistence a supervised subscriber with tested restart/resubscribe behavior.
+4. Subscriber durability: keep activity persistence in the supervised subscriber with tested restart/resubscribe behavior.
 5. Projection split: keep `Status.apply_event/2` journal-only and add a progress projection helper for LiveView.
 6. UI vocabulary: rename latest event to latest activity and keep activity lists bounded unless a real LiveView stream feed is added.
-7. API/MCP contract: pin `/events` as journal summaries; decide MCP inspect's `"journalEvents"` question.
+7. API/MCP contract: pin `/events` as journal summaries and MCP inspect's `journalEvents` field.
 8. Prompt/schema cleanup: remove schema-shape boilerplate from generated/authored schema-backed workflow prompts while preserving semantic instructions.
 
 ## Test And Proof Gates
@@ -189,11 +182,11 @@ It can be replaced later with a portable example workflow that keeps semantic in
 - Codex provider unit/integration test: one JSONL line path produces both realtime activity and the final result without decoding stdout twice.
 - Containment test: line observation remains protocol-neutral and does not block stdout draining with journal writes.
 - Writer test: every intended Codex provider call path emits activity with stable `{run_id, address, iteration, attempt, activity_index}`.
-- Journal subscriber test: duplicate activity messages de-dupe; repeated entries with different indexes persist; subscriber restart/resubscribe behavior is pinned.
+- Activity persistence subscriber test: duplicate activity messages de-dupe; repeated entries with different indexes persist; subscriber restart/resubscribe behavior is pinned.
 - Status/projection test: progress messages do not increment durable `eventCount` or create raw refs until journal persistence.
 - LiveView test: connected view shows activity before settlement, then reconnect reconstructs the same activity from the journal.
 - API test: `/api/runs/:id/events` exposes only safe journal summaries, including persisted `agent_activity` when present.
-- MCP test: `workflow_status` remains snapshot-only; `workflow_inspect` follows the chosen projection-plus-rawRefs or journalEvents contract.
+- MCP test: `workflow_status` remains snapshot-only; `workflow_inspect` follows the `journalEvents` plus rawRefs contract.
 - Proof docs: update `make proof`, `make proof-mcp`, and manual smoke docs to say the UI is realtime and API/MCP are polling snapshots.
 
 ## Cleared Fog

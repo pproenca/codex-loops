@@ -1,11 +1,12 @@
 defmodule Workflow.Run.Stream do
   @moduledoc """
-  Realtime run event bus.
+  Realtime run progress-message bus.
 
   Provider activity is progress telemetry, not the durable exactly-once ledger.
   The runner emits it here first so connected read surfaces can render immediately.
-  Durable persistence is just another subscriber: `Workflow.Journal` listens to
-  the global stream topic and records activity out of band.
+  Durable persistence is just another subscriber:
+  `Workflow.Run.ActivityPersistenceSubscriber` listens to the global stream topic
+  and records activity out of band.
   """
 
   alias Workflow.Event

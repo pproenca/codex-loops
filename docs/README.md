@@ -43,7 +43,7 @@ Supported:
 - live Codex provider runs via `codex exec --json`;
 - SQLite-backed scheduler projections for status, inspect, and resume;
 - Codex-facing MCP tools for validate/start/status/inspect/resume/open UI;
-- scheduler API and run LiveView;
+- scheduler API polling snapshots, journal inspection, and realtime run LiveView;
 - self-contained Mix release packaging.
 
 Not currently shipped in the scheduler/plugin product:

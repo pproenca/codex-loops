@@ -18,15 +18,14 @@ defmodule Workflow.Journal do
   random and carry no order themselves.
 
   This process owns the SQLite connection under supervision; it holds no run state
-  of its own. Provider activity reaches it through `Workflow.Run.Stream` after it
-  has already been broadcast to live subscribers, keeping realtime output off the
+  of its own. Provider activity is persisted by
+  `Workflow.Run.ActivityPersistenceSubscriber`, keeping realtime output off the
   writer's critical path.
   """
   use GenServer
 
   alias Exqlite.Sqlite3
   alias Workflow.Event
-  alias Workflow.Run.Stream, as: RunStream
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -78,7 +77,6 @@ defmodule Workflow.Journal do
     {:ok, db} = Sqlite3.open(path)
     :ok = Sqlite3.set_busy_timeout(db, 5_000)
     :ok = migrate(db)
-    :ok = RunStream.subscribe_all()
     {:ok, %{db: db, path: path}}
   end
 
@@ -157,26 +155,6 @@ defmodule Workflow.Journal do
 
     {:reply, latest, state}
   end
-
-  @impl true
-  def handle_info({:run_stream_event, run_id, %Event{type: :agent_activity} = event}, %{db: db} = state) do
-    persisted =
-      case idempotent_activity_event(db, run_id, event) do
-        nil ->
-          seq = last_seq(db, run_id) + 1
-          event = %{event | run_id: run_id, seq: seq}
-          :ok = insert_event(db, run_id, seq, event)
-          event
-
-        existing ->
-          existing
-      end
-
-    Phoenix.PubSub.broadcast(Workflow.PubSub, "run:" <> run_id, {:journal_committed, run_id, persisted})
-    {:noreply, state}
-  end
-
-  def handle_info({:run_stream_event, _run_id, %Event{}}, state), do: {:noreply, state}
 
   defp database_path do
     System.get_env("CODEX_LOOPS_JOURNAL_PATH") ||

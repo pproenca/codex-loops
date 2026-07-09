@@ -49,15 +49,17 @@ MCP behavior:
   error envelope exactly as MCP `structuredContent`
 - `workflow_status` calls `GET /api/runs/:id` and returns the §7.5 conforming
   status projection as MCP `structuredContent`; scheduler-only lifecycle/UI
-  fields are omitted from this public status surface
+  fields are omitted from this public status surface. This is a polling
+  snapshot, not a realtime stream
 - `workflow_inspect` calls `GET /api/runs/:id/events` and returns the §7.5
   conforming inspect/status projection as MCP `structuredContent`, including
-  ordered `rawRefs.journal` instead of the lower-level `events` rows
+  `journalEvents` summaries and ordered `rawRefs.journal` instead of the
+  lower-level legacy `events` rows
 - `workflow_resume` calls `POST /api/runs/:id/resume` and returns the scheduler
   success or error envelope exactly as MCP `structuredContent`
 - `workflow_open_ui` calls `GET /api/runs/:id` and returns an MCP envelope with
   the scheduler projection plus absolute `open_url` based on the scheduler base
-  URL
+  URL. The returned Phoenix LiveView URL is the realtime watching surface
 - scheduler success envelopes are returned as MCP `structuredContent`
 - scheduler typed errors remain typed and are returned as MCP `isError: true`
 - scheduler lifecycle failures use MCP-friendly `scheduler_unavailable` or
@@ -171,8 +173,9 @@ Expected authoring loop:
    mutation posture, verification commands, and halt conditions.
 3. Choose simple sequential phases unless the task genuinely needs fanout or
    loop combinators.
-4. Use domain-rich worker prompts with exact files, constraints, closed schemas,
-   and concrete expected outputs.
+4. Use domain-rich worker prompts with exact files, evidence expectations,
+   semantic field meaning, constraints, and halt conditions. Put structural
+   output shape in `schema:` / `--output-schema`.
 5. Add adversarial verification and a final build or test gate for mutating
    workflows.
 6. Run `workflow_validate` and a mock `workflow_start`; run live Codex only
@@ -185,9 +188,11 @@ Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`, unless
 projections are folds over the journal. Completed nodes replay from the journal
 on resume.
 
-The live provider shells out to `codex exec --json --skip-git-repo-check`.
-Schema-backed agents pass `--output-schema`; the writer validates outputs and
-fails closed after retry exhaustion.
+The live provider shells out to `codex exec --json --skip-git-repo-check`,
+normalizes Codex events into activity entries, and streams progress to LiveView.
+Schema-backed agents pass `--output-schema`; the schema owns output shape, the
+prompt owns task semantics, and the writer validates outputs and fails closed
+after retry exhaustion.
 
 ## Packaging
 
@@ -226,12 +231,12 @@ make proof-live
 
 `make proof-mcp` builds and copies the Burrito MCP executable into the plugin
 package, copies the plugin package to a temp install location, and proves MCP
-lifecycle, validation, mock start, status polling, event inspection, resume,
+lifecycle, validation, mock start, status polling, journal inspection, resume,
 typed scheduler errors, and open-ui response against the copied package's
 scheduler release. `make proof-mcp-live` validates through MCP, starts or reuses
 the packaged scheduler through MCP lifecycle handling, starts a live
 `provider: "codex"` run through `workflow_start`, observes completion through
-`workflow_status`, and asserts nonzero token usage from the scheduler
+polling `workflow_status`, and asserts nonzero token usage from the scheduler
 projection. It spends one real Codex provider turn. `make proof-live` aliases
 the MCP live proof.
 

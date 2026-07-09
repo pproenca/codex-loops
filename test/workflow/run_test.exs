@@ -110,6 +110,23 @@ defmodule Workflow.RunTest do
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp echo, do: {EchoProvider, [sink: self()]}
 
+  defp wait_for_journal_type_count(id, type, count, tries \\ 100)
+
+  defp wait_for_journal_type_count(id, type, count, 0) do
+    flunk("expected #{count} #{type} journal events, got: #{inspect(Journal.fold(id))}")
+  end
+
+  defp wait_for_journal_type_count(id, type, count, tries) do
+    events = Journal.fold(id)
+
+    if Enum.count(events, &(&1.type == type)) == count do
+      events
+    else
+      Process.sleep(10)
+      wait_for_journal_type_count(id, type, count, tries - 1)
+    end
+  end
+
   defp assert_no_run_started(id) do
     assert Journal.fold(id) == []
     assert Registry.lookup(Workflow.Run.Registry, id) == []
@@ -378,7 +395,7 @@ defmodule Workflow.RunTest do
     assert detail["message"] =~ "invalid provider usage"
   end
 
-  test "streamed activity before a settled event uses the serialized append allocator" do
+  test "streamed activity uses the serialized append allocator without settlement authority" do
     id = run_id()
     :ok = Workflow.Run.Stream.subscribe(id)
 
@@ -387,18 +404,20 @@ defmodule Workflow.RunTest do
 
     assert_receive {:run_stream_event, ^id, %Event{type: :agent_activity}}, @receive_timeout
 
-    events = Journal.fold(id)
+    events = wait_for_journal_type_count(id, :agent_activity, 1)
 
-    assert Enum.map(events, & &1.type) == [
+    assert events |> Enum.reject(&(&1.type == :agent_activity)) |> Enum.map(& &1.type) == [
              :run_started,
              :phase_entered,
              :log_emitted,
-             :agent_activity,
              :agent_committed,
              :run_completed
            ]
 
     assert Enum.map(events, & &1.seq) == Enum.to_list(0..5)
+
+    assert [%Event{payload: %{activity_index: 0, attempt: 0}}] =
+             Enum.filter(events, &(&1.type == :agent_activity))
   end
 
   test "activity replay is idempotent by activity index and preserves repeated entries" do

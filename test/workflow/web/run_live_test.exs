@@ -292,6 +292,80 @@ defmodule Workflow.Web.RunLiveTest do
     """)
   end
 
+  defp codex_streaming_workflow do
+    write_workflow(~S"""
+    workflow "live-codex-streaming-demo" do
+      phase "draft"
+      agent "ship streaming proof"
+      return :ok
+    end
+    """)
+  end
+
+  defp codex_realtime_stub_source do
+    """
+    #!/bin/sh
+    cat >/dev/null
+    if [ -z "$CODEX_LOOPS_STUB_RELEASE" ]; then
+      echo "CODEX_LOOPS_STUB_RELEASE is required" >&2
+      exit 2
+    fi
+    printf '%s\\n' '{"type":"thread.started","thread_id":"run-live-stub"}'
+    printf '%s\\n' '{"type":"turn.started"}'
+    printf '%s\\n' '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"read the acceptance criteria"}}'
+    printf '%s\\n' '{"type":"item.completed","item":{"id":"tool-1","type":"tool_call","name":"shell","input":{"cmd":"mix test test/workflow/web/run_live_test.exs"}}}'
+    printf '%s\\n' '{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"codex final draft"}}'
+    while [ ! -f "$CODEX_LOOPS_STUB_RELEASE" ]; do
+      sleep 0.05
+    done
+    printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":0,"output_tokens":11,"reasoning_output_tokens":0}}'
+    """
+  end
+
+  defp with_blocking_codex_stub(fun) when is_function(fun, 1) do
+    dir = Path.join(System.tmp_dir!(), "run_live_codex_stub_#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+
+    stub = Path.join(dir, "codex")
+    release = Path.join(dir, "release")
+    File.write!(stub, codex_realtime_stub_source())
+    File.chmod!(stub, 0o755)
+
+    previous_path = System.get_env("PATH")
+    previous_release = System.get_env("CODEX_LOOPS_STUB_RELEASE")
+    System.put_env("PATH", dir <> path_separator() <> (previous_path || ""))
+    System.put_env("CODEX_LOOPS_STUB_RELEASE", release)
+
+    release_stub = fn -> File.write!(release, "go") end
+
+    try do
+      fun.(release_stub)
+    after
+      release_stub.()
+
+      if previous_path do
+        System.put_env("PATH", previous_path)
+      else
+        System.delete_env("PATH")
+      end
+
+      if previous_release do
+        System.put_env("CODEX_LOOPS_STUB_RELEASE", previous_release)
+      else
+        System.delete_env("CODEX_LOOPS_STUB_RELEASE")
+      end
+
+      File.rm_rf(dir)
+    end
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _name} -> ";"
+      _other -> ":"
+    end
+  end
+
   defp json_conn do
     put_req_header(conn(), "accept", "application/json")
   end
@@ -321,6 +395,22 @@ defmodule Workflow.Web.RunLiveTest do
       wait_for_render(view, text, attempts - 1)
     end
   end
+
+  defp wait_for_journal_type_count(id, type, count, attempts \\ 100)
+
+  defp wait_for_journal_type_count(id, type, count, attempts) when attempts > 0 do
+    events = Journal.fold(id)
+
+    if Enum.count(events, &(&1.type == type)) >= count do
+      events
+    else
+      Process.sleep(10)
+      wait_for_journal_type_count(id, type, count, attempts - 1)
+    end
+  end
+
+  defp wait_for_journal_type_count(id, type, count, 0),
+    do: flunk("expected at least #{count} #{type} journal events, got: #{inspect(Journal.fold(id))}")
 
   # Start a run whose single agent turn blocks inside the provider, then wait until
   # the writer is parked there. At that point run_started/phase_entered/log_emitted
@@ -525,7 +615,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert_in_order(detail, [
       "Execution state",
       "Running",
-      "Latest event",
+      "Latest activity",
       "Streaming say hello",
       "Prompt preview"
     ])
@@ -569,7 +659,7 @@ defmodule Workflow.Web.RunLiveTest do
 
     recent = view |> element("[data-testid=recent-events]") |> render()
 
-    assert recent =~ "Recent events"
+    assert recent =~ "Recent log entries"
     assert recent =~ "event three"
     assert recent =~ "event four"
     assert recent =~ "event five"
@@ -671,6 +761,65 @@ defmodule Workflow.Web.RunLiveTest do
     assert has_element?(view, "[data-testid=phase-timeline]", "ship it")
   end
 
+  test "scheduler codex runs stream activity into LiveView before settlement and reconnect from the journal" do
+    with_blocking_codex_stub(fn release_stub ->
+      id = run_id()
+      path = codex_streaming_workflow()
+
+      {:ok, view, html} = live(conn(), "/runs/#{id}")
+      assert html =~ "pending"
+
+      conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "codex"})
+
+      assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
+
+      streamed = wait_for_render(view, "codex final draft", 100)
+
+      assert streamed =~ "Turn started"
+      assert streamed =~ "Reasoning"
+      assert streamed =~ "read the acceptance criteria"
+      assert streamed =~ "Bash(mix test test/workflow/web/run_live_test.exs)"
+      assert streamed =~ "Assistant"
+      assert streamed =~ "ship streaming proof"
+
+      journal = wait_for_journal_type_count(id, :agent_activity, 4)
+      refute Enum.any?(journal, &(&1.type == :agent_committed))
+      refute Enum.any?(journal, &(&1.type == :run_completed))
+
+      activity_events = Enum.filter(journal, &(&1.type == :agent_activity))
+      assert length(activity_events) >= 4
+      assert activity_events |> Enum.map(& &1.payload.address) |> Enum.uniq() == [[1]]
+      assert Enum.map(activity_events, & &1.payload.activity_index) == Enum.to_list(0..(length(activity_events) - 1))
+
+      status_conn = get(json_conn(), "/api/runs/#{id}")
+      status_response = json_response(status_conn, 200)
+
+      assert %{
+               "data" => %{
+                 "state" => "running",
+                 "eventCount" => event_count,
+                 "rawRefs" => %{"journal" => raw_refs}
+               }
+             } = status_response
+
+      assert event_count == length(journal)
+      assert length(raw_refs) == length(journal)
+      refute Map.has_key?(status_response["data"], "events")
+      refute Map.has_key?(status_response["data"], "journalEvents")
+
+      {:ok, _fresh_view, fresh_html} = live(conn(), "/runs/#{id}")
+      assert fresh_html =~ "codex final draft"
+      assert fresh_html =~ "Turn started"
+      assert fresh_html =~ "Bash(mix test test/workflow/web/run_live_test.exs)"
+
+      release_stub.()
+
+      completed = wait_for_render(view, "result: :ok", 100)
+      assert completed =~ "Completed"
+      assert has_element?(view, "[data-testid=agent-detail]", "18 tok")
+    end)
+  end
+
   test "serves the browser LiveView client for inspector controls" do
     id = run_id()
 
@@ -709,7 +858,7 @@ defmodule Workflow.Web.RunLiveTest do
       "Completed",
       "Selected agent",
       "build:ship",
-      "Latest event",
+      "Latest activity",
       "Checked ship",
       "Final outcome",
       ~s(&quot;echo&quot; =&gt; &quot;ship&quot;),
@@ -950,7 +1099,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert_in_order(detail, [
       "Execution state",
       "Completed",
-      "Latest event",
+      "Latest activity",
       "Completed with final outcome",
       "Retry context",
       "1 rejected attempt",
@@ -985,7 +1134,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert_in_order(detail, [
       "Execution state",
       "Failed",
-      "Latest event",
+      "Latest activity",
       "missing_required",
       "Retry context",
       "1 rejected attempt",
@@ -1073,7 +1222,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert_in_order(detail, [
       "Execution state",
       "iteration 0",
-      "Latest event",
+      "Latest activity",
       "Completed with final outcome",
       "Final outcome",
       ~s(&quot;label&quot; =&gt; &quot;zero&quot;),
@@ -1092,7 +1241,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert_in_order(selected_iteration, [
       "Execution state",
       "iteration 1",
-      "Latest event",
+      "Latest activity",
       "Completed with final outcome",
       "Final outcome",
       ~s(&quot;label&quot; =&gt; &quot;one&quot;),
@@ -1158,7 +1307,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert_in_order(detail, [
       "Execution state",
       "iteration 0",
-      "Latest event",
+      "Latest activity",
       "Completed with final outcome",
       "Retry context",
       "1 failed attempt",

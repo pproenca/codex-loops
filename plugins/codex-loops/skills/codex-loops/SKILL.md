@@ -24,11 +24,12 @@ when set.
 - `workflow_start`: start a run from an existing workflow script. Use
   `provider: "mock"` for offline proof and `provider: "codex"` only after
   approval, because it spends a real Codex turn.
-- `workflow_status`: read the public §7.5 journal-backed status projection.
-- `workflow_inspect`: read the public §7.5 inspect/status projection with ordered
-  `rawRefs.journal`.
+- `workflow_status`: poll the public §7.5 journal-backed status projection.
+- `workflow_inspect`: read the public §7.5 inspect/status projection with
+  `journalEvents` summaries and ordered `rawRefs.journal`.
 - `workflow_resume`: resume an existing run through the scheduler API.
-- `workflow_open_ui`: return the Phoenix LiveView run URL.
+- `workflow_open_ui`: return the Phoenix LiveView run URL. Use this URL for
+  realtime watching.
 
 If working from a repo clone, the packaged binary is built with:
 
@@ -78,8 +79,10 @@ Use a scout-first authoring loop:
    conditions.
 3. Choose simple sequential phases unless the task genuinely needs fanout,
    `parallel`, `pipeline`, or loop combinators.
-4. Write domain-rich worker prompts with exact paths or search scope,
-   constraints, closed schemas, and expected output shape.
+4. Write domain-rich worker prompts with exact paths or search scope, evidence
+   expectations, semantic field meaning, constraints, and halt conditions. Put
+   structural output shape in `schema:` so Codex receives it through
+   `--output-schema`.
 5. For mutating workflows, include adversarial verification and a final build or
    test gate before reporting completion.
 6. Run `workflow_validate` and a mock `workflow_start` before live execution.
@@ -162,6 +165,7 @@ Run live workflows only after the testing gate is satisfied:
 ```bash
 workflow_start script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
 workflow_status run_id=<id-live>
+workflow_open_ui run_id=<id-live>
 ```
 
 After launch:
@@ -171,6 +175,10 @@ workflow_status run_id=<id-live>
 workflow_inspect run_id=<id-live>
 workflow_open_ui run_id=<id-live>
 ```
+
+`workflow_status` is a polling snapshot. `workflow_inspect` is durable journal
+inspection. LiveView, opened through `workflow_open_ui`, is the realtime surface
+for progress messages and activity entries.
 
 Use `workflow_resume run_id=<id> provider=codex` when a run failed and should
 reuse completed journaled nodes.
@@ -189,10 +197,10 @@ make proof-live
 ```
 
 `make proof-mcp` builds the Burrito MCP executable, proves MCP lifecycle
-handling, validation, mock start, status, inspect, resume, scheduler typed
-errors, and open-ui against a copied plugin package. `make proof-mcp-live`
-validates through MCP, starts or reuses the packaged scheduler through MCP
-lifecycle handling, starts a live
-`provider: "codex"` run through `workflow_start`, polls `workflow_status`, and
-asserts nonzero token usage from the scheduler projection. It spends one real
-Codex provider turn. `make proof-live` aliases `make proof-mcp-live`.
+handling, validation, mock start, polling status, journal inspect, resume,
+scheduler typed errors, and open-ui against a copied plugin package.
+`make proof-mcp-live` validates through MCP, starts or reuses the packaged
+scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
+through `workflow_start`, polls `workflow_status`, and asserts nonzero token
+usage from the scheduler projection. It spends one real Codex provider turn.
+`make proof-live` aliases `make proof-mcp-live`.

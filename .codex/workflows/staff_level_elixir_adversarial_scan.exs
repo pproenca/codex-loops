@@ -24,7 +24,7 @@ defmodule StaffLevelElixirAdversarialScanWorkflow do
       - Do not modify files, stage files, commit, run formatters, or run broad test suites.
 
       Output:
-      Return only JSON matching the schema. Findings must be adversarial but evidence-based. Each finding must cite a concrete file and line. Use rule ids from the staff-level-elixir skill where possible. Set `verdict` to `findings` when any finding exists, otherwise `pass`.
+      Findings must be adversarial but evidence-based. Each finding must cite a concrete file and line. Use rule ids from the staff-level-elixir skill where possible. Set `verdict` to `findings` when any finding exists, otherwise `pass`.
       """,
       schema: %{
         "type" => "object",

@@ -82,7 +82,11 @@ Raw Codex JSONL should not become a writer-critical durable event by default. It
 
 `Workflow.Run.Stream` should own topic naming and the small public API for realtime run events. It should not know provider protocol details or workflow control flow.
 
-`Workflow.Journal` should own the SQLite connection and serialized append operations. For authoritative events, it is called synchronously by the writer. For realtime activity, it may subscribe to `Workflow.Run.Stream` and append telemetry at the next available journal sequence.
+`Workflow.Journal` should own the SQLite connection and serialized append
+operations. For authoritative events, it is called synchronously by the writer.
+For realtime activity, `Workflow.Run.ActivityPersistenceSubscriber` subscribes
+to `Workflow.Run.Stream` and appends telemetry through the journal at the next
+available journal sequence.
 
 `Workflow.Status` should stay a pure fold. It can fold `agent_activity`, but the fold must not make `agent_activity` affect idempotency, retry, budget ledger, or terminal run state.
 
@@ -113,7 +117,7 @@ If the product later needs a single merged timeline across durable facts and rea
 The prototype has useful direction:
 
 - `Workflow.Run.Stream` creates a small PubSub wrapper for realtime run events.
-- `Workflow.Journal` subscribes to the stream and persists `agent_activity` outside the provider call path.
+- `Workflow.Run.ActivityPersistenceSubscriber` subscribes to the stream and persists `agent_activity` outside the provider call path.
 - `Workflow.Run.Writer` keeps final provider settlement in its own commit path.
 - `Workflow.Status` merges streamed and settled activity by activity index.
 - `Workflow.Web.RunLive` can apply stream events immediately and re-fold from committed state on journal signals/refresh.
@@ -123,7 +127,7 @@ But it should still be treated as a spike until later tickets settle vocabulary 
 - `agent_activity` is currently both a PubSub message and a persisted journal event. The architecture needs to name whether it is durable telemetry, ephemeral progress, or both.
 - The writer's `activity_sink` still does synchronous ETS insertion and PubSub emission in the provider callback. That is acceptable only if the callback remains a small handoff and never performs SQLite or slow network work.
 - Journal sequence now includes subscriber-persisted activity. That is fine for a foldable read model, but not as a guarantee of provider emission order relative to settlement events.
-- `Workflow.Journal` combines authoritative append APIs and subscriber handling in one process. That is reasonable because it owns SQLite serialization, but callers should continue to interact through named functions and `Workflow.Run.Stream`, not scattered process messages.
+- `Workflow.Journal` owns authoritative append APIs and SQLite serialization, while activity subscription is explicit in `Workflow.Run.ActivityPersistenceSubscriber`.
 
 ## Wayfinder Result
 

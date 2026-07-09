@@ -34,7 +34,8 @@ asks for another path.
 - `log "message"` records a journal log.
 - `agent "prompt"` runs one provider turn.
 - `agent "prompt", schema: %{...}, retries: n` requests structured output and
-  fails closed after invalid attempts.
+  fails closed after invalid attempts. For the Codex provider, the schema is
+  passed with `--output-schema`.
 - `let :name = agent(...)`, `let :name = synthesize(...)`, and
   `let :name = refine(...)` bind a top-level producer's journaled output for
   later dataflow rendering.
@@ -114,6 +115,15 @@ end
 
 User-authored heterogeneous `lanes([...])` are not available in the shipped
 compiler. Deferred dataflow `gather` and `map` also remain unavailable.
+
+## Schema-Backed Prompts
+
+For schema-backed agents, the schema owns output shape and the prompt owns task
+semantics. Do not paste JSON Schema into the prompt or add generic boilerplate
+such as "return JSON matching this schema." Instead, write the prompt to explain
+what evidence to inspect, what the fields mean, how to judge edge cases, and any
+domain constraints the schema cannot express. The writer validates the final
+provider output locally and retries or fails closed when it does not conform.
 
 Closed predicate examples that match the live parser/evaluator. For `agree`
 over a fanout binding, each lane result must be a structured map, usually from a
@@ -200,8 +210,8 @@ forms remain unavailable.
 1. Scout repository facts first with local tools.
 2. Convert those facts into exact files, prompts, schemas, budgets, and stop
    conditions.
-3. Keep worker prompts specific: include paths, evidence scope, output shape,
-   and halt conditions.
+3. Keep worker prompts specific: include paths, evidence scope, semantic field
+   meaning, and halt conditions. Put structural shape in `schema:`.
 4. Prefer mock testing before live execution.
 5. For mutating workflows, include an adversarial verification phase and a final
    build/test gate in the workflow design.
@@ -220,7 +230,12 @@ Only run the live provider after validation and mock testing:
 ```text
 workflow_start  script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
 workflow_status run_id=<id-live>
+workflow_open_ui run_id=<id-live>
 ```
+
+Use `workflow_open_ui` to watch realtime activity in LiveView. `workflow_status`
+polls the run projection, and `workflow_inspect` returns durable journal
+summaries and raw refs.
 
 ## Resume
 

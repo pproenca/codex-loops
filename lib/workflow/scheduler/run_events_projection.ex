@@ -41,6 +41,7 @@ defmodule Workflow.Scheduler.RunEventsProjection do
   def to_map(%__MODULE__{} = projection) do
     projection.run_projection
     |> RunProjection.to_map()
+    |> Map.put("journalEvents", projection.events)
     |> Map.put("events", projection.events)
   end
 

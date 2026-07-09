@@ -196,7 +196,8 @@ defmodule Workflow.MCPAnubisValidateTest do
         "runId" => "run-inspect",
         "state" => "running",
         "rawRefs" => %{"journal" => [%{"seq" => 0}]},
-        "events" => [%{"seq" => 0, "type" => "run_started"}]
+        "journalEvents" => [%{"seq" => 0, "type" => "run_started"}],
+        "events" => [%{"seq" => 0, "type" => "run_started", "rawCodexJsonl" => "{}"}]
       }
     }
 
@@ -215,6 +216,7 @@ defmodule Workflow.MCPAnubisValidateTest do
     data = responses[2]["result"]["structuredContent"]["data"]
     assert data["runId"] == "run-inspect"
     assert data["rawRefs"] == %{"journal" => [%{"seq" => 0}]}
+    assert data["journalEvents"] == [%{"seq" => 0, "type" => "run_started"}]
     refute Map.has_key?(data, "events")
 
     [_health_request, inspect_request] = receive_requests(2)

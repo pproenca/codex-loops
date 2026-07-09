@@ -8,6 +8,7 @@ defmodule Workflow.MCPProjectionEnvelopeTest do
     "agents",
     "eventCount",
     "failure",
+    "journalEvents",
     "judgments",
     "logs",
     "phase",
@@ -23,7 +24,7 @@ defmodule Workflow.MCPProjectionEnvelopeTest do
     "runId"
   ]
 
-  test "conform drops scheduler-only fields from public MCP status and inspect data" do
+  test "conform drops scheduler-only fields while keeping inspect journal summaries" do
     envelope = %{
       "api_version" => "scheduler.v1",
       "data" => %{
@@ -43,12 +44,13 @@ defmodule Workflow.MCPProjectionEnvelopeTest do
         "judgments" => [],
         "refines" => [],
         "toolActivity" => [],
+        "journalEvents" => [%{"seq" => 0, "type" => "run_started"}],
         "rawRefs" => %{"journal" => [%{"runId" => "run-public", "seq" => 0}]},
         "workflowName" => "demo",
         "lifecycleAction" => %{"action" => "none"},
         "uiPath" => "/runs/run-public",
         "uiUrl" => "/runs/run-public",
-        "events" => [%{"seq" => 0, "type" => "run_started"}]
+        "events" => [%{"seq" => 0, "type" => "run_started", "rawCodexJsonl" => "{}"}]
       }
     }
 
@@ -59,5 +61,6 @@ defmodule Workflow.MCPProjectionEnvelopeTest do
     refute Map.has_key?(data, "uiPath")
     refute Map.has_key?(data, "uiUrl")
     refute Map.has_key?(data, "events")
+    assert data["journalEvents"] == [%{"seq" => 0, "type" => "run_started"}]
   end
 end

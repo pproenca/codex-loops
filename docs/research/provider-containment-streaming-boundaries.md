@@ -52,7 +52,7 @@ Realtime Codex streaming means "the OS process sends stdout messages while it is
 | JSONL decoding | `Workflow.Provider.Codex` | JSON is Codex protocol, not containment. Decode each line as it arrives. |
 | Codex event semantics | `Workflow.Provider.Codex` | Thread lifecycle, tool calls, reasoning, final assistant message, usage, and failure events belong here. |
 | Realtime normalized activity | Provider produces, realtime bus publishes | Provider maps raw Codex events to Codex Loops activity entries. The bus publishes before durable persistence. |
-| Durable journal append | Journal subscriber, not containment | The journal can persist activity out of band. It should not be in the port-draining critical path. |
+| Durable activity append | Activity persistence subscriber, not containment | `Workflow.Run.ActivityPersistenceSubscriber` can persist activity out of band through `Workflow.Journal`. It should not be in the port-draining critical path. |
 | Final provider result | `Workflow.Provider.Codex` | Fold the same JSONL event stream into result, usage, activity, or provider failure. |
 | Schema validation and retry | `Workflow.Run.Writer` | The CLI constrains shape with `--output-schema`, but local fail-closed validation remains the writer's gate. |
 
@@ -64,7 +64,10 @@ Realtime Codex streaming means "the OS process sends stdout messages while it is
 
 `Workflow.Run.Writer` currently passes an `activity_sink` into every provider call. The sink records activity in an ETS table and emits `agent_activity` via `Workflow.Run.Stream`. That is the right direction for decoupling provider progress from final settlement, but it is still invoked synchronously by the provider callback. The callback must stay lightweight, and ticket #85 should decide whether the writer should keep owning this sink or whether a dedicated subscriber process owns journal persistence.
 
-`Workflow.Journal` currently subscribes to `Workflow.Run.Stream` and persists `agent_activity` out of band. That matches the user-level goal that the journal be a subscriber, not the critical path. The architecture still needs a clearer event vocabulary and subscription contract before the prototype is treated as final.
+`Workflow.Run.ActivityPersistenceSubscriber` subscribes to `Workflow.Run.Stream`
+and persists `agent_activity` out of band through `Workflow.Journal`. That keeps
+the PubSub subscription out of containment and out of the writer's settlement
+critical path while preserving SQLite serialization inside the journal owner.
 
 ## Backpressure And Failure Rules
 

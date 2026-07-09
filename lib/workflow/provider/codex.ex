@@ -26,14 +26,15 @@ defmodule Workflow.Provider.Codex do
 
   A containment timeout is an expected provider failure: the backend missed the
   caller's configured deadline, but the run writer can journal that as
-  `agent_failed` with a stable `:timeout` kind. Other containment failures
-  (non-zero exit) and a `turn.failed`/`error` event are backend faults and still
-  raise, so no phantom result is ever journaled.
+  `agent_failed` with a stable `:timeout` kind. Codex protocol failures such as
+  `turn.failed`, stream-level `error`, malformed JSONL, or a missing final
+  assistant message become `:backend` provider failures, so no phantom result is
+  ever journaled.
   """
   @behaviour Workflow.Provider
 
   alias Workflow.Containment
-  alias Workflow.Provider.Usage
+  alias Workflow.Provider.Codex.StreamAccumulator
 
   @exec_args [
     "exec",
@@ -49,14 +50,16 @@ defmodule Workflow.Provider.Codex do
   def run_agent(prompt, schema, _key, opts) do
     case command(opts, schema) do
       {:ok, {command, schema_file}} ->
+        accumulator = new_accumulator(schema, Keyword.get(opts, :activity_sink))
+
         try do
           case Containment.run_turn(prompt,
                  command: command,
                  timeout: Keyword.get(opts, :timeout, :infinity),
-                 on_line: line_observer(opts)
+                 on_line: line_observer(accumulator)
                ) do
-            {:ok, stdout} ->
-              parse_turn(stdout, schema)
+            {:ok, _stdout} ->
+              finish_accumulator(accumulator)
 
             {:error, :timeout} ->
               {:error, {:provider_failure, :timeout, @timeout_detail, nil, []}}
@@ -64,10 +67,20 @@ defmodule Workflow.Provider.Codex do
             {:error, {:backend_exit, status, output}} when status in [126, 127] ->
               {:error, unavailable_failure(backend_start_message(status, output))}
 
+            {:error, {:backend_exit, _status, _output} = reason} ->
+              case finish_accumulator(accumulator) do
+                {:error, {:provider_failure, :backend, _detail, _usage, _activity} = failure} ->
+                  {:error, failure}
+
+                _result ->
+                  raise "codex turn failed: #{inspect(reason)}"
+              end
+
             {:error, reason} ->
               raise "codex turn failed: #{inspect(reason)}"
           end
         after
+          delete_accumulator(accumulator)
           schema_file && File.rm(schema_file)
         end
 
@@ -173,20 +186,26 @@ defmodule Workflow.Provider.Codex do
 
   defp configured_codex_bin, do: System.get_env(@codex_bin_env)
 
-  defp line_observer(opts) do
-    case Keyword.get(opts, :activity_sink) do
-      nil -> nil
-      sink -> &stream_activity(&1, sink)
-    end
+  defp new_accumulator(schema, activity_sink) do
+    table = :ets.new(:codex_stream_accumulator, [:set, :private])
+    :ets.insert(table, {:state, StreamAccumulator.new(schema, activity_sink)})
+    table
   end
 
-  defp stream_activity(line, sink) do
-    with {:ok, event} <- JSON.decode(line) do
-      event
-      |> stream_activity_entries()
-      |> Enum.each(sink)
-    end
+  defp line_observer(accumulator), do: &observe_line(accumulator, &1)
+
+  defp observe_line(accumulator, line) do
+    [{:state, state}] = :ets.lookup(accumulator, :state)
+    :ets.insert(accumulator, {:state, StreamAccumulator.observe_line(state, line)})
+    :ok
   end
+
+  defp finish_accumulator(accumulator) do
+    [{:state, state}] = :ets.lookup(accumulator, :state)
+    StreamAccumulator.finish(state)
+  end
+
+  defp delete_accumulator(accumulator), do: :ets.delete(accumulator)
 
   defp write_schema(schema) do
     path = Path.join(System.tmp_dir!(), "codex_schema_#{System.unique_integer([:positive])}.json")
@@ -212,161 +231,7 @@ defmodule Workflow.Provider.Codex do
   defp strict_schema([]), do: []
   defp strict_schema(value), do: value
 
-  # Fold the `codex exec` JSONL stream into {result, usage, activity}. A
-  # `turn.failed` or a stream-level `error` event is a real backend fault and raises.
-  defp parse_turn(stdout, schema) do
-    events = stdout |> String.split("\n", trim: true) |> Enum.map(&JSON.decode!/1)
-    Enum.each(events, &raise_on_failure/1)
-    {:ok, shape(final_message(events), schema), turn_usage(events), activity(events)}
-  end
-
-  defp raise_on_failure(%{"type" => "turn.failed", "error" => %{"message" => message}}),
-    do: raise("codex turn failed: #{message}")
-
-  defp raise_on_failure(%{"type" => "error", "message" => message}), do: raise("codex turn failed: #{message}")
-
-  defp raise_on_failure(_event), do: :ok
-
-  defp final_message(events) do
-    Enum.reduce(events, "", fn
-      %{"type" => "item.completed", "item" => %{"type" => "agent_message", "text" => text}}, _acc ->
-        text
-
-      _event, acc ->
-        acc
-    end)
-  end
-
-  # Schemaless: the final response is free text. Schema-backed: it is a JSON document
-  # matching the schema, so decode it to the term the writer validates (a text that
-  # fails to decode is returned as-is, and the writer's validation rejects it).
-  defp shape(text, nil), do: text
-
-  defp shape(text, _schema) do
-    case JSON.decode(text) do
-      {:ok, value} -> value
-      {:error, _reason} -> text
-    end
-  end
-
-  defp turn_usage(events) do
-    reported =
-      Enum.reduce(events, %{}, fn
-        %{"type" => "turn.completed", "usage" => usage}, _acc -> usage
-        _event, acc -> acc
-      end)
-
-    input = Map.get(reported, "input_tokens", 0)
-    output = Map.get(reported, "output_tokens", 0)
-    %Usage{input_tokens: input, output_tokens: output, total_tokens: input + output}
-  end
-
-  defp activity(events) do
-    events
-    |> Enum.flat_map(&activity_entry/1)
-    |> Enum.reject(&is_nil/1)
-  end
-
-  defp stream_activity_entries(%{"type" => "thread.started", "thread_id" => thread_id}) do
-    [
-      %{
-        kind: "lifecycle",
-        label: "Thread started",
-        summary: thread_id,
-        status: "running"
-      }
-    ]
-  end
-
-  defp stream_activity_entries(%{"type" => "turn.started"}) do
-    [%{kind: "lifecycle", label: "Turn started", summary: nil, status: "running"}]
-  end
-
-  defp stream_activity_entries(event), do: activity_entry(event)
-
-  defp activity_entry(%{"type" => event_type, "item" => %{"type" => "agent_message"} = item} = event) do
-    case message_text(event, item) do
-      "" ->
-        []
-
-      text ->
-        [%{kind: "output", label: "Assistant", summary: text, status: message_status(event_type)}]
-    end
-  end
-
-  defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "reasoning"} = item}) do
-    [%{kind: "reasoning", label: "Reasoning", summary: item_summary(item), status: "completed"}]
-  end
-
-  defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "tool_call"} = item}) do
-    label = Map.get(item, "name") || Map.get(item, "tool_name") || "Tool"
-    [%{kind: "tool", label: label, summary: item_summary(item), status: "completed"}]
-  end
-
-  defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => type} = item}) do
-    [%{kind: "event", label: labelize(type), summary: item_summary(item), status: "completed"}]
-  end
-
-  defp activity_entry(_event), do: []
-
-  defp message_text(event, item) do
-    [
-      Map.get(event, "delta"),
-      Map.get(event, "text_delta"),
-      Map.get(event, "content_delta"),
-      Map.get(event, "text"),
-      Map.get(item, "delta"),
-      Map.get(item, "text_delta"),
-      Map.get(item, "content_delta"),
-      Map.get(item, "text")
-    ]
-    |> Enum.find_value(&message_text_part/1)
-    |> case do
-      nil -> ""
-      text -> text
-    end
-  end
-
-  defp message_text_part(text) when is_binary(text), do: text
-  defp message_text_part([%{"text" => text} | _]) when is_binary(text), do: text
-  defp message_text_part(_value), do: nil
-
-  defp message_status("item.completed"), do: "completed"
-  defp message_status(_event_type), do: "running"
-
-  defp item_summary(item) do
-    item
-    |> summary_value()
-    |> to_summary()
-    |> truncate(180)
-  end
-
-  defp summary_value(item) do
-    Map.get(item, "text") ||
-      Map.get(item, "summary") ||
-      Map.get(item, "command") ||
-      get_in(item, ["input", "cmd"]) ||
-      Map.get(item, "input") ||
-      Map.get(item, "arguments") ||
-      Map.get(item, "output") ||
-      Map.get(item, "type")
-  end
-
-  defp to_summary(value) when is_binary(value), do: value
-
-  defp to_summary([%{"text" => text} | _]) when is_binary(text), do: text
-
-  defp to_summary(value) when is_map(value), do: JSON.encode!(value)
-
-  defp to_summary(value), do: inspect(value)
-
   defp truncate(text, limit) do
     if String.length(text) <= limit, do: text, else: String.slice(text, 0, limit) <> "..."
-  end
-
-  defp labelize(type) when is_binary(type) do
-    type
-    |> String.replace("_", " ")
-    |> String.capitalize()
   end
 end

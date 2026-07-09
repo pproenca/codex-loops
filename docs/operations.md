@@ -117,6 +117,11 @@ GET  /api/runs/<id>/events
 GET  /runs/<id>
 ```
 
+The API checks are polling contracts: `/api/runs/<id>` is the run projection
+snapshot, and `/api/runs/<id>/events` is a durable journal-summary inspection
+surface. The `/runs/<id>` route is the LiveView surface used for realtime
+progress activity.
+
 Override proof binding and journal isolation when needed:
 
 ```sh
@@ -135,7 +140,9 @@ make proof-live
 
 `make proof-mcp-live` spends one live Codex provider turn through the packaged
 Burrito MCP executable, scheduler, and lifecycle path, then asserts the run
-completed and recorded nonzero token usage in the scheduler projection.
+completed and recorded nonzero token usage in the scheduler projection. It
+proves the polling MCP path for live Codex completion; the realtime viewing
+surface remains the LiveView URL returned by `workflow_open_ui`.
 `make proof-live` aliases the same MCP proof.
 
 ## Manual MCP Smoke
@@ -163,7 +170,13 @@ Only run the live smoke after the mock path is clean:
 ```text
 workflow_start  script_path=.codex/workflows/example.exs run_id=run_example_live provider=codex
 workflow_status run_id=run_example_live
+workflow_open_ui run_id=run_example_live
+workflow_inspect run_id=run_example_live
 ```
+
+Use `workflow_open_ui` to watch live provider activity. `workflow_status` polls
+the latest run projection, and `workflow_inspect` returns durable journal
+summaries plus raw refs; neither MCP tool is a realtime stream.
 
 ## Normal Workflow Run
 
@@ -184,6 +197,7 @@ Run live only after the mock gate is clean:
 ```text
 workflow_start  script_path=.codex/workflows/example.exs run_id=run_example_live provider=codex
 workflow_status run_id=run_example_live
+workflow_open_ui run_id=run_example_live
 ```
 
 ## Status, Inspect, Open UI, Resume
@@ -194,6 +208,12 @@ workflow_inspect run_id=<id>
 workflow_open_ui run_id=<id>
 workflow_resume  run_id=<id> provider=codex
 ```
+
+`workflow_status` is a polling snapshot of the current run projection.
+`workflow_inspect` is a durable inspection view with `journalEvents` summaries
+and ordered `rawRefs`; it does not expose raw Codex JSONL by default.
+`workflow_open_ui` returns the Phoenix LiveView URL, which is where realtime
+progress messages and activity entries are watched.
 
 ## Failure Parsing
 

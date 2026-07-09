@@ -54,6 +54,21 @@ defmodule Workflow.CodexProviderTest do
           end)
 
         File.read!(schema_file)
+      "schema_prompt_contract" ->
+        schema_file =
+          rest
+          |> Enum.chunk_every(2, 1, :discard)
+          |> Enum.find_value(fn
+            ["--output-schema", file] -> file
+            _ -> nil
+          end)
+
+        JSON.encode!(%{"prompt" => prompt, "hasSchemaFile" => is_binary(schema_file)})
+      "large_schema_output" -> JSON.encode!(%{"body" => String.duplicate("x", 500) <> "tail"})
+      "turn_failed" -> "partial assistant output"
+      "turn_failed_exit" -> "partial assistant output"
+      "stream_error" -> "partial assistant output"
+      "stream_error_exit" -> "partial assistant output"
       "always_invalid" -> JSON.encode!(invalid)
       "retry" ->
         counter = Enum.at(rest, 0)
@@ -80,14 +95,28 @@ defmodule Workflow.CodexProviderTest do
         []
     end
 
+  terminal =
+    case mode do
+      mode when mode in ["turn_failed", "turn_failed_exit"] ->
+        [%{"type" => "turn.failed", "error" => %{"message" => "codex backend exploded"}}]
+
+      mode when mode in ["stream_error", "stream_error_exit"] ->
+        [%{"type" => "error", "message" => "codex stream failed"}]
+
+      _ -> [%{"type" => "turn.completed", "usage" => usage}]
+    end
+
   for event <- [
         %{"type" => "thread.started", "thread_id" => "t1"},
         %{"type" => "turn.started"}
       ] ++ activity ++ [
-        %{"type" => "item.completed", "item" => %{"id" => "i1", "type" => "agent_message", "text" => text}},
-        %{"type" => "turn.completed", "usage" => usage}
-      ] do
+        %{"type" => "item.completed", "item" => %{"id" => "i1", "type" => "agent_message", "text" => text}}
+      ] ++ terminal do
     IO.puts(JSON.encode!(event))
+  end
+
+  if mode in ["turn_failed_exit", "stream_error_exit"] do
+    System.halt(1)
   end
   """
 
@@ -141,6 +170,26 @@ defmodule Workflow.CodexProviderTest do
             }
           },
           "required" => ["bugs"]
+        }
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule SemanticSchemaWorkflow do
+    @moduledoc false
+    use Workflow
+
+    workflow "codex_schema_semantics" do
+      agent("Findings must cite a concrete file and line.",
+        schema: %{
+          "type" => "object",
+          "properties" => %{
+            "prompt" => %{"type" => "string"},
+            "hasSchemaFile" => %{"type" => "boolean"}
+          },
+          "required" => ["prompt", "hasSchemaFile"]
         }
       )
 
@@ -235,6 +284,13 @@ defmodule Workflow.CodexProviderTest do
 
     assert Enum.map(committed.payload.activity, &Map.delete(&1, :activity_index)) == [
              %{
+               kind: "lifecycle",
+               label: "Thread started",
+               summary: "t1",
+               status: "running"
+             },
+             %{kind: "lifecycle", label: "Turn started", summary: nil, status: "running"},
+             %{
                kind: "reasoning",
                label: "Reasoning",
                summary: "Read the failing test",
@@ -254,7 +310,51 @@ defmodule Workflow.CodexProviderTest do
              }
            ]
 
-    assert Enum.map(committed.payload.activity, & &1.activity_index) == [2, 3, 4]
+    assert Enum.map(committed.payload.activity, & &1.activity_index) == [0, 1, 2, 3, 4]
+  end
+
+  test "turn.failed prevents successful settlement even after assistant output", ctx do
+    id = run_id()
+    detail = %{"message" => "codex backend exploded"}
+    key = %Workflow.IdempotencyKey{run_id: id, node_path: [0], iteration: 0}
+    {Codex, opts} = codex(ctx, "turn_failed")
+
+    assert {:error, {:provider_failure, :backend, ^detail, nil, activity}} =
+             Codex.run_agent("say hello", nil, key, opts)
+
+    assert Enum.any?(activity, &(&1.kind == "output" and &1.summary == "partial assistant output"))
+
+    assert {:error, {:provider_failure, [0], :backend, ^detail}} =
+             Run.run(EchoWorkflow, run_id: id, provider: {Codex, opts})
+
+    assert settled_types(id) == [:run_started, :agent_failed]
+    refute Enum.any?(Journal.fold(id), &(&1.type == :agent_committed))
+
+    failed = Enum.find(Journal.fold(id), &(&1.type == :agent_failed))
+    assert failed.payload.reason == {:provider_failure, :backend, detail}
+    assert Enum.any?(failed.payload.activity, &(&1.kind == "output" and &1.summary == "partial assistant output"))
+  end
+
+  test "turn.failed still becomes a writer-owned agent failure when codex exits non-zero", ctx do
+    id = run_id()
+    detail = %{"message" => "codex backend exploded"}
+
+    assert {:error, {:provider_failure, [0], :backend, ^detail}} =
+             Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "turn_failed_exit"))
+
+    assert settled_types(id) == [:run_started, :agent_failed]
+    refute Enum.any?(Journal.fold(id), &(&1.type == :run_failed))
+  end
+
+  test "stream-level error prevents successful settlement even after assistant output", ctx do
+    id = run_id()
+    detail = %{"message" => "codex stream failed"}
+
+    assert {:error, {:provider_failure, [0], :backend, ^detail}} =
+             Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "stream_error"))
+
+    assert settled_types(id) == [:run_started, :agent_failed]
+    refute Enum.any?(Journal.fold(id), &(&1.type == :agent_committed))
   end
 
   test "containment timeout is an expected provider failure with stable detail", ctx do
@@ -309,6 +409,51 @@ defmodule Workflow.CodexProviderTest do
     committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
     assert committed.payload.result == %{"bugs" => [%{"file" => "lib/a.ex", "line" => 3}]}
     assert Status.of(id).state == :completed
+  end
+
+  test "schema-backed turns use --output-schema without prompt schema-shape boilerplate", ctx do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(SemanticSchemaWorkflow,
+               run_id: id,
+               provider: codex(ctx, "schema_prompt_contract")
+             )
+
+    committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
+
+    assert committed.payload.result == %{
+             "prompt" => "Findings must cite a concrete file and line.",
+             "hasSchemaFile" => true
+           }
+
+    refute committed.payload.prompt =~ "Return only JSON"
+    refute committed.payload.prompt =~ "matching the schema"
+  end
+
+  test "schema-backed assistant-output activity is a bounded preview while result stays complete", ctx do
+    schema = %{
+      "type" => "object",
+      "properties" => %{"body" => %{"type" => "string"}},
+      "required" => ["body"]
+    }
+
+    key = %Workflow.IdempotencyKey{run_id: "large_schema", node_path: [0], iteration: 0}
+
+    assert {:ok, %{"body" => body}, %Provider.Usage{}, activity} =
+             Codex.run_agent(
+               "write a long schema output",
+               schema,
+               key,
+               elem(codex(ctx, "large_schema_output"), 1)
+             )
+
+    assert String.length(body) == 504
+    assert String.ends_with?(body, "tail")
+
+    output = Enum.find(activity, &(&1.kind == "output"))
+    assert String.length(output.summary) <= 183
+    refute String.ends_with?(output.summary, "tail")
   end
 
   test "a real turn that never validates fails closed after exhausting retries", ctx do

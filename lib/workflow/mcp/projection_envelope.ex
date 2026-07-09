@@ -18,6 +18,7 @@ defmodule Workflow.MCP.ProjectionEnvelope do
     "judgments",
     "refines",
     "toolActivity",
+    "journalEvents",
     "rawRefs"
   ]
 

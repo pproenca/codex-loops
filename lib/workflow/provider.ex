@@ -30,7 +30,7 @@ defmodule Workflow.Provider do
   alias Workflow.Provider.Usage
 
   @type result :: term()
-  @type failure_kind :: :quota_exceeded | :model_limit | :timeout | :unavailable
+  @type failure_kind :: :quota_exceeded | :model_limit | :timeout | :unavailable | :backend
   @type failure_detail ::
           nil
           | boolean()

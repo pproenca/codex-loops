@@ -50,6 +50,21 @@ defmodule Workflow.Status do
     |> then(&apply_known_event(event, &1))
   end
 
+  @doc """
+  Apply a transient provider progress message to a run projection.
+
+  Progress messages are not journal events until a subscriber persists them, so
+  this path deliberately avoids raw refs, tool-activity refs, refine refs, and the
+  durable event count. It only lets a connected LiveView show the in-flight
+  activity entry immediately.
+  """
+  @spec apply_progress(Event.t(), t()) :: t()
+  def apply_progress(%Event{type: :agent_activity} = event, %__MODULE__{} = status) do
+    apply_agent_activity(event, status, :progress)
+  end
+
+  def apply_progress(%Event{} = _event, %__MODULE__{} = status), do: status
+
   defp apply_known_event(%Event{type: :run_started, payload: p}, s) do
     tick(%{s | state: :running, tree_name: p.tree_name, tree_version: p.tree_version})
   end
@@ -76,6 +91,7 @@ defmodule Workflow.Status do
       prompt: p.prompt,
       result: p.result,
       usage: p.usage,
+      attempt: attempt,
       idempotency_key: p.idempotency_key,
       status: :completed,
       activity: merge_activity(existing && existing.activity, activity),
@@ -91,31 +107,10 @@ defmodule Workflow.Status do
     })
   end
 
-  defp apply_known_event(%Event{type: :agent_activity, payload: p}, s) do
-    s = ensure_phase(s)
-    existing = find_agent_attempt(s.agents, p.address, p.iteration, p.attempt)
-    entry = maybe_put_activity_index(p.entry, Map.get(p, :activity_index))
-
-    agent = %{
-      address: p.address,
-      iteration: p.iteration,
-      attempt: p.attempt,
-      label: Map.get(p, :label) || (existing && Map.get(existing, :label)),
-      prompt: p.prompt,
-      result: existing && Map.get(existing, :result),
-      usage: (existing && Map.get(existing, :usage)) || %Usage{},
-      idempotency_key: existing && Map.get(existing, :idempotency_key),
-      status: (existing && Map.get(existing, :status)) || :running,
-      activity: merge_activity(existing && existing.activity, [entry]),
-      phase_id: (existing && existing.phase_id) || s.current_phase_id,
-      phase_name: (existing && existing.phase_name) || phase_name(s)
-    }
-
-    tick(%{
-      s
-      | agents: upsert_in_flight_agent(s.agents, agent),
-        phases: upsert_in_flight_agent_in_phase(s.phases, agent.phase_id, agent)
-    })
+  defp apply_known_event(%Event{type: :agent_activity} = event, s) do
+    event
+    |> apply_agent_activity(s, :journal)
+    |> tick()
   end
 
   defp apply_known_event(%Event{type: :agent_attempt_rejected, payload: p}, s) do
@@ -169,6 +164,7 @@ defmodule Workflow.Status do
           prompt: (existing && Map.get(existing, :prompt)) || (rejection && Map.get(rejection, :prompt)),
           result: existing && Map.get(existing, :result),
           usage: failed_usage || (existing && Map.get(existing, :usage)) || %Usage{},
+          attempt: p.attempts - 1,
           idempotency_key: existing && Map.get(existing, :idempotency_key),
           status: :failed,
           activity: merge_activity((existing && existing.activity) || (rejection && rejection.activity), failed_activity),
@@ -309,6 +305,36 @@ defmodule Workflow.Status do
 
   defp apply_known_event(%Event{type: :run_failed, payload: p}, s) do
     tick(%{s | state: :failed, failure: %{address: nil, iteration: 0, attempts: 0, reason: {:run_crashed, p.reason}}})
+  end
+
+  defp apply_agent_activity(%Event{payload: p}, s, mode) when mode in [:journal, :progress] do
+    s = ensure_phase(s)
+    existing = find_agent_attempt(s.agents, p.address, p.iteration, p.attempt)
+    rejection = find_rejected_attempt(s.rejected, p.address, p.iteration, p.attempt)
+    entry = maybe_put_activity_index(p.entry, Map.get(p, :activity_index))
+
+    cond do
+      existing ->
+        agent = merge_agent_activity(existing, p, entry, s)
+
+        %{
+          s
+          | agents: upsert_in_flight_agent(s.agents, agent),
+            phases: upsert_in_flight_agent_in_phase(s.phases, agent.phase_id, agent)
+        }
+
+      rejection ->
+        %{s | rejected: upsert_rejection(s.rejected, merge_rejection_activity(rejection, entry))}
+
+      true ->
+        agent = new_activity_agent(p, entry, s)
+
+        %{
+          s
+          | agents: upsert_in_flight_agent(s.agents, agent),
+            phases: upsert_in_flight_agent_in_phase(s.phases, agent.phase_id, agent)
+        }
+    end
   end
 
   defp append_raw_ref(%__MODULE__{} = status, %Event{} = event) do
@@ -620,6 +646,55 @@ defmodule Workflow.Status do
     Enum.find(agents, &agent_attempt_match?(&1, address, iteration, attempt))
   end
 
+  defp find_rejected_attempt(rejections, address, iteration, attempt) do
+    Enum.find(rejections, &rejected_agent_match?(&1, address, iteration, attempt))
+  end
+
+  defp new_activity_agent(payload, entry, %__MODULE__{} = status) do
+    %{
+      address: payload.address,
+      iteration: payload.iteration,
+      attempt: payload.attempt,
+      label: Map.get(payload, :label),
+      prompt: payload.prompt,
+      result: nil,
+      usage: %Usage{},
+      idempotency_key: nil,
+      status: :running,
+      activity: merge_activity([], [entry]),
+      phase_id: status.current_phase_id,
+      phase_name: phase_name(status)
+    }
+  end
+
+  defp merge_agent_activity(agent, payload, entry, %__MODULE__{} = status) do
+    agent
+    |> Map.put(:attempt, Map.get(agent, :attempt) || payload.attempt)
+    |> Map.put(:label, Map.get(agent, :label) || Map.get(payload, :label))
+    |> Map.put(:prompt, Map.get(agent, :prompt) || payload.prompt)
+    |> Map.put(:usage, Map.get(agent, :usage) || %Usage{})
+    |> Map.put(:status, Map.get(agent, :status) || :running)
+    |> Map.put(:activity, merge_activity(Map.get(agent, :activity, []), [entry]))
+    |> Map.put(:phase_id, Map.get(agent, :phase_id) || status.current_phase_id)
+    |> Map.put(:phase_name, Map.get(agent, :phase_name) || phase_name(status))
+  end
+
+  defp merge_rejection_activity(rejection, entry) do
+    Map.put(rejection, :activity, merge_activity(Map.get(rejection, :activity, []), [entry]))
+  end
+
+  defp upsert_rejection(rejections, rejection) do
+    Enum.map(rejections, fn
+      existing
+      when existing.address == rejection.address and existing.iteration == rejection.iteration and
+             existing.attempt == rejection.attempt ->
+        rejection
+
+      existing ->
+        existing
+    end)
+  end
+
   defp upsert_in_flight_agent(agents, agent) do
     if Enum.any?(agents, &agent_attempt_match?(&1, agent.address, agent.iteration, agent.attempt)) do
       Enum.map(agents, fn
@@ -684,10 +759,12 @@ defmodule Workflow.Status do
   defp agent_match?(agent, address, iteration), do: agent.address == address and agent.iteration == iteration
 
   defp agent_attempt_match?(agent, address, iteration, attempt),
-    do: agent_match?(agent, address, iteration) and Map.get(agent, :attempt) == attempt
+    do: agent_match?(agent, address, iteration) and agent_attempt(agent) == attempt
 
   defp rejected_agent_match?(agent, address, iteration, attempt),
     do: agent_match?(agent, address, iteration) and Map.get(agent, :attempt) in [nil, attempt]
+
+  defp agent_attempt(agent), do: Map.get(agent, :attempt) || idempotency_attempt(Map.get(agent, :idempotency_key))
 
   defp idempotency_attempt(%{attempt: attempt}), do: attempt
   defp idempotency_attempt(_key), do: nil

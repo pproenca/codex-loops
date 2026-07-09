@@ -4,8 +4,8 @@
 
 The Elixir runtime is a supervised, journal-backed workflow runner. Workflow
 scripts compile into inert trees. A per-run writer process walks the tree,
-invokes the selected provider, commits ordered events to SQLite, and exits.
-Read surfaces are projections over the journal.
+invokes the selected provider, commits ordered journal events to SQLite, and
+exits. Read surfaces are run projections folded from the journal.
 
 ```text
 Codex MCP tool -> scheduler HTTP API -> supervised run writer
@@ -18,6 +18,35 @@ health-checking it, translating MCP tool calls into scheduler HTTP requests, and
 returning MCP-friendly envelopes. Elixir owns runtime supervision: the OTP
 application, `DynamicSupervisor`, `Registry`, run writers, journal owner,
 Phoenix PubSub, and Phoenix LiveView.
+
+## Realtime And Durable Surfaces
+
+LiveView is the realtime surface. The Codex provider normalizes Codex JSONL
+events into activity entries, and the writer publishes those entries as
+progress messages on `Workflow.Run.Stream` while the provider turn is still
+running. A connected LiveView may render those progress messages immediately,
+before the agent settles.
+
+Progress messages are not authoritative run facts until persisted. A supervised
+`Workflow.Run.ActivityPersistenceSubscriber` listens to the progress-message bus
+and appends `agent_activity` journal events for reconnect and inspection. Agent
+settlement stays writer-owned: `agent_committed`, `agent_attempt_rejected`, and
+`agent_failed` are the events that drive replay, resume, retry, ledger, and
+terminal state.
+
+The scheduler API and MCP tools are polling snapshot or inspection surfaces:
+
+- `GET /api/runs/:id` and `workflow_status` return the current run projection.
+- `GET /api/runs/:id/events` returns safe journal event summaries under
+  `journalEvents` and legacy `events`.
+- `workflow_inspect` returns the run projection, ordered `rawRefs`, and
+  `journalEvents`; it does not expose raw Codex JSONL by default.
+- `workflow_open_ui` returns the LiveView URL and is the MCP path for realtime
+  watching.
+
+Raw refs are pointers to durable journal events. `eventCount` counts persisted
+journal events only, not transient progress messages seen by a connected
+LiveView.
 
 ## Packaging
 
@@ -54,16 +83,17 @@ such as a trusted reverse proxy, tunnel, firewall, or private network boundary.
 
 `make proof` is the production readiness proof for this artifact: it starts the
 packaged scheduler, checks `/api/health`, validates a workflow through
-`/api/workflows/validate`, starts a mock run through `/api/runs`, reads status
-and events through `/api/runs/<id>` and `/api/runs/<id>/events`, and verifies
-the `/runs/<id>` LiveView route is reachable.
+`/api/workflows/validate`, starts a mock run through `/api/runs`, reads the
+polling status snapshot and journal summaries through `/api/runs/<id>` and
+`/api/runs/<id>/events`, and verifies the `/runs/<id>` LiveView route is
+reachable.
 
 `make proof-mcp` proves the Codex-facing product path from a copied plugin
 package containing the Burrito MCP executable: MCP starts/discovers the packaged
-scheduler, validates a workflow, starts a mock run, reads status/events,
-resumes, returns the UI URL, and shuts down its owned scheduler.
-`make proof-mcp-live` repeats the MCP path with `provider: "codex"` and asserts
-nonzero token usage from scheduler status.
+scheduler, validates a workflow, starts a mock run, reads polling status and
+inspection summaries, resumes, returns the UI URL, and shuts down its owned
+scheduler. `make proof-mcp-live` repeats the MCP path with `provider: "codex"`
+and asserts nonzero token usage from scheduler status.
 
 ## Journal Model
 
@@ -75,11 +105,13 @@ folded to reconstruct status, summaries, and resume decisions.
 
 - `mock`: offline provider used by `test`.
 - `codex`: live provider that shells out to `codex exec --json
-  --skip-git-repo-check` and folds the JSONL stream into a result plus token
-  usage.
+  --skip-git-repo-check`, folds each Codex event once, emits normalized activity
+  entries for realtime UI, and settles with a result plus token usage.
 
 Schema-backed turns use Codex structured output via `--output-schema`; the
-writer validates results and fails closed after configured retries.
+schema owns output shape, while prompts should carry semantic work
+instructions. The writer still validates results locally and fails closed after
+configured retries.
 
 ## Supervision
 
@@ -88,6 +120,8 @@ The application supervises:
 - `Workflow.Run.Registry`: unique per-run writer lease.
 - `Workflow.PubSub`: post-commit notifications.
 - `Workflow.Journal`: SQLite owner process.
+- `Workflow.Run.ActivityPersistenceSubscriber`: explicit subscriber that makes
+  progress activity durable.
 - `Workflow.Run.Supervisor`: dynamic supervisor for run writers.
 - `Workflow.Web.Endpoint`: optional endpoint, disabled by default unless
   `CODEX_LOOPS_SERVER=1` or `true`.

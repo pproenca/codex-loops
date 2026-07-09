@@ -31,8 +31,8 @@ test -x _build/prod/rel/agent_loops/bin/agent_loops
 
 `make proof` is the production readiness path: it starts the packaged scheduler
 on an isolated local port and journal, checks health, validates a workflow
-through the API, starts a mock run through the API, reads status/events through
-the API, and fetches the run UI.
+through the API, starts a mock run through the API, reads the polling status
+snapshot and journal summaries through the API, and fetches the LiveView run UI.
 
 For the Codex-facing product path:
 
@@ -71,7 +71,12 @@ Run it live only after the mock gate is clean:
 ```text
 workflow_start  script_path=.codex/workflows/audit_workflow.exs run_id=run_audit_live provider=codex
 workflow_status run_id=run_audit_live
+workflow_open_ui run_id=run_audit_live
 ```
+
+`workflow_status` is a polling snapshot. Use `workflow_open_ui` to watch
+realtime progress activity in LiveView; use `workflow_inspect` for durable
+journal summaries and raw refs.
 
 ## Development Commands
 

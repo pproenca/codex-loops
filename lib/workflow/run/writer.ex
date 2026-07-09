@@ -84,7 +84,7 @@ defmodule Workflow.Run.Writer do
   # unnecessary; concurrent branches simply wait on their (mock or real) provider.
   @fanout_timeout :infinity
   @default_refine_reviewer_timeout 30_000
-  @provider_failure_kinds [:quota_exceeded, :model_limit, :timeout, :unavailable]
+  @provider_failure_kinds [:quota_exceeded, :model_limit, :timeout, :unavailable, :backend]
 
   def start_link(opts) do
     run_id = Keyword.fetch!(opts, :run_id)
@@ -1145,7 +1145,7 @@ defmodule Workflow.Run.Writer do
          normalizer
        ) do
     key = key(run_id, agent.address, iteration, attempt)
-    {activity_sink, finalize_activity} = local_activity_tracker()
+    {activity_sink, finalize_activity} = activity_tracker(run_id, agent, iteration, attempt)
 
     case call_provider(provider, agent.prompt, agent.schema, key, activity_sink) do
       {:ok, output, usage, activity} ->
@@ -1256,7 +1256,7 @@ defmodule Workflow.Run.Writer do
          normalizer
        ) do
     key = key(run_id, agent.address, iteration, attempt)
-    {activity_sink, finalize_activity} = local_activity_tracker()
+    {activity_sink, finalize_activity} = activity_tracker(run_id, agent, iteration, attempt)
 
     case call_provider(provider, agent.prompt, agent.schema, key, activity_sink) do
       {:ok, output, usage, activity} ->
@@ -2656,7 +2656,7 @@ defmodule Workflow.Run.Writer do
 
   defp commit_role_attempt(%Agent{} = node, run_id, provider, ctx, iteration, attempt, normalizer) do
     key = key(run_id, node.address, iteration, attempt)
-    {activity_sink, finalize_activity} = local_activity_tracker()
+    {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
 
     case call_provider(provider, node.prompt, node.schema, key, activity_sink) do
       {:ok, output, usage, activity} ->
@@ -2731,7 +2731,7 @@ defmodule Workflow.Run.Writer do
          normalizer
        ) do
     key = key(run_id, node.address, iteration, attempt)
-    {activity_sink, finalize_activity} = local_activity_tracker()
+    {activity_sink, finalize_activity} = activity_tracker(run_id, node, iteration, attempt)
 
     case call_provider(provider, node.prompt, node.schema, key, activity_sink) do
       {:ok, output, usage, activity} ->
@@ -2881,25 +2881,6 @@ defmodule Workflow.Run.Writer do
       :ets.insert(table, {activity_index, entry})
       event = Event.agent_activity(node, iteration, attempt, activity_index, entry)
       RunStream.emit(run_id, event)
-      :ok
-    end
-
-    finalize = fn activity ->
-      streamed = table |> :ets.tab2list() |> Enum.sort_by(fn {index, _entry} -> index end)
-      index_final_activity(List.wrap(activity), streamed)
-    end
-
-    {sink, finalize}
-  end
-
-  defp local_activity_tracker do
-    counter = :counters.new(1, [])
-    table = :ets.new(:workflow_activity, [:ordered_set, :private])
-
-    sink = fn entry ->
-      :counters.add(counter, 1, 1)
-      activity_index = :counters.get(counter, 1) - 1
-      :ets.insert(table, {activity_index, entry})
       :ok
     end
 

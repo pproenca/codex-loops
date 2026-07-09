@@ -40,10 +40,13 @@ The realtime pipeline should remain:
 1. Codex provider normalizes Codex JSONL into activity entries.
 2. Writer/provider shell emits lightweight progress messages through `Workflow.Run.Stream`.
 3. Connected LiveView processes receive progress messages and update immediately.
-4. `Workflow.Journal` subscribes to the same stream and persists `agent_activity` out of band.
+4. `Workflow.Run.ActivityPersistenceSubscriber` subscribes to the same stream and persists `agent_activity` out of band through `Workflow.Journal`.
 5. Durable API, MCP, resume, accounting, and reconnect behavior read from `Workflow.Status` and scheduler projections folded from the journal.
 
-This matches the current direction in the prototype: `Run.Stream` is already a realtime run bus, `Journal` already subscribes to `agent_activity`, and `RunLive` already treats `{:journal_committed, ...}` as a refresh signal while applying `{:run_stream_event, ...}` directly for immediate UI feedback.
+This matches the implemented direction: `Run.Stream` is the realtime
+progress-message bus, `ActivityPersistenceSubscriber` persists `agent_activity`,
+and `RunLive` treats `{:journal_committed, ...}` as a refresh signal while
+applying `{:run_stream_event, ...}` directly for immediate UI feedback.
 
 ## Surface map
 
@@ -51,11 +54,11 @@ This matches the current direction in the prototype: `Run.Stream` is already a r
 | --- | --- | --- | --- |
 | Phoenix LiveView `/runs/:id` | Yes | Yes | Connected users should see normalized activity entries before the agent settles. Initial mount, reconnect, and refresh must rebuild from the scheduler snapshot and journal fold. |
 | `Workflow.Run.Stream` | Yes | No | Internal progress-message bus. It carries normalized activity entries, not the public journal contract. |
-| `Workflow.Journal` stream subscription | No user-facing realtime | Yes | Subscriber that persists `agent_activity` idempotently. It must not be in the port-draining critical path. |
+| `Workflow.Run.ActivityPersistenceSubscriber` | No user-facing realtime | Yes | Explicit subscriber that persists `agent_activity` idempotently through `Workflow.Journal`. It must not be in the port-draining critical path. |
 | `GET /api/runs/:id` | No | Yes | Snapshot projection from `Workflow.Status` and `RunProjection`. Polling can observe persisted activity, but the endpoint is not a live stream. |
-| `GET /api/runs/:id/events` | No | Yes | Ordered journal event summaries only. The `"events"` field means journal event projections, not raw Codex events or PubSub progress messages. |
+| `GET /api/runs/:id/events` | No | Yes | Ordered journal event summaries only. The additive `"journalEvents"` field, and legacy `"events"` field, mean journal event projections, not raw Codex events or PubSub progress messages. |
 | MCP `workflow_status` | No | Yes | Concise snapshot over `GET /api/runs/:id`. It should not promise streaming. Polling can observe journal-persisted activity. |
-| MCP `workflow_inspect` | No | Yes | Detailed inspection over `GET /api/runs/:id/events`, but the current MCP envelope strips `"events"` and returns the public projection plus ordered `rawRefs`. Either keep that contract intentionally or add a separately named public journal-summary field. |
+| MCP `workflow_inspect` | No | Yes | Detailed inspection over `GET /api/runs/:id/events`; the MCP envelope strips legacy `"events"` and returns the public projection plus `journalEvents` and ordered `rawRefs`. |
 | MCP `workflow_open_ui` | Indirectly | Yes | Opens the LiveView URL. The UI is the realtime experience; the MCP tool itself remains a URL-returning snapshot command. |
 | `Workflow.Status` | No | Yes | Pure fold. It may fold persisted `agent_activity`, but it must not depend on transient stream delivery. |
 | `RunProjection` | No | Yes | Stable read model shared by API, MCP, and LiveView snapshots. It should expose activity entries as activity, not as Codex events. |
@@ -90,22 +93,19 @@ LiveView streams are optional for the current compact UI. The page renders a bou
 `GET /api/runs/:id/events` should remain the durable journal inspection endpoint:
 
 - It returns `RunEventsProjection.to_map/1`.
-- Its `"events"` list contains `%{seq, type, address?}` summaries.
+- Its `"journalEvents"` list contains `%{seq, type, address?}` summaries.
+- Its legacy `"events"` list remains for compatibility and has the same safe
+  summaries.
 - If `agent_activity` is persisted, it may appear as a journal event type in this list.
 - It should not become a server-sent stream or raw-payload dump.
 
-If the public API wants to reduce ambiguity later, add a new additive field such as `"journalEvents"` and keep `"events"` for compatibility until a versioned break. Do not reuse `"events"` to mean progress messages.
+Do not reuse `"events"` to mean progress messages.
 
 ## MCP impact
 
 `workflow_status` is already a thin call to `GET /api/runs/:id`, then `ProjectionEnvelope.conform/1`. Keep it a polling snapshot. It should be documented as "current scheduler projection", not "streaming status".
 
-`workflow_inspect` calls `GET /api/runs/:id/events`, but `ProjectionEnvelope.conform/1` currently drops `"events"` from MCP structured content and keeps the public projection fields, including `rawRefs`. That is internally consistent with the module doc promising ordered `rawRefs`, but it is surprising because the tool name and endpoint imply event inspection.
-
-Choose one of these before implementation:
-
-1. Keep MCP inspect as "projection plus ordered rawRefs" and update docs/copy so users do not expect an `"events"` list.
-2. Add an explicitly named MCP field, for example `"journalEvents"`, copied from scheduler `"events"`, and pin it in `ProjectionEnvelope`.
+`workflow_inspect` calls `GET /api/runs/:id/events`. `ProjectionEnvelope.conform/1` drops the ambiguous legacy `"events"` field and keeps the public projection fields, ordered `rawRefs`, and additive `"journalEvents"` summaries.
 
 Do not expose raw Codex JSONL through `workflow_inspect` by default. If a raw provider diagnostic is needed, make it a separate opt-in diagnostic surface with redaction rules.
 
@@ -132,7 +132,7 @@ Do not expose raw Codex JSONL through `workflow_inspect` by default. If a raw pr
 - API: assert `/api/runs/:id` can expose a running agent with folded `agent_activity`, and that `eventCount` equals `length(Journal.fold(id))`.
 - API: assert `/api/runs/:id/events` includes only safe journal summaries, including `agent_activity` if persisted, with no raw Codex JSONL payload.
 - MCP: assert `workflow_status` remains a snapshot and does not include scheduler-only fields or raw events.
-- MCP: decide and pin `workflow_inspect`: either no `"events"` field by design, or an additive `"journalEvents"` field with summaries.
+- MCP: pin `workflow_inspect` with no legacy `"events"` field and with additive `"journalEvents"` summaries.
 - Projection: keep `Status.fold/2` tests for idempotent activity replay by `{address, iteration, attempt, activity_index}`.
 - Docs/proof: update operations/runtime docs so "events" means durable journal summaries, while "open UI" is the realtime experience.
 
@@ -140,11 +140,11 @@ Do not expose raw Codex JSONL through `workflow_inspect` by default. If a raw pr
 
 Phoenix docs frame LiveView as the web interface into an Elixir application, not the application boundary itself. Keep `Workflow.Scheduler` as the context boundary for web/API reads. Controllers, LiveView, and MCP should call the scheduler context and should not read `Workflow.Journal` or SQLite directly.
 
-The only exception is the internal subscriber path where `Workflow.Journal` listens to `Workflow.Run.Stream` and persists activity. That is runtime infrastructure, not a web/API read path.
+The only exception is the internal subscriber path where `Workflow.Run.ActivityPersistenceSubscriber` listens to `Workflow.Run.Stream` and persists activity through `Workflow.Journal`. That is runtime infrastructure, not a web/API read path.
 
 ## Cleared fog
 
 - The realtime UX belongs in LiveView, opened through `workflow_open_ui`.
 - The API and MCP tools remain durable snapshot/polling contracts.
-- `workflow_inspect` needs an explicit product decision: keep projection-plus-rawRefs, or add public journal summaries under a non-ambiguous name.
+- `workflow_inspect` exposes public journal summaries under the non-ambiguous `journalEvents` name.
 - LiveView streams are not required merely because Codex streams. They become the right implementation tool only for an unbounded or large UI collection.

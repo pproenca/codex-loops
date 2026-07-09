@@ -154,13 +154,24 @@ defmodule Workflow.Catalog.ShipFeature do
         plan does not yet cover — boundary values, concurrency interleavings, resume
         and crash points, malformed input.
         </task>
-        <structured_output_contract>
-        Return a JSON array of edge cases, each an object with a stable `id`, the
-        scenario, and the observable behavior it should exhibit. Return an empty
-        array when you find nothing new.
-        </structured_output_contract>
+        <edge_case_guidance>
+        Each edge case should have a stable id, a concrete scenario, and the
+        observable behavior it should exhibit. Produce no entries when you find
+        nothing new.
+        </edge_case_guidance>
         """,
-        schema: %{"type" => "array"}
+        schema: %{
+          "type" => "array",
+          "items" => %{
+            "type" => "object",
+            "required" => ["id", "scenario", "observable_behavior"],
+            "properties" => %{
+              "id" => %{"type" => "string"},
+              "scenario" => %{"type" => "string"},
+              "observable_behavior" => %{"type" => "string"}
+            }
+          }
+        }
       )
 
       collect(into: :edge_cases)

@@ -413,7 +413,8 @@ defmodule Workflow.Web.SchedulerAPITest do
 
   defp wait_for_api_events(id, attempts \\ 50)
 
-  defp wait_for_api_events(id, 0), do: flunk("expected GET /api/runs/#{id}/events to return completed run events")
+  defp wait_for_api_events(id, attempts) when attempts <= 0,
+    do: flunk("expected GET /api/runs/#{id}/events to return completed run events")
 
   defp wait_for_api_events(id, attempts) do
     conn = get(json_conn(), "/api/runs/#{id}/events")
@@ -422,25 +423,28 @@ defmodule Workflow.Web.SchedulerAPITest do
       %{
         "data" => %{
           "runId" => ^id,
-          "events" => [
-            _run_started,
-            _phase_entered,
-            _log_emitted,
-            _agent_committed,
-            %{"type" => "run_completed"}
-          ]
+          "events" => events
         }
       } = response ->
-        response
+        if Enum.any?(events, &match?(%{"type" => "run_completed"}, &1)) do
+          response
+        else
+          retry_api_events(id, attempts)
+        end
 
       _other ->
-        Process.sleep(10)
-        wait_for_api_events(id, attempts - 1)
+        retry_api_events(id, attempts)
     end
   rescue
     ExUnit.AssertionError ->
-      Process.sleep(10)
-      wait_for_api_events(id, attempts - 1)
+      retry_api_events(id, attempts)
+  end
+
+  defp retry_api_events(id, attempts) when attempts <= 1, do: wait_for_api_events(id, 0)
+
+  defp retry_api_events(id, attempts) do
+    Process.sleep(10)
+    wait_for_api_events(id, attempts - 1)
   end
 
   test "GET /api/health returns a versioned ready response" do
@@ -503,6 +507,20 @@ defmodule Workflow.Web.SchedulerAPITest do
                },
                "result" => "ok"
              } = wait_for_api_projection(id)
+
+      refute Map.has_key?(wait_for_api_projection(id), "events")
+      refute Map.has_key?(wait_for_api_projection(id), "journalEvents")
+
+      assert %{
+               "data" => %{
+                 "journalEvents" => journal_events,
+                 "events" => events
+               }
+             } = wait_for_api_events(id)
+
+      assert journal_events == events
+      assert Enum.any?(journal_events, &(&1["type"] == "agent_activity" and &1["address"] == [2]))
+      refute Jason.encode!(journal_events) =~ "LIVE-MCP-PROOF-OK"
     end)
   end
 

@@ -295,6 +295,68 @@ defmodule Workflow.RefineRunTest do
     end
   end
 
+  defmodule SequentialReviewerConverges do
+    @moduledoc false
+    use Workflow
+
+    workflow "sequential-reviewer-converges" do
+      refine(agent("Draft."),
+        reviewers: [
+          reviewer(:spec, "Check the spec."),
+          reviewer(:runtime, "Check the runtime.")
+        ],
+        revise_with: agent("Fix."),
+        until: :unanimous,
+        max_rounds: 1,
+        max_concurrency: 1
+      )
+
+      return(:ok)
+    end
+  end
+
+  defmodule BlockingReviewerActivityProvider do
+    @moduledoc false
+    @behaviour Workflow.Provider
+
+    @impl true
+    def run_agent(prompt, _schema, key, opts) do
+      sink = Keyword.fetch!(opts, :sink)
+      send(sink, {:agent_called, prompt, key})
+
+      output =
+        case key.node_path do
+          [0, 0] ->
+            %{"artifact" => "draft-v1"}
+
+          [0, 1, 0] ->
+            activity_sink = Keyword.fetch!(opts, :activity_sink)
+
+            activity_sink.(%{
+              kind: "reasoning",
+              label: "Reasoning",
+              summary: "reviewing draft-v1",
+              status: "running"
+            })
+
+            send(sink, {:reviewer_waiting, self(), key})
+
+            receive do
+              :proceed -> :ok
+            after
+              5_000 -> raise "reviewer was not released"
+            end
+
+            %{"approved" => true, "findings" => []}
+
+          [0, 1, 1] ->
+            %{"approved" => true, "findings" => []}
+        end
+
+      {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+    end
+  end
+
   defmodule ChangedInlineConverges do
     @moduledoc false
     use Workflow
@@ -617,6 +679,21 @@ defmodule Workflow.RefineRunTest do
       0 -> :ok
     end
   end
+
+  defp wait_for_journal_event(run_id, predicate, tries \\ 100)
+
+  defp wait_for_journal_event(run_id, predicate, tries) when tries > 0 do
+    case Enum.find(events(run_id), predicate) do
+      nil ->
+        Process.sleep(10)
+        wait_for_journal_event(run_id, predicate, tries - 1)
+
+      event ->
+        event
+    end
+  end
+
+  defp wait_for_journal_event(run_id, _predicate, 0), do: flunk("expected matching journal event for #{run_id}")
 
   defp stable_refine_started_event(node) do
     event = Workflow.Event.refine_started(node)
@@ -1277,7 +1354,7 @@ defmodule Workflow.RefineRunTest do
     assert Status.of(id).state == :completed
   end
 
-  test "refine reviewer activity is committed only through ordered final role events" do
+  test "refine reviewer activity is streamed and also included in ordered final role events" do
     id = run_id()
 
     assert {:ok, ^id} =
@@ -1294,7 +1371,18 @@ defmodule Workflow.RefineRunTest do
                   sink: self()}
              )
 
-    refute :agent_activity in types(id)
+    streamed =
+      id
+      |> events()
+      |> Enum.filter(&(&1.type == :agent_activity and match?([0, 1, _], &1.payload.address)))
+      |> Enum.sort_by(& &1.payload.address)
+
+    assert [
+             %{payload: %{address: [0, 1, 0], iteration: 0, attempt: 0, activity_index: 0}},
+             %{payload: %{address: [0, 1, 1], iteration: 0, attempt: 0, activity_index: 0}}
+           ] = streamed
+
+    assert Enum.all?(streamed, &(&1.payload.entry == %{kind: "note", summary: "reviewing"}))
 
     reviewer_events =
       id
@@ -1305,6 +1393,61 @@ defmodule Workflow.RefineRunTest do
              %{payload: %{activity: [%{activity_index: 0, kind: "note", summary: "reviewing"}]}},
              %{payload: %{activity: [%{activity_index: 0, kind: "note", summary: "reviewing"}]}}
            ] = reviewer_events
+  end
+
+  test "refine reviewer activity persists before reviewer settlement" do
+    id = run_id()
+
+    assert {:ok, ^id, writer} =
+             Run.start(SequentialReviewerConverges,
+               run_id: id,
+               provider: {BlockingReviewerActivityProvider, sink: self()}
+             )
+
+    assert_receive {:reviewer_waiting, reviewer, %{node_path: [0, 1, 0], iteration: 0, attempt: 0}}, 1_000
+
+    activity =
+      wait_for_journal_event(id, fn
+        %{type: :agent_activity, payload: %{address: [0, 1, 0]}} -> true
+        _event -> false
+      end)
+
+    assert %{
+             address: [0, 1, 0],
+             iteration: 0,
+             attempt: 0,
+             activity_index: 0,
+             entry: %{
+               kind: "reasoning",
+               label: "Reasoning",
+               summary: "reviewing draft-v1",
+               status: "running"
+             }
+           } = activity.payload
+
+    refute Enum.any?(
+             events(id),
+             &(&1.type == :agent_committed and &1.payload.address == [0, 1, 0])
+           )
+
+    assert Enum.any?(Status.of(id).agents, fn
+             %{address: [0, 1, 0], status: :running, activity: [%{summary: "reviewing draft-v1"}]} ->
+               true
+
+             _agent ->
+               false
+           end)
+
+    ref = Process.monitor(writer)
+    send(reviewer, :proceed)
+    assert_receive {:DOWN, ^ref, :process, ^writer, :normal}, 5_000
+
+    assert Enum.any?(
+             events(id),
+             &(&1.type == :agent_committed and &1.payload.address == [0, 1, 0])
+           )
+
+    assert Status.of(id).state == :completed
   end
 
   test "bound binary artifact input skips inline producer and converges" do

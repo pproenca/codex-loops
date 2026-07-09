@@ -75,7 +75,7 @@ defmodule Workflow.Web.RunLive do
   end
 
   defp assign_stream_event(socket, run_id, %Event{} = event) do
-    status = Status.apply_event(event, socket.assigns.status)
+    status = Status.apply_progress(event, socket.assigns.status)
 
     run_projection = %{
       RunProjection.from_status(status)
@@ -1125,8 +1125,8 @@ defmodule Workflow.Web.RunLive do
               </p>
             </div>
 
-            <section data-testid="latest-event" class="detail-panel">
-              <h3>Latest event</h3>
+            <section data-testid="latest-activity" class="detail-panel">
+              <h3>Latest activity</h3>
               <p class="detail-text">
                 {latest_meaningful_event(@status, agent, rejections, failed_rejections)}
               </p>
@@ -1208,9 +1208,9 @@ defmodule Workflow.Web.RunLive do
         </section>
       </section>
 
-      <section class="events-panel" aria-label="Run events">
+      <section class="events-panel" aria-label="Run log entries">
         <section :if={@status.logs != []} data-testid="recent-events">
-          <h2>Recent events</h2>
+          <h2>Recent log entries</h2>
           <ul>
             <li :for={line <- recent_logs(@status.logs)}>{line}</li>
           </ul>

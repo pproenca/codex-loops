@@ -6,11 +6,139 @@ defmodule Workflow.StatusProjectionTest do
   alias Workflow.Node.Agent
   alias Workflow.Node.GenericFanout
   alias Workflow.Node.Loop
+  alias Workflow.Node.Phase
   alias Workflow.Node.Refine
   alias Workflow.Provider.Usage
   alias Workflow.Scheduler.RunProjection
   alias Workflow.Status
   alias Workflow.Tree
+
+  test "transient progress activity updates agents without durable journal semantics" do
+    run_id = "status_projection_progress"
+    node = %Agent{address: [1], prompt: "stream work", label: "stream:work"}
+
+    status =
+      [
+        Event.run_started(%Tree{name: "progress-status", nodes: [node]}),
+        Event.phase_entered(%Phase{address: [0], name: "stream"})
+      ]
+      |> stamp(run_id)
+      |> Status.fold(run_id)
+
+    event_count = status.event_count
+    raw_refs = status.raw_refs
+
+    entry = %{
+      kind: "reasoning",
+      label: "Reasoning",
+      summary: "thinking while running",
+      status: "running"
+    }
+
+    progress = Event.agent_activity(node, 0, 0, 0, entry)
+    live_status = Status.apply_progress(progress, status)
+
+    assert live_status.event_count == event_count
+    assert live_status.raw_refs == raw_refs
+    assert live_status.tool_activity == []
+    assert [%{status: :running, activity: [activity]}] = live_status.agents
+    assert Map.delete(activity, :activity_index) == entry
+
+    journal_status = Status.apply_event(%{progress | run_id: run_id, seq: 2}, live_status)
+
+    assert journal_status.event_count == event_count + 1
+
+    assert Enum.map(journal_status.raw_refs.journal, & &1.type) == [
+             "run_started",
+             "phase_entered",
+             "agent_activity"
+           ]
+
+    assert [%{activity: [deduped_activity]}] = journal_status.agents
+    assert Map.delete(deduped_activity, :activity_index) == entry
+    assert [%{entry: tool_activity, raw_ref: %{seq: 2, type: "agent_activity"}}] = journal_status.tool_activity
+    assert Map.delete(tool_activity, :activity_index) == entry
+  end
+
+  test "late persisted activity merges into settled and rejected attempt projections" do
+    run_id = "status_projection_late_activity"
+    node = %Agent{address: [1], prompt: "stream work", label: "stream:work"}
+    key = %IdempotencyKey{run_id: run_id, node_path: [1], iteration: 0, attempt: 0}
+    usage = %Usage{input_tokens: 1, output_tokens: 2, total_tokens: 3}
+
+    entry = %{
+      kind: "reasoning",
+      label: "Reasoning",
+      summary: "arrived after settlement",
+      status: "completed"
+    }
+
+    prefix = [
+      Event.run_started(%Tree{name: "late-activity-status", nodes: [node]}),
+      Event.phase_entered(%Phase{address: [0], name: "stream"})
+    ]
+
+    committed =
+      (prefix ++
+         [
+           Event.agent_committed(node, 0, key, "done", usage, []),
+           Event.agent_activity(node, 0, 0, 0, entry)
+         ])
+      |> stamp(run_id)
+      |> Status.fold(run_id)
+
+    assert [
+             %{
+               status: :completed,
+               attempt: 0,
+               result: "done",
+               activity: [committed_activity]
+             }
+           ] = committed.agents
+
+    assert Map.delete(committed_activity, :activity_index) == entry
+
+    rejected =
+      (prefix ++
+         [
+           Event.agent_attempt_rejected(node, 0, 0, %{"bad" => true}, :invalid, usage, []),
+           Event.agent_activity(node, 0, 0, 0, entry)
+         ])
+      |> stamp(run_id)
+      |> Status.fold(run_id)
+
+    assert rejected.agents == []
+
+    assert [
+             %{
+               attempt: 0,
+               reason: :invalid,
+               activity: [rejected_activity]
+             }
+           ] = rejected.rejected
+
+    assert Map.delete(rejected_activity, :activity_index) == entry
+
+    failed =
+      (prefix ++
+         [
+           Event.agent_failed(node, 0, 1, :invalid, usage, []),
+           Event.agent_activity(node, 0, 0, 0, entry)
+         ])
+      |> stamp(run_id)
+      |> Status.fold(run_id)
+
+    assert [
+             %{
+               status: :failed,
+               attempt: 0,
+               activity: [failed_activity]
+             }
+           ] = failed.agents
+
+    assert failed.state == :failed
+    assert Map.delete(failed_activity, :activity_index) == entry
+  end
 
   test "status folds refines, tool activity, and ordered raw journal refs" do
     run_id = "status_projection_refine"

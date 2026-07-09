@@ -25,8 +25,9 @@ Start a new Codex thread after installing so the `codex-loops` skill is loaded.
 ## MCP Surface
 
 The plugin includes a local stdio MCP entrypoint at
-`plugins/codex-loops/mcp/codex-loops-mcp`. It launches the packaged Elixir
-release and runs `Workflow.MCP.Stdio`.
+`plugins/codex-loops/mcp/codex-loops-mcp`. This is a Burrito-built executable
+that runs the Anubis MCP server over stdio. It starts or discovers the packaged
+scheduler release when a tool call needs the scheduler HTTP API.
 It exposes:
 
 - `workflow_validate`: validates a workflow through `POST /api/workflows/validate`
@@ -56,9 +57,11 @@ is unreachable, it discovers a packaged release from:
 2. `plugins/codex-loops/scheduler/bin/agent_loops`
 3. `_build/prod/rel/agent_loops/bin/agent_loops`
 
-`make release` builds the production Mix release and copies it into
-`plugins/codex-loops/scheduler/` so the plugin package can be copied or
-installed without depending on the source repository's `_build` directory.
+`make release` builds the production scheduler Mix release and copies it into
+`plugins/codex-loops/scheduler/`. `make release-mcp` builds the Burrito MCP
+executable and copies it into `plugins/codex-loops/mcp/codex-loops-mcp`, so the
+plugin package can be copied or installed without depending on the source
+repository's `_build` directory.
 
 When it owns the scheduler lifecycle, it starts the release with
 `CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
@@ -108,21 +111,28 @@ Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite` unless
 make setup
 make test
 make release
+make release-mcp
 make proof
 make proof-mcp
 make proof-mcp-live
 make proof-live
 ```
 
-`make proof-mcp` exercises MCP initialize, tools/list, lifecycle startup,
-validation, mock start, status polling, event inspection, resume, typed
-scheduler errors, and open-ui response from a copied plugin package against its
-packaged scheduler release. `make proof-mcp-live` validates through MCP, starts
-or reuses the packaged scheduler through MCP lifecycle handling, starts a live
-`provider: "codex"` run through `workflow_start`, polls `workflow_status`, and
-asserts nonzero token usage in the scheduler projection. It spends one real
-Codex provider turn. `make proof-live` is an alias for `make proof-mcp-live`.
+`make proof-mcp` builds the scheduler release and Burrito MCP executable, then
+exercises MCP initialize, tools/list, lifecycle startup, validation, mock start,
+status polling, event inspection, resume, typed scheduler errors, and open-ui
+response from a copied plugin package against its packaged scheduler release.
+`make proof-mcp-live` validates through MCP, starts or reuses the packaged
+scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
+through `workflow_start`, polls `workflow_status`, and asserts nonzero token
+usage in the scheduler projection. It spends one real Codex provider turn.
+`make proof-live` is an alias for `make proof-mcp-live`.
 
 ## License
 
 MIT. See the repository [LICENSE](../../LICENSE).
+
+Third-party MCP/package notices are recorded in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including the accepted Anubis
+LGPL-3.0 distribution gate for this local plugin and Homebrew-oriented package
+model.

@@ -14,8 +14,12 @@ defmodule Workflow.Run.Writer do
   `handle_continue`) lets the caller establish its `Process.monitor` before any
   effect runs, so a mid-turn crash is observed with its real exit reason rather
   than a `:noproc` race. On `:begin` the writer executes, reports its result to the
-  caller, and stops `:normal`. Crashes propagate to the caller via its monitor —
-  let it crash.
+  caller, and stops `:normal`. Unexpected crashes are still treated as bugs. For
+  non-resumable crashes, the async scheduler path also needs a terminal journal
+  fact: the writer records `run_failed` before reporting the crash, so read models
+  do not leave an ownerless run folded as forever running. Crashes after a rejected
+  attempt stay resumable; those partial attempts are already journaled precisely so
+  a later writer can continue the retry budget without double-spending.
 
   ## Execution context
 
@@ -99,9 +103,52 @@ defmodule Workflow.Run.Writer do
 
   @impl true
   def handle_info(:begin, state) do
-    result = execute(state)
+    result = execute_or_journal_crash(state)
     send(state.parent, {:run_finished, state.run_id, result})
     {:stop, :normal, state}
+  end
+
+  defp execute_or_journal_crash(state) do
+    execute(state)
+  catch
+    kind, reason ->
+      detail = crash_detail(kind, reason, __STACKTRACE__)
+      maybe_journal_run_failed(state.run_id, detail)
+      {:error, {:run_crashed, detail}}
+  end
+
+  defp maybe_journal_run_failed(run_id, detail) do
+    if resumable_retry_crash?(run_id) do
+      :ok
+    else
+      seq = Journal.last_seq(run_id) + 1
+      commit(run_id, seq, Event.run_failed(detail))
+    end
+  end
+
+  defp resumable_retry_crash?(run_id) do
+    events = Journal.fold(run_id)
+
+    events
+    |> Enum.flat_map(fn
+      %Event{type: :agent_attempt_rejected, payload: %{address: address, iteration: iteration}} ->
+        [{address, iteration}]
+
+      _event ->
+        []
+    end)
+    |> Enum.uniq()
+    |> Enum.any?(fn {address, iteration} ->
+      match?({:resume, _next_attempt}, Idempotency.resolve(events, address, iteration))
+    end)
+  end
+
+  defp crash_detail(kind, reason, stacktrace) do
+    %{
+      "kind" => Atom.to_string(kind),
+      "message" => Exception.format_banner(kind, reason),
+      "stacktrace" => Exception.format_stacktrace(stacktrace)
+    }
   end
 
   defp execute(%{run_id: run_id, tree: tree, provider: provider} = state) do
@@ -146,6 +193,9 @@ defmodule Workflow.Run.Writer do
 
   defp failed_run_result(%{address: address, reason: {:provider_failure, kind, detail}}),
     do: {:error, {:provider_failure, address, kind, detail}}
+
+  defp failed_run_result(%{reason: {:run_crashed, detail}}),
+    do: {:error, {:run_crashed, detail}}
 
   defp failed_run_result(failure),
     do: {:error, {:malformed_output, failure.address, failure.reason}}

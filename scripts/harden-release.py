@@ -16,7 +16,7 @@ new = '''if [ -z "${RELEASE_COOKIE+x}" ]; then
   if [ -f "$RELEASE_ROOT/releases/COOKIE" ]; then
     RELEASE_COOKIE="$(cat "$RELEASE_ROOT/releases/COOKIE")"
   else
-    RELEASE_COOKIE="$(dd count=1 bs=16 if=/dev/urandom 2> /dev/null | od -An -tx1 | tr -d ' \n')"
+    RELEASE_COOKIE="$(dd count=1 bs=16 if=/dev/urandom 2> /dev/null | od -An -tx1 | tr -d ' \\n')"
   fi
 fi
 export RELEASE_COOKIE

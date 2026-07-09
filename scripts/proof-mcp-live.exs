@@ -36,6 +36,11 @@ defmodule ProofMCPLive do
     packaged_scheduler = Path.join(installed_plugin_root, "scheduler/bin/agent_loops")
 
     assert!(
+      executable_file?(entrypoint),
+      "copied plugin package should include Burrito MCP executable; run `make release-mcp`"
+    )
+
+    assert!(
       executable_file?(packaged_scheduler),
       "copied plugin package should include scheduler release"
     )
@@ -54,7 +59,7 @@ defmodule ProofMCPLive do
     try do
       File.write!(workflow_path, workflow_source())
 
-      with_mcp_client(entrypoint, repo_root, mcp_env(port, journal_path), fn client ->
+      with_mcp_client(entrypoint, repo_root, mcp_env(port, journal_path, codex_path), fn client ->
         {initialize, client} =
           request!(client, 1, "initialize", %{
             "protocolVersion" => "2024-11-05",
@@ -88,9 +93,9 @@ defmodule ProofMCPLive do
         {inspect, client} = call_tool!(client, 250, "workflow_inspect", %{"run_id" => run_id})
         assert_inspected_live_events!(inspect, run_id)
 
-        {shutdown, client} = request!(client, 251, "shutdown", %{})
-        assert!(shutdown["result"] == %{}, "shutdown should return an empty result")
-        await_port_exit!(client)
+        client
+        |> close_input!()
+        |> await_port_exit!()
       end)
 
       assert_scheduler_stopped!(scheduler_url)
@@ -114,34 +119,46 @@ defmodule ProofMCPLive do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path) do
+  defp mcp_env(port, journal_path, codex_path) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
       {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
-      {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)}
+      {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
+      {~c"CODEX_LOOPS_CODEX_BIN", String.to_charlist(codex_path)},
+      {~c"CODEX_LOOPS_PARENT_PATH", String.to_charlist(System.get_env("PATH") || "")},
+      {~c"PATH", String.to_charlist(System.get_env("PATH") || "")}
     ]
   end
 
   defp with_mcp_client(entrypoint, repo_root, env, fun) do
+    fifo_path =
+      Path.join(System.tmp_dir!(), "codex-loops-mcp-stdin-#{System.unique_integer([:positive])}")
+
+    {_output, 0} = System.cmd("mkfifo", [fifo_path])
+
+    port =
+      Port.open({:spawn_executable, "/bin/sh"}, [
+        :binary,
+        :exit_status,
+        {:args, ["-c", "exec \"$1\" --stdio < \"$2\"", "codex-loops-mcp", entrypoint, fifo_path]},
+        {:cd, repo_root},
+        {:env, env}
+      ])
+
     client =
       %{
-        port:
-          Port.open({:spawn_executable, entrypoint}, [
-            :binary,
-            :exit_status,
-            {:args, ["--stdio"]},
-            {:cd, repo_root},
-            {:env, env}
-          ]),
+        port: port,
+        input: File.open!(fifo_path, [:write, :binary]),
         buffer: ""
       }
 
     try do
       fun.(client)
     after
-      close_port(client.port)
+      close_client(client)
+      File.rm(fifo_path)
     end
   end
 
@@ -165,9 +182,16 @@ defmodule ProofMCPLive do
     request!(client, id, "tools/call", %{"name" => name, "arguments" => arguments})
   end
 
-  defp send_message!(%{port: port} = client, message) do
-    true = Port.command(port, Jason.encode!(message) <> "\n")
+  defp send_message!(%{input: input} = client, message) do
+    IO.write(input, Jason.encode!(message) <> "\n")
     client
+  end
+
+  defp close_input!(%{input: nil} = client), do: client
+
+  defp close_input!(%{input: input} = client) do
+    File.close(input)
+    %{client | input: nil}
   end
 
   defp await_response!(client, id) do
@@ -188,7 +212,12 @@ defmodule ProofMCPLive do
   defp receive_message!(client, deadline) do
     case take_line(client.buffer) do
       {:ok, line, rest} ->
-        {Jason.decode!(line), %{client | buffer: rest}}
+        try do
+          {Jason.decode!(line), %{client | buffer: rest}}
+        rescue
+          Jason.DecodeError ->
+            raise("MCP adapter emitted non-JSON stdout line: #{inspect(line)}")
+        end
 
       :more ->
         timeout = max(deadline - System.monotonic_time(:millisecond), 0)
@@ -237,18 +266,11 @@ defmodule ProofMCPLive do
     end
   end
 
-  defp close_port(port) do
-    if Port.info(port) do
-      shutdown =
-        Jason.encode!(%{
-          "jsonrpc" => "2.0",
-          "id" => 999_999,
-          "method" => "shutdown",
-          "params" => %{}
-        })
+  defp close_client(client) do
+    client = close_input!(client)
 
-      _sent? = Port.command(port, shutdown <> "\n")
-      await_or_close_port(port)
+    if Port.info(client.port) do
+      await_or_close_port(client.port)
     end
   rescue
     ArgumentError -> :ok

@@ -56,10 +56,11 @@ and events through `/api/runs/<id>` and `/api/runs/<id>/events`, and verifies
 the `/runs/<id>` LiveView route is reachable.
 
 `make proof-mcp` proves the Codex-facing product path from a copied plugin
-package: MCP starts/discovers the packaged scheduler, validates a workflow,
-starts a mock run, reads status/events, resumes, returns the UI URL, and shuts
-down its owned scheduler. `make proof-mcp-live` repeats the MCP path with
-`provider: "codex"` and asserts nonzero token usage from scheduler status.
+package containing the Burrito MCP executable: MCP starts/discovers the packaged
+scheduler, validates a workflow, starts a mock run, reads status/events,
+resumes, returns the UI URL, and shuts down its owned scheduler.
+`make proof-mcp-live` repeats the MCP path with `provider: "codex"` and asserts
+nonzero token usage from scheduler status.
 
 ## Journal Model
 

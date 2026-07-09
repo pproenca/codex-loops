@@ -6,6 +6,8 @@ defmodule Workflow.RunTest do
   """
   use ExUnit.Case, async: true
 
+  @receive_timeout 1_000
+
   alias Workflow.{Run, Journal, Status, IdempotencyKey, Idempotency, Event}
   alias Workflow.Provider.Usage
   alias Workflow.Scheduler.RunProjection
@@ -70,6 +72,24 @@ defmodule Workflow.RunTest do
       phase("p")
       log("hi")
       agent("say hello")
+      return(:ok)
+    end
+  end
+
+  defmodule SettledRetryThenCrashWorkflow do
+    use Workflow
+
+    workflow "settled-retry-then-crash" do
+      agent("classify",
+        retries: 1,
+        schema: %{
+          "type" => "object",
+          "properties" => %{"label" => %{"type" => "string"}},
+          "required" => ["label"]
+        }
+      )
+
+      agent("later crash")
       return(:ok)
     end
   end
@@ -281,6 +301,78 @@ defmodule Workflow.RunTest do
              )
 
     refute Enum.any?(Journal.fold(scalar_activity), &(&1.type == :agent_failed))
+  end
+
+  @tag :capture_log
+  test "async writer crashes are journaled as terminal run failures" do
+    id = run_id()
+
+    assert {:ok, ^id, pid} =
+             Run.start(DemoWorkflow,
+               run_id: id,
+               provider:
+                 {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
+             )
+
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, @receive_timeout
+
+    assert [:run_started, :phase_entered, :log_emitted, :run_failed] =
+             Journal.fold(id) |> Enum.map(& &1.type)
+
+    assert %{state: :failed, failure: %{reason: {:run_crashed, detail}}} = Status.of(id)
+    assert detail["kind"] == "error"
+    assert detail["message"] =~ "invalid provider usage"
+  end
+
+  @tag :capture_log
+  test "settled rejected attempts do not hide a later non-resumable writer crash" do
+    id = run_id()
+    tree = SettledRetryThenCrashWorkflow.__workflow__(:tree)
+    [first_agent, _second_agent | _rest] = tree.nodes
+
+    assert {:ok, _event} = Journal.append_next(id, Event.run_started(tree))
+
+    assert {:ok, _event} =
+             Journal.append_next(
+               id,
+               Event.agent_attempt_rejected(
+                 first_agent,
+                 0,
+                 0,
+                 %{},
+                 {:missing_required, "label"},
+                 %Usage{}
+               )
+             )
+
+    key = %IdempotencyKey{run_id: id, node_path: first_agent.address, iteration: 0, attempt: 1}
+
+    assert {:ok, _event} =
+             Journal.append_next(
+               id,
+               Event.agent_committed(first_agent, 0, key, %{"label" => "ok"}, %Usage{})
+             )
+
+    assert {:error, {:run_crashed, _reason}} =
+             Run.run(SettledRetryThenCrashWorkflow,
+               run_id: id,
+               provider:
+                 {ProviderFailureProvider,
+                  sink: self(), usage: %{"input_tokens" => 1, "output_tokens" => 2}}
+             )
+
+    assert_received {:agent_called, "later crash", _key}
+
+    assert [
+             :run_started,
+             :agent_attempt_rejected,
+             :agent_committed,
+             :run_failed
+           ] = Journal.fold(id) |> Enum.map(& &1.type)
+
+    assert %{state: :failed, failure: %{reason: {:run_crashed, detail}}} = Status.of(id)
+    assert detail["message"] =~ "invalid provider usage"
   end
 
   test "streamed activity before a settled event uses the serialized append allocator" do
@@ -559,11 +651,11 @@ defmodule Workflow.RunTest do
 
     {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())
 
-    assert_receive {:journal_committed, ^id, %Event{type: :run_started}}
-    assert_receive {:journal_committed, ^id, %Event{type: :phase_entered}}
-    assert_receive {:journal_committed, ^id, %Event{type: :log_emitted}}
-    assert_receive {:journal_committed, ^id, %Event{type: :agent_committed}}
-    assert_receive {:journal_committed, ^id, %Event{type: :run_completed}}
+    assert_receive {:journal_committed, ^id, %Event{type: :run_started}}, @receive_timeout
+    assert_receive {:journal_committed, ^id, %Event{type: :phase_entered}}, @receive_timeout
+    assert_receive {:journal_committed, ^id, %Event{type: :log_emitted}}, @receive_timeout
+    assert_receive {:journal_committed, ^id, %Event{type: :agent_committed}}, @receive_timeout
+    assert_receive {:journal_committed, ^id, %Event{type: :run_completed}}, @receive_timeout
   end
 
   test "exactly-once: a committed agent effect is replayed from the journal, not re-run" do
@@ -590,7 +682,7 @@ defmodule Workflow.RunTest do
     {:ok, ^id, pid} = Run.start(DemoWorkflow, run_id: id, provider: provider)
 
     # The writer is now blocked inside the agent turn, holding the lease.
-    assert_receive {:at_agent, agent_pid}
+    assert_receive {:at_agent, agent_pid}, @receive_timeout
 
     assert {:error, {:already_running, ^pid}} =
              Run.start(DemoWorkflow, run_id: id, provider: provider)
@@ -598,6 +690,6 @@ defmodule Workflow.RunTest do
     # Release the turn and let the run finish; the lease is freed on exit.
     ref = Process.monitor(pid)
     send(agent_pid, :proceed)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, @receive_timeout
   end
 end

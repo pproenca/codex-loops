@@ -326,6 +326,20 @@ defmodule Workflow.Status do
     %{s | state: :completed, result: p.value} |> tick()
   end
 
+  defp apply_known_event(%Event{type: :run_failed, payload: p}, s) do
+    %{
+      s
+      | state: :failed,
+        failure: %{
+          address: nil,
+          iteration: 0,
+          attempts: 0,
+          reason: {:run_crashed, p.reason}
+        }
+    }
+    |> tick()
+  end
+
   defp append_raw_ref(%__MODULE__{} = status, %Event{} = event) do
     update_in(status.raw_refs.journal, &(&1 ++ [raw_ref(status, event)]))
   end

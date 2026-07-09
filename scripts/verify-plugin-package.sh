@@ -23,8 +23,24 @@ require_tracked() {
 
 require_file plugins/codex-loops/.codex-plugin/plugin.json
 require_file plugins/codex-loops/.mcp.json
+require_file plugins/codex-loops/THIRD_PARTY_NOTICES.md
 require_executable plugins/codex-loops/mcp/codex-loops-mcp
 require_executable plugins/codex-loops/scheduler/bin/agent_loops
+
+if head -c 2 plugins/codex-loops/mcp/codex-loops-mcp | grep -q '#!'; then
+  fail "MCP entrypoint is still a shell wrapper; run make release-mcp to install the Burrito executable"
+fi
+
+if grep -a "Workflow.MCP.Stdio.main" plugins/codex-loops/mcp/codex-loops-mcp >/dev/null; then
+  fail "packaged MCP entrypoint still uses transitional Workflow.MCP.Stdio eval wrapper"
+fi
+
+legacy_stdio_beams="$(
+  find plugins/codex-loops/scheduler/lib -name 'Elixir.Workflow.MCP.Stdio.beam' -print
+)"
+
+[ -z "$legacy_stdio_beams" ] ||
+  fail "bundled scheduler still contains removed hand-rolled Workflow.MCP.Stdio beam"
 
 [ ! -e plugins/codex-loops/scheduler/bin/agent-loops ] ||
   fail "removed CLI wrapper is present: plugins/codex-loops/scheduler/bin/agent-loops"
@@ -43,6 +59,7 @@ release_files="$(find plugins/codex-loops/scheduler/releases -type f | wc -l | t
 
 require_tracked plugins/codex-loops/.codex-plugin/plugin.json
 require_tracked plugins/codex-loops/.mcp.json
+require_tracked plugins/codex-loops/THIRD_PARTY_NOTICES.md
 require_tracked plugins/codex-loops/mcp/codex-loops-mcp
 require_tracked plugins/codex-loops/scheduler/bin/agent_loops
 
@@ -56,5 +73,12 @@ ignored_scheduler_files="$(
 
 [ -z "$ignored_scheduler_files" ] ||
   fail "scheduler contains ignored untracked files; run git add or update ignores"
+
+untracked_scheduler_files="$(
+  git ls-files --others --exclude-standard plugins/codex-loops/scheduler
+)"
+
+[ -z "$untracked_scheduler_files" ] ||
+  fail "scheduler contains untracked files; run git add for the bundled scheduler payload"
 
 printf 'Plugin package is installable with bundled scheduler (%s tracked scheduler files).\n' "$tracked_scheduler_files"

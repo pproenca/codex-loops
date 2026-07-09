@@ -585,4 +585,15 @@ defmodule Workflow.Event do
   def run_completed(value) do
     %__MODULE__{type: :run_completed, payload: %{value: value}}
   end
+
+  @doc """
+  Terminal runtime failure for an unexpected, non-resumable writer crash. Expected
+  node failures still use their specific events (`agent_failed`, `fanout_failed`,
+  etc.), and crashes with journaled retry progress stay resumable. This is the
+  fallback that prevents an async writer crash from leaving a run permanently
+  folded as running when no resume cursor can move it forward.
+  """
+  def run_failed(reason) do
+    %__MODULE__{type: :run_failed, payload: %{reason: reason}}
+  end
 end

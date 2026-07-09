@@ -8,6 +8,8 @@ defmodule Workflow.FanoutRunTest do
   """
   use ExUnit.Case, async: true
 
+  @receive_timeout 1_000
+
   alias Workflow.{Run, Journal, Status, Idempotency, Event, IdempotencyKey}
   alias Workflow.Node.BudgetSlices
   alias Workflow.Provider.Usage
@@ -30,7 +32,7 @@ defmodule Workflow.FanoutRunTest do
   defp gather_gated(0), do: []
 
   defp gather_gated(n) do
-    assert_receive {:at_agent, pid}
+    assert_receive {:at_agent, pid}, @receive_timeout
     [pid | gather_gated(n - 1)]
   end
 
@@ -51,7 +53,7 @@ defmodule Workflow.FanoutRunTest do
   defp kill_and_await(run_id, pid) do
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, @receive_timeout
     await_lease_released(run_id)
   end
 
@@ -121,7 +123,7 @@ defmodule Workflow.FanoutRunTest do
 
     # Release every branch; the barrier joins and the run finishes.
     for p <- pids, do: send(p, :proceed)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, @receive_timeout
 
     assert :parallel_completed in types(id)
     assert Status.of(id).state == :completed
@@ -142,7 +144,7 @@ defmodule Workflow.FanoutRunTest do
 
     send(p2, :proceed)
     send(p3, :proceed)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, @receive_timeout
     assert Status.of(id).state == :completed
     assert committed_addresses(id) == [[0, 0], [0, 1], [0, 2]]
   end
@@ -220,8 +222,8 @@ defmodule Workflow.FanoutRunTest do
     ref = Process.monitor(pid)
 
     # Both lanes reach stage 1 concurrently.
-    assert_receive {:agent_called, "s1"}
-    assert_receive {:agent_called, "s1"}
+    assert_receive {:agent_called, "s1"}, @receive_timeout
+    assert_receive {:agent_called, "s1"}, @receive_timeout
     [lane_a_s1, lane_b_s1] = gather_gated(2)
 
     # No lane has started stage 2 yet — within a lane, stages are sequential.
@@ -231,17 +233,17 @@ defmodule Workflow.FanoutRunTest do
     # is still blocked at stage 1: lanes are not stage-synchronized (no cross-item
     # barrier). A stage barrier would forbid stage 2 until every lane cleared stage 1.
     send(lane_a_s1, :proceed)
-    assert_receive {:agent_called, "s2"}
+    assert_receive {:agent_called, "s2"}, @receive_timeout
     [lane_a_s2] = gather_gated(1)
     refute_receive {:agent_called, "s2"}, 50
 
     # Drain the rest to completion.
     send(lane_a_s2, :proceed)
     send(lane_b_s1, :proceed)
-    assert_receive {:agent_called, "s2"}
+    assert_receive {:agent_called, "s2"}, @receive_timeout
     [lane_b_s2] = gather_gated(1)
     send(lane_b_s2, :proceed)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, @receive_timeout
 
     assert committed_addresses(id) == [[0, 0, 0], [0, 0, 1], [0, 1, 0], [0, 1, 1]]
     assert Status.of(id).state == :completed
@@ -547,9 +549,9 @@ defmodule Workflow.FanoutRunTest do
         provider: {GateProvider, sink: self(), gate_on: "gate"}
       )
 
-    for _ <- 1..2, do: assert_receive({:agent_called, "branch"})
-    assert_receive {:agent_called, "gate"}
-    assert_receive {:at_agent, ^pid}
+    for _ <- 1..2, do: assert_receive({:agent_called, "branch"}, @receive_timeout)
+    assert_receive {:agent_called, "gate"}, @receive_timeout
+    assert_receive {:at_agent, ^pid}, @receive_timeout
 
     assert Enum.count(types(id), &(&1 == :fanout_started)) == 1
     assert Enum.count(types(id), &(&1 == :fanout_completed)) == 1
@@ -580,9 +582,9 @@ defmodule Workflow.FanoutRunTest do
         provider: {GateProvider, sink: self(), gate_on: "gate"}
       )
 
-    for _ <- 1..2, do: assert_receive({:agent_called, "branch"})
-    assert_receive {:agent_called, "gate"}
-    assert_receive {:at_agent, ^pid}
+    for _ <- 1..2, do: assert_receive({:agent_called, "branch"}, @receive_timeout)
+    assert_receive {:agent_called, "gate"}, @receive_timeout
+    assert_receive {:at_agent, ^pid}, @receive_timeout
 
     assert event(id, :fanout_started).payload.width == 2
     assert Enum.count(types(id), &(&1 == :fanout_started)) == 1

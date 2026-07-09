@@ -75,6 +75,7 @@ make setup       # install Hex/Rebar and Elixir deps
 make build       # compile with warnings as errors
 make test        # run the Elixir scheduler/API/UI test suite
 make release     # build the self-contained scheduler Mix release
+make release-mcp # build the Burrito codex-loops-mcp executable
 make proof       # build release and prove scheduler API/UI readiness
 make proof-mcp   # prove copied plugin MCP lifecycle with mock scheduler-owned run
 make dogfood     # prove MCP, reinstall the local plugin, and print the fresh-thread prompt
@@ -82,6 +83,23 @@ make proof-live  # alias for proof-mcp-live; spends one real Codex provider turn
 ```
 
 The repository includes `.tool-versions` for `mise`/`asdf` users.
+
+`make release-mcp` builds the Burrito MCP executable at
+`_build/prod/mcp/codex-loops-mcp` and installs it as the copied plugin package
+entrypoint at `plugins/codex-loops/mcp/codex-loops-mcp`. It requires `xz` on
+`PATH` and Zig 0.15.2. On macOS, install the versioned Homebrew formula:
+
+```sh
+brew install zig@0.15 xz
+```
+
+The target checks those prerequisites before invoking Burrito. On macOS it
+prefers `/opt/homebrew/opt/zig@0.15/bin/zig` when present because it is the most
+reliable `0.15.2` build for recent Xcode toolchains; otherwise it falls back to
+`zig` on `PATH`. You can also pass `ZIG=/path/to/zig`. After copying the
+executable into `_build/prod/mcp` and the plugin package, the target clears the
+matching local Burrito app/version cache so repeated local proofs execute the
+just-built payload.
 
 ## Runtime Data
 
@@ -98,6 +116,10 @@ The MCP adapter uses `CODEX_LOOPS_SCHEDULER_HOST`,
 `CODEX_LOOPS_SCHEDULER_BIN` when you need to point it at a specific local
 scheduler. In the packaged plugin path, it discovers
 `plugins/codex-loops/scheduler/bin/agent_loops` and starts it when needed.
+When the Burrito MCP executable is installed at
+`plugins/codex-loops/mcp/codex-loops-mcp`, it infers `CODEX_LOOPS_PLUGIN_ROOT`
+from its binary path unless `CODEX_LOOPS_PLUGIN_ROOT` or
+`CODEX_LOOPS_SCHEDULER_BIN` is already set.
 
 ## Packages
 

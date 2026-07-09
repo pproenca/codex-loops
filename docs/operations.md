@@ -61,9 +61,36 @@ make proof-live
 ```
 
 `make proof-mcp-live` spends one live Codex provider turn through the packaged
-scheduler plus MCP lifecycle path, then asserts the run completed and recorded
-nonzero token usage in the scheduler projection. `make proof-live` aliases the
-same MCP proof.
+Burrito MCP executable, scheduler, and lifecycle path, then asserts the run
+completed and recorded nonzero token usage in the scheduler projection.
+`make proof-live` aliases the same MCP proof.
+
+## Manual MCP Smoke
+
+Build the copied plugin package first:
+
+```sh
+make release
+make release-mcp
+```
+
+Then, from a Codex thread with the local plugin installed, run a non-mutating
+workflow through the MCP tools:
+
+```text
+workflow_validate script_path=.codex/workflows/example.exs
+workflow_start    script_path=.codex/workflows/example.exs run_id=run_example provider=mock
+workflow_status   run_id=run_example
+workflow_inspect  run_id=run_example
+workflow_open_ui  run_id=run_example
+```
+
+Only run the live smoke after the mock path is clean:
+
+```text
+workflow_start  script_path=.codex/workflows/example.exs run_id=run_example_live provider=codex
+workflow_status run_id=run_example_live
+```
 
 ## Normal Workflow Run
 

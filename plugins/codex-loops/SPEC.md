@@ -29,7 +29,7 @@ MCP tools:
 
 MCP behavior:
 
-- stdio JSON-RPC transport with newline-delimited messages
+- Anubis MCP server over stdio with newline-delimited JSON-RPC messages
 - `initialize`, `tools/list`, `tools/call`, and notifications
 - `workflow_validate` input schema requires `script_path`
 - `workflow_start` input schema requires `script_path` and accepts optional
@@ -198,8 +198,20 @@ make release
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
-The MCP adapter launches the generated `agent_loops` release script when it
-owns scheduler lifecycle.
+The MCP adapter artifact is a Burrito executable:
+
+```bash
+make release-mcp
+test -x plugins/codex-loops/mcp/codex-loops-mcp
+```
+
+The previous transitional product path, a shell wrapper that ran
+`agent_loops eval 'Workflow.MCP.Stdio.main(["--stdio"])'`, is removed. The
+supported MCP adapter is the Anubis-backed Burrito executable only; no
+hand-rolled stdio protocol compatibility layer is shipped.
+
+The MCP executable starts or discovers the generated `agent_loops` release
+script when it owns scheduler lifecycle.
 
 Development and proof commands:
 
@@ -212,13 +224,14 @@ make proof-mcp-live
 make proof-live
 ```
 
-`make proof-mcp` copies the plugin package to a temp install location and proves
-MCP lifecycle, validation, mock start, status polling, event inspection,
-resume, typed scheduler errors, and open-ui response against the copied
-package's scheduler release. `make proof-mcp-live` validates through MCP,
-starts or reuses the packaged scheduler through MCP lifecycle handling, starts a
-live `provider: "codex"` run through `workflow_start`, observes completion
-through `workflow_status`, and asserts nonzero token usage from the scheduler
+`make proof-mcp` builds and copies the Burrito MCP executable into the plugin
+package, copies the plugin package to a temp install location, and proves MCP
+lifecycle, validation, mock start, status polling, event inspection, resume,
+typed scheduler errors, and open-ui response against the copied package's
+scheduler release. `make proof-mcp-live` validates through MCP, starts or reuses
+the packaged scheduler through MCP lifecycle handling, starts a live
+`provider: "codex"` run through `workflow_start`, observes completion through
+`workflow_status`, and asserts nonzero token usage from the scheduler
 projection. It spends one real Codex provider turn. `make proof-live` aliases
 the MCP live proof.
 

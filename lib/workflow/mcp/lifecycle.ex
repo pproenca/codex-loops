@@ -178,11 +178,20 @@ defmodule Workflow.MCP.Lifecycle do
         {"CODEX_LOOPS_HOST", config.host},
         {"CODEX_LOOPS_PORT", Integer.to_string(config.port)},
         {"PORT", Integer.to_string(config.port)},
+        {"CODEX_LOOPS_ENTRYPOINT", nil},
+        {"__BURRITO", nil},
+        {"__BURRITO_BIN_PATH", nil},
+        {"ROOTDIR", nil},
+        {"BINDIR", nil},
+        {"RELEASE_ROOT", nil},
+        {"RELEASE_SYS_CONFIG", nil},
         {"RELEASE_DISTRIBUTION", "none"},
         {"RELEASE_NODE", release_node},
         {"RELEASE_TMP", release_tmp}
       ]
       |> maybe_put_env("CODEX_LOOPS_JOURNAL_PATH")
+      |> maybe_put_env("CODEX_LOOPS_CODEX_BIN")
+      |> put_path_env()
 
     port =
       Port.open({:spawn_executable, release_bin}, [
@@ -414,12 +423,23 @@ defmodule Workflow.MCP.Lifecycle do
     end
   end
 
+  defp put_path_env(env) do
+    case System.get_env("CODEX_LOOPS_PARENT_PATH") || System.get_env("PATH") do
+      nil -> env
+      "" -> env
+      path -> [{"PATH", path} | env]
+    end
+  end
+
   defp is_nil_or_empty?(nil), do: true
   defp is_nil_or_empty?(""), do: true
   defp is_nil_or_empty?(_value), do: false
 
   defp port_env(env) do
-    Enum.map(env, fn {key, value} -> {String.to_charlist(key), String.to_charlist(value)} end)
+    Enum.map(env, fn
+      {key, nil} -> {String.to_charlist(key), false}
+      {key, value} -> {String.to_charlist(key), String.to_charlist(value)}
+    end)
   end
 
   defp unavailable(details) do

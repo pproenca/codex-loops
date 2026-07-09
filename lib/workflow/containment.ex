@@ -7,10 +7,12 @@ defmodule Workflow.Containment do
 
   `run_turn/2` spawns the injected command as a **one-shot** child, feeds it the
   given `stdin` bytes, streams the child's stdout until it exits, and returns the
-  raw stdout on a clean (`0`) exit. The `stdin` is delivered by redirecting the
-  child's standard input from a temporary file, so the child always sees a normal
-  EOF-terminated input and never blocks on an open, never-closed pipe — a subtlety
-  that matters because a duplex Erlang port cannot half-close stdin.
+  raw stdout on a clean (`0`) exit. Stderr is kept out of successful stdout so
+  JSONL protocols remain parseable, but it is folded into non-zero exit details
+  for diagnosis. The `stdin` is delivered by redirecting the child's standard
+  input from a temporary file, so the child always sees a normal EOF-terminated
+  input and never blocks on an open, never-closed pipe — a subtlety that matters
+  because a duplex Erlang port cannot half-close stdin.
 
   Containment knows nothing about the *wire format* of the bytes it moves: the
   caller (the provider) owns encoding the request and decoding the response. That
@@ -35,19 +37,27 @@ defmodule Workflow.Containment do
   def run_turn(stdin, opts) do
     {path, args} = Keyword.fetch!(opts, :command)
     timeout = Keyword.get(opts, :timeout, @default_timeout)
-    stdin_file = write_stdin(stdin)
+    stdin_file = temp_path("codex_turn", ".stdin")
+    stderr_file = temp_path("codex_turn", ".stderr")
+    File.write!(stdin_file, stdin)
 
     try do
-      port = Port.open({:spawn, shell_command(path, args, stdin_file)}, [:binary, :exit_status])
-      collect(port, "", "", timeout, Keyword.get(opts, :on_line))
+      port =
+        Port.open({:spawn, shell_command(path, args, stdin_file, stderr_file)}, [
+          :binary,
+          :exit_status
+        ])
+
+      collect(port, "", "", timeout, Keyword.get(opts, :on_line), stderr_file)
     after
       File.rm(stdin_file)
+      File.rm(stderr_file)
     end
   end
 
   # Accumulate stdout until the child exits; the OS/port guarantees every `:data`
   # arrives before `:exit_status`, so the buffer is complete at exit.
-  defp collect(port, buffer, line_buffer, timeout, on_line) do
+  defp collect(port, buffer, line_buffer, timeout, on_line, stderr_file) do
     receive do
       {^port, {:data, data}} ->
         collect(
@@ -55,7 +65,8 @@ defmodule Workflow.Containment do
           buffer <> data,
           observe_lines(line_buffer <> data, on_line),
           timeout,
-          on_line
+          on_line,
+          stderr_file
         )
 
       {^port, {:exit_status, 0}} ->
@@ -64,7 +75,7 @@ defmodule Workflow.Containment do
 
       {^port, {:exit_status, status}} ->
         flush_line(line_buffer, on_line)
-        {:error, {:backend_exit, status, buffer}}
+        {:error, {:backend_exit, status, failure_output(buffer, stderr_file)}}
     after
       timeout ->
         Port.close(port)
@@ -88,18 +99,29 @@ defmodule Workflow.Containment do
   defp emit_line("", _on_line), do: :ok
   defp emit_line(line, on_line), do: on_line.(line)
 
-  defp write_stdin(stdin) do
-    path = Path.join(System.tmp_dir!(), "codex_turn_#{System.unique_integer([:positive])}.stdin")
-    File.write!(path, stdin)
-    path
+  defp failure_output(stdout, stderr_file) do
+    stderr =
+      case File.read(stderr_file) do
+        {:ok, content} -> content
+        {:error, _reason} -> ""
+      end
+
+    [stdout, stderr]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join("\n")
+  end
+
+  defp temp_path(prefix, suffix) do
+    Path.join(System.tmp_dir!(), "#{prefix}_#{System.unique_integer([:positive])}#{suffix}")
   end
 
   # Build a `/bin/sh -c` command that runs the executable with its args and reads
-  # stdin from `stdin_file`. Every token is single-quoted (with embedded quotes
-  # escaped) so nothing in a path or arg is ever interpreted by the shell; only the
-  # `<` redirect is a shell operator.
-  defp shell_command(path, args, stdin_file) do
-    Enum.map_join([path | args], " ", &shell_quote/1) <> " < " <> shell_quote(stdin_file)
+  # stdin from `stdin_file` while sending stderr to `stderr_file`. Every token is
+  # single-quoted (with embedded quotes escaped) so nothing in a path or arg is
+  # ever interpreted by the shell; only the redirects are shell operators.
+  defp shell_command(path, args, stdin_file, stderr_file) do
+    Enum.map_join([path | args], " ", &shell_quote/1) <>
+      " < " <> shell_quote(stdin_file) <> " 2> " <> shell_quote(stderr_file)
   end
 
   defp shell_quote(token), do: "'" <> String.replace(token, "'", "'\\''") <> "'"

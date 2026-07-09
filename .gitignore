@@ -20,6 +20,7 @@ tmp/
 
 # Elixir build artifacts
 _build/
+burrito_out/
 deps/
 *.beam
 !plugins/codex-loops/scheduler/**/*.beam

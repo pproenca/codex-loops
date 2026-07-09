@@ -41,24 +41,37 @@ defmodule Workflow.Provider.Codex do
     "--skip-git-repo-check"
   ]
 
+  @codex_bin_env "CODEX_LOOPS_CODEX_BIN"
   @timeout_detail %{"message" => "codex turn timed out"}
 
   @impl true
   def run_agent(prompt, schema, _key, opts) do
-    {command, schema_file} = command(opts, schema)
+    case command(opts, schema) do
+      {:ok, {command, schema_file}} ->
+        try do
+          case Containment.run_turn(prompt,
+                 command: command,
+                 timeout: Keyword.get(opts, :timeout, :infinity),
+                 on_line: line_observer(opts)
+               ) do
+            {:ok, stdout} ->
+              parse_turn(stdout, schema)
 
-    try do
-      case Containment.run_turn(prompt,
-             command: command,
-             timeout: Keyword.get(opts, :timeout, :infinity),
-             on_line: line_observer(opts)
-           ) do
-        {:ok, stdout} -> parse_turn(stdout, schema)
-        {:error, :timeout} -> {:error, {:provider_failure, :timeout, @timeout_detail, nil, []}}
-        {:error, reason} -> raise "codex turn failed: #{inspect(reason)}"
-      end
-    after
-      schema_file && File.rm(schema_file)
+            {:error, :timeout} ->
+              {:error, {:provider_failure, :timeout, @timeout_detail, nil, []}}
+
+            {:error, {:backend_exit, status, output}} when status in [126, 127] ->
+              {:error, unavailable_failure(backend_start_message(status, output))}
+
+            {:error, reason} ->
+              raise "codex turn failed: #{inspect(reason)}"
+          end
+        after
+          schema_file && File.rm(schema_file)
+        end
+
+      {:error, failure} ->
+        {:error, failure}
     end
   end
 
@@ -66,29 +79,98 @@ defmodule Workflow.Provider.Codex do
   The production default backend: the real `codex` binary's one-shot
   `exec --json` entrypoint. Overridable per run via
   `command: {path, args}` (the seam a test uses to point at a hermetic stub).
+  Packaged MCP/scheduler launches can also set `CODEX_LOOPS_CODEX_BIN` to an
+  absolute Codex CLI path when release wrappers have rewritten `PATH`.
   """
   @spec default_command() :: {String.t(), [String.t()]}
   def default_command do
-    path =
-      System.find_executable("codex") ||
-        raise "no `codex` executable on PATH; pass `command: {path, args}` to select a backend"
+    case default_command_result() do
+      {:ok, command} ->
+        command
 
-    {path, @exec_args}
+      {:error, {:provider_failure, :unavailable, detail, _usage, _activity}} ->
+        raise detail["message"]
+    end
   end
 
   # Full one-shot command for this turn: the base `codex exec` invocation (or an
   # injected backend, e.g. a test stub) plus a per-turn `--output-schema` file when
   # the turn is schema-backed. Returns the temp schema file so the caller can clean
   # it up after the turn.
-  defp command(opts, nil), do: {base_command(opts), nil}
-
-  defp command(opts, schema) do
-    file = write_schema(schema)
-    {path, args} = base_command(opts)
-    {{path, args ++ ["--output-schema", file]}, file}
+  defp command(opts, nil) do
+    with {:ok, command} <- base_command(opts), do: {:ok, {command, nil}}
   end
 
-  defp base_command(opts), do: Keyword.get(opts, :command) || default_command()
+  defp command(opts, schema) do
+    with {:ok, {path, args}} <- base_command(opts) do
+      file = write_schema(schema)
+      {:ok, {{path, args ++ ["--output-schema", file]}, file}}
+    end
+  end
+
+  defp base_command(opts) do
+    case Keyword.fetch(opts, :command) do
+      {:ok, command} -> {:ok, command}
+      :error -> default_command_result()
+    end
+  end
+
+  defp default_command_result do
+    cond do
+      configured_codex_bin() not in [nil, ""] ->
+        configured_codex_bin()
+        |> Path.expand()
+        |> executable_command_result()
+
+      path = System.find_executable("codex") ->
+        {:ok, {path, @exec_args}}
+
+      true ->
+        {:error, unavailable_failure(missing_codex_message())}
+    end
+  end
+
+  defp executable_command_result(path) do
+    case File.stat(path) do
+      {:ok, %File.Stat{type: :regular, mode: mode}} ->
+        if Bitwise.band(mode, 0o111) != 0 do
+          {:ok, {path, @exec_args}}
+        else
+          {:error, unavailable_failure("#{@codex_bin_env} is not executable: #{path}")}
+        end
+
+      _other ->
+        {:error, unavailable_failure("#{@codex_bin_env} does not point to a file: #{path}")}
+    end
+  end
+
+  defp unavailable_failure(message) do
+    {:provider_failure, :unavailable,
+     %{
+       "message" => message,
+       "env" => @codex_bin_env,
+       "hint" =>
+         "Install/authenticate the Codex CLI, set #{@codex_bin_env} to its absolute path, or include `codex` on PATH."
+     }, nil, []}
+  end
+
+  defp missing_codex_message do
+    "no `codex` executable found; set #{@codex_bin_env} or include `codex` on PATH"
+  end
+
+  defp backend_start_message(status, output) do
+    detail =
+      output
+      |> String.trim()
+      |> truncate(180)
+
+    case detail do
+      "" -> "codex command failed to start with exit status #{status}"
+      _text -> "codex command failed to start with exit status #{status}: #{detail}"
+    end
+  end
+
+  defp configured_codex_bin, do: System.get_env(@codex_bin_env)
 
   defp line_observer(opts) do
     case Keyword.get(opts, :activity_sink) do

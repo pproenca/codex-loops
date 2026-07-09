@@ -8,6 +8,8 @@ defmodule Workflow.ResumeTest do
   """
   use ExUnit.Case, async: true
 
+  @receive_timeout 1_000
+
   alias Workflow.{Run, Journal, Status, Ledger, Event, IdempotencyKey}
   alias Workflow.Test.{EchoProvider, GateProvider, LedgeredProvider}
 
@@ -85,7 +87,7 @@ defmodule Workflow.ResumeTest do
   defp kill_and_await(run_id, pid) do
     ref = Process.monitor(pid)
     Process.exit(pid, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
+    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}, @receive_timeout
     await_lease_released(run_id)
   end
 
@@ -97,9 +99,9 @@ defmodule Workflow.ResumeTest do
     {:ok, ^id, pid} =
       Run.start(TwoAgents, run_id: id, provider: {GateProvider, sink: self(), gate_on: "second"})
 
-    assert_receive {:agent_called, "first"}
-    assert_receive {:agent_called, "second"}
-    assert_receive {:at_agent, ^pid}
+    assert_receive {:agent_called, "first"}, @receive_timeout
+    assert_receive {:agent_called, "second"}, @receive_timeout
+    assert_receive {:at_agent, ^pid}, @receive_timeout
 
     # The completed turn is durably journaled; the in-flight one is not.
     assert [%{payload: %{address: [0]}}] =
@@ -137,8 +139,8 @@ defmodule Workflow.ResumeTest do
         provider: {GateProvider, sink: self(), gate_on: "gate"}
       )
 
-    for p <- ~w(a b gate), do: assert_receive({:agent_called, ^p})
-    assert_receive {:at_agent, ^pid}
+    for p <- ~w(a b gate), do: assert_receive({:agent_called, ^p}, @receive_timeout)
+    assert_receive {:at_agent, ^pid}, @receive_timeout
 
     # The fan-out region is fully journaled before the crash: one started, both
     # branches, one completed.
@@ -172,8 +174,8 @@ defmodule Workflow.ResumeTest do
     id = run_id()
 
     {:ok, ^id, pid} = Run.start(OneAgent, run_id: id, provider: {GateProvider, sink: self()})
-    assert_receive {:agent_called, "do it"}
-    assert_receive {:at_agent, ^pid}
+    assert_receive {:agent_called, "do it"}, @receive_timeout
+    assert_receive {:at_agent, ^pid}, @receive_timeout
 
     # A second writer cannot hold the same run while the first is live.
     assert {:error, {:already_running, ^pid}} =
@@ -243,9 +245,9 @@ defmodule Workflow.ResumeTest do
         provider: {GateProvider, sink: self(), gate_on: "improve: %{}"}
       )
 
-    assert_receive {:agent_called, "draft"}
-    assert_receive {:agent_called, "improve: %{}"}
-    assert_receive {:at_agent, ^pid}
+    assert_receive {:agent_called, "draft"}, @receive_timeout
+    assert_receive {:agent_called, "improve: %{}"}, @receive_timeout
+    assert_receive {:at_agent, ^pid}, @receive_timeout
 
     assert [%{payload: %{address: [0], result: %{}}}] =
              Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))

@@ -6,6 +6,8 @@ defmodule Workflow.Scheduler.Error do
   JSON envelopes and direct callers can pattern-match on their codes.
   """
 
+  alias Workflow.Script.Error
+
   @enforce_keys [:status, :code, :message]
   defstruct [:status, :code, :message, details: %{}]
 
@@ -95,8 +97,8 @@ defmodule Workflow.Scheduler.Error do
     }
   end
 
-  @spec workflow_validation(Workflow.Script.Error.t()) :: t()
-  def workflow_validation(%Workflow.Script.Error{kind: :script_not_found} = error) do
+  @spec workflow_validation(Error.t()) :: t()
+  def workflow_validation(%Error{kind: :script_not_found} = error) do
     %__MODULE__{
       status: 404,
       code: "scheduler.validation.script_not_found",
@@ -105,8 +107,8 @@ defmodule Workflow.Scheduler.Error do
     }
   end
 
-  def workflow_validation(%Workflow.Script.Error{} = error) do
-    type = error.kind |> Atom.to_string()
+  def workflow_validation(%Error{} = error) do
+    type = Atom.to_string(error.kind)
 
     %__MODULE__{
       status: 422,
@@ -144,7 +146,7 @@ defmodule Workflow.Scheduler.Error do
     }
   end
 
-  defp validation_details(%Workflow.Script.Error{} = error) do
+  defp validation_details(%Error{} = error) do
     error.details
     |> Map.put(:path, error.path)
     |> Map.put(:reason, error.message)

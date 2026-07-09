@@ -10,7 +10,10 @@ defmodule Workflow.Run do
       `{:ok, run_id}`. Read state back with `Workflow.Status.of/1`.
   """
 
-  alias Workflow.{Tree, Run, Journal, Provider}
+  alias Workflow.Journal
+  alias Workflow.Provider
+  alias Workflow.Run
+  alias Workflow.Tree
 
   @type option ::
           {:run_id, String.t()}
@@ -67,12 +70,7 @@ defmodule Workflow.Run do
 
       spec =
         {Run.Writer,
-         run_id: run_id,
-         tree: tree,
-         provider: provider,
-         budget: budget,
-         script_path: script_path,
-         parent: self()}
+         run_id: run_id, tree: tree, provider: provider, budget: budget, script_path: script_path, parent: self()}
 
       case DynamicSupervisor.start_child(Workflow.Run.Supervisor, spec) do
         {:ok, pid} -> {:ok, run_id, pid}
@@ -82,8 +80,7 @@ defmodule Workflow.Run do
     end
   end
 
-  defp spawn_writer(module, opts) when is_atom(module),
-    do: spawn_writer(module.__workflow__(:tree), opts)
+  defp spawn_writer(module, opts) when is_atom(module), do: spawn_writer(module.__workflow__(:tree), opts)
 
   defp resolve_provider(opts) do
     opts

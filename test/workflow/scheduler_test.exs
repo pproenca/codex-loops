@@ -3,7 +3,12 @@ defmodule Workflow.SchedulerTest do
 
   import ExUnit.CaptureIO
 
-  alias Workflow.{Journal, Run, Scheduler, Script, Status}
+  alias Workflow.Journal
+  alias Workflow.Provider.Mock
+  alias Workflow.Run
+  alias Workflow.Scheduler
+  alias Workflow.Script
+  alias Workflow.Status
   alias Workflow.Test.GateProvider
 
   defp write_script(source, prefix \\ "wf") do
@@ -92,8 +97,7 @@ defmodule Workflow.SchedulerTest do
     """)
   end
 
-  defp run_id(prefix),
-    do: "#{prefix}_#{System.unique_integer([:positive])}"
+  defp run_id(prefix), do: "#{prefix}_#{System.unique_integer([:positive])}"
 
   defp await_lease_released(run_id, tries \\ 200) do
     cond do
@@ -637,7 +641,7 @@ defmodule Workflow.SchedulerTest do
     {:ok, tree} = Script.load_tree(path)
 
     assert {:ok, ^id} =
-             Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+             Run.run(tree, run_id: id, provider: {Mock, []})
 
     assert %Workflow.Event{payload: %{script_path: nil}} =
              Enum.find(Journal.fold(id), &(&1.type == :run_started))
@@ -667,7 +671,7 @@ defmodule Workflow.SchedulerTest do
     {:ok, tree} = Script.load_tree(path)
 
     assert {:ok, ^id} =
-             Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+             Run.run(tree, run_id: id, provider: {Mock, []})
 
     assert {:error, %Scheduler.Error{} = error} = Scheduler.resume_run(id)
     assert error.status == 400
@@ -681,7 +685,7 @@ defmodule Workflow.SchedulerTest do
     {:ok, tree} = Script.load_tree(path)
 
     assert {:ok, ^id} =
-             Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+             Run.run(tree, run_id: id, provider: {Mock, []})
 
     assert {:error, %Scheduler.Error{} = error} =
              Scheduler.resume_run(id, %{"script_path" => bad_workflow(), "provider" => "mock"})
@@ -748,7 +752,8 @@ defmodule Workflow.SchedulerTest do
     assert {:ok, %{run_id: ^id, state: :accepted}} = Scheduler.resume_run(id)
     wait_for_projection(id)
 
-    assert Journal.fold(id)
+    assert id
+           |> Journal.fold()
            |> Enum.filter(&(&1.type == :agent_committed))
            |> Enum.map(& &1.payload.address) == [[0], [1]]
 
@@ -844,7 +849,7 @@ defmodule Workflow.SchedulerTest do
     assert error.status == 400
     assert error.code == "scheduler.run.invalid_run_id"
     assert error.details == %{field: "run_id", expected: "route_safe_non_empty_string"}
-    refute "foo/bar" in Workflow.Journal.run_ids()
+    refute "foo/bar" in Journal.run_ids()
   end
 
   test "get_run returns a typed error for unknown run ids" do
@@ -886,7 +891,7 @@ defmodule Workflow.SchedulerTest do
 
   test "validates an existing workflow script through the scheduler context" do
     path = demo_workflow()
-    run_ids = Workflow.Journal.run_ids()
+    run_ids = Journal.run_ids()
 
     assert {:ok, validation} = Scheduler.validate_workflow(%{"script_path" => path})
 
@@ -894,12 +899,12 @@ defmodule Workflow.SchedulerTest do
     assert validation.workflow_name == "scheduler-demo"
     assert validation.node_count == 4
     assert validation.script == %{path: path}
-    assert Workflow.Journal.run_ids() == run_ids
+    assert Journal.run_ids() == run_ids
   end
 
   test "validates a same-file schema-backed workflow script through the scheduler context" do
     path = schema_backed_workflow()
-    run_ids = Workflow.Journal.run_ids()
+    run_ids = Journal.run_ids()
 
     assert {:ok, validation} = Scheduler.validate_workflow(%{"script_path" => path})
 
@@ -907,7 +912,7 @@ defmodule Workflow.SchedulerTest do
     assert validation.workflow_name == "schema-backed"
     assert validation.node_count == 2
     assert validation.script == %{path: path}
-    assert Workflow.Journal.run_ids() == run_ids
+    assert Journal.run_ids() == run_ids
   end
 
   test "missing workflow scripts return a typed scheduler validation error" do
@@ -1068,8 +1073,8 @@ defmodule Workflow.SchedulerTest do
 
   test "same-file schemas cannot redefine existing scheduler modules" do
     path = schema_redefinition_workflow()
-    assert Code.ensure_loaded?(Workflow.Scheduler)
-    assert function_exported?(Workflow.Scheduler, :validate_workflow, 1)
+    assert Code.ensure_loaded?(Scheduler)
+    assert function_exported?(Scheduler, :validate_workflow, 1)
 
     assert {:error, %Scheduler.Error{} = error} =
              Scheduler.validate_workflow(%{"script_path" => path})
@@ -1079,16 +1084,16 @@ defmodule Workflow.SchedulerTest do
     assert error.details.path == path
     assert error.details.type == :compile
     assert error.details.reason =~ "would redefine an existing module"
-    assert Code.ensure_loaded?(Workflow.Scheduler)
-    assert function_exported?(Workflow.Scheduler, :validate_workflow, 1)
-    assert {:ok, _health} = Workflow.Scheduler.health()
+    assert Code.ensure_loaded?(Scheduler)
+    assert function_exported?(Scheduler, :validate_workflow, 1)
+    assert {:ok, _health} = Scheduler.health()
   end
 
   test "same-file schema inlining is scoped to agent options" do
     {path, schema_atom} = return_schema_keyword_workflow()
 
     assert {:ok, %Workflow.Tree{nodes: [%Workflow.Node.Return{value: value}]}} =
-             Workflow.Script.load_tree(path)
+             Script.load_tree(path)
 
     assert [{:schema, {:__aliases__, _meta, [^schema_atom]}}] = value
 

@@ -6,11 +6,19 @@ defmodule Workflow.DataflowRunTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{BoundValue, Event, Journal, RenderText, Run, Status}
+  alias Workflow.BoundValue
+  alias Workflow.Event
+  alias Workflow.Journal
+  alias Workflow.RenderText
+  alias Workflow.Run
+  alias Workflow.Status
   alias Workflow.Template.Hole
-  alias Workflow.Test.{EchoProvider, RefineProvider, ScriptedProvider}
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.RefineProvider
+  alias Workflow.Test.ScriptedProvider
 
   defmodule BinaryEmit do
+    @moduledoc false
     use Workflow
 
     workflow "binary-emit" do
@@ -20,6 +28,7 @@ defmodule Workflow.DataflowRunTest do
   end
 
   defmodule SynthesizedEmit do
+    @moduledoc false
     use Workflow
 
     workflow "synthesized-emit" do
@@ -29,6 +38,7 @@ defmodule Workflow.DataflowRunTest do
   end
 
   defmodule MapEmit do
+    @moduledoc false
     use Workflow
 
     workflow "map-emit" do
@@ -38,6 +48,7 @@ defmodule Workflow.DataflowRunTest do
   end
 
   defmodule InjectedAgent do
+    @moduledoc false
     use Workflow
 
     workflow "injected-agent" do
@@ -48,6 +59,7 @@ defmodule Workflow.DataflowRunTest do
   end
 
   defmodule FormatterEmit do
+    @moduledoc false
     use Workflow
 
     workflow "formatter-emit" do
@@ -64,6 +76,7 @@ Short: <%= truncate(@draft, 5) %>|)
   end
 
   defmodule RefineResultEmit do
+    @moduledoc false
     use Workflow
 
     workflow "refine-result-emit" do
@@ -86,7 +99,7 @@ Short: <%= truncate(@draft, 5) %>|)
   end
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
-  defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
+  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
 
   test "emit renders a binary-valued binding into run_completed.value exactly" do
     id = run_id()
@@ -120,7 +133,7 @@ Short: <%= truncate(@draft, 5) %>|)
                provider: {ScriptedProvider, script: script, sink: self()}
              )
 
-    assert_received {:agent_called, "Merge the plans.\n\nInputs: [\"plan A\", \"plan B\"]"}
+    assert_received {:agent_called, ~s(Merge the plans.\n\nInputs: ["plan A", "plan B"])}
 
     assert %Event{payload: %{value: "Summary: Merged summary"}} =
              Enum.find(Journal.fold(id), &(&1.type == :run_completed))
@@ -154,7 +167,8 @@ Short: <%= truncate(@draft, 5) %>|)
     refute_received {:agent_called, _}
 
     committed =
-      Journal.fold(id)
+      id
+      |> Journal.fold()
       |> Enum.filter(&(&1.type == :agent_committed))
 
     assert [
@@ -193,7 +207,7 @@ Short: <%= truncate(@draft, 5) %>|)
     assert rendered ==
              "ID: F1\n" <>
                "Count: 2\n" <>
-               "Flat: [\"a\", \"b\", \"c\"]\n" <>
+               ~s(Flat: ["a", "b", "c"]\n) <>
                "Findings:\n" <>
                "1. [F1] Bug\n" <>
                "   Fix: Patch\n" <>
@@ -283,28 +297,24 @@ Short: <%= truncate(@draft, 5) %>|)
   test "JSON pointer list tokens are unsigned decimal indices" do
     assert {:ok, "second"} =
              RenderText.fold([], [
-               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/1"}},
-                {:literal, ["first", "second"]}}
+               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/1"}}, {:literal, ["first", "second"]}}
              ])
 
     assert {:ok, "nil"} =
              RenderText.fold([], [
-               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/+1"}},
-                {:literal, ["first", "second"]}}
+               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/+1"}}, {:literal, ["first", "second"]}}
              ])
 
     assert {:ok, "nil"} =
              RenderText.fold([], [
-               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/-0"}},
-                {:literal, ["first", "second"]}}
+               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/-0"}}, {:literal, ["first", "second"]}}
              ])
   end
 
   test "numbered_findings atom fallback preserves falsey field values" do
     assert {:ok, "1. [false] nil\n   Fix: 0"} =
              RenderText.fold([], [
-               {:formatter,
-                %Hole{op: :numbered_findings, assign: "findings", args: %{pointer: ""}},
+               {:formatter, %Hole{op: :numbered_findings, assign: "findings", args: %{pointer: ""}},
                 {:literal, [%{id: false, issue: nil, fix: 0}]}}
              ])
   end

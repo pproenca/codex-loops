@@ -3,6 +3,7 @@ defmodule Workflow.DSLTest do
   use ExUnit.Case, async: true
 
   defmodule DemoWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "demo" do
@@ -116,13 +117,11 @@ defmodule Workflow.DSLTest do
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(m) when is_map(m),
-    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
 
-  defp contains_function?(t) when is_tuple(t),
-    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
 end

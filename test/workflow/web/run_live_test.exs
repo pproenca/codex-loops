@@ -12,13 +12,21 @@ defmodule Workflow.Web.RunLiveTest do
   import Phoenix.LiveViewTest
   import Plug.Conn, only: [put_req_header: 3]
 
-  alias Workflow.{Run, Status, Journal, Event, IdempotencyKey, Script}
+  alias Workflow.Event
+  alias Workflow.IdempotencyKey
+  alias Workflow.Journal
+  alias Workflow.Node.Phase
   alias Workflow.Provider.Usage
-  alias Workflow.Test.{EchoProvider, GateProvider}
+  alias Workflow.Run
+  alias Workflow.Script
+  alias Workflow.Status
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.GateProvider
 
   @endpoint Workflow.Web.Endpoint
 
   defmodule DemoWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "demo" do
@@ -30,6 +38,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule InspectorWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "inspector-demo" do
@@ -42,6 +51,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule PhaseTransitionWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "phase-transition-demo" do
@@ -54,6 +64,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule LogHeavyWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "log-heavy-demo" do
@@ -68,6 +79,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule RetryWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "retry-demo" do
@@ -87,6 +99,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule LongRetryWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "long-retry-demo" do
@@ -107,6 +120,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule FailureWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "failure-demo" do
@@ -126,9 +140,8 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule ActivityProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, _key, opts) do
@@ -143,15 +156,13 @@ defmodule Workflow.Web.RunLiveTest do
         }
       ]
 
-      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
-       activity}
+      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}, activity}
     end
   end
 
   defmodule StreamingGateProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, _key, opts) do
@@ -182,9 +193,8 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defmodule RetryActivityProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -212,8 +222,7 @@ defmodule Workflow.Web.RunLiveTest do
         }
       ]
 
-      {:ok, %{"bad" => true}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
-       activity}
+      {:ok, %{"bad" => true}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}, activity}
     end
 
     defp retry_result(_attempt) do
@@ -284,8 +293,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defp json_conn do
-    conn()
-    |> put_req_header("accept", "application/json")
+    put_req_header(conn(), "accept", "application/json")
   end
 
   defp post_json(conn, path, body) do
@@ -354,8 +362,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defp assert_in_order(rendered, snippets) do
-    snippets
-    |> Enum.reduce(-1, fn snippet, previous_index ->
+    Enum.reduce(snippets, -1, fn snippet, previous_index ->
       index =
         case :binary.match(rendered, snippet) do
           {index, _length} -> index
@@ -596,8 +603,8 @@ defmodule Workflow.Web.RunLiveTest do
     assert html =~ ~s(Status: Completed)
 
     assert css =~ ~s|@media (hover: hover) and (pointer: fine)|
-    hover_media_index = :binary.match(css, "@media (hover: hover) and (pointer: fine)") |> elem(0)
-    button_hover_index = :binary.match(css, "button:hover") |> elem(0)
+    hover_media_index = css |> :binary.match("@media (hover: hover) and (pointer: fine)") |> elem(0)
+    button_hover_index = css |> :binary.match("button:hover") |> elem(0)
     assert button_hover_index > hover_media_index
 
     button_rule = css_rule(css, "button")
@@ -647,9 +654,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert html =~ "pending"
     refute html =~ "api-started"
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "mock"})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1002,7 +1007,7 @@ defmodule Workflow.Web.RunLiveTest do
     usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
     node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
 
-    append_event(id, 0, Event.phase_entered(%Workflow.Node.Phase{address: [0], name: "loop"}))
+    append_event(id, 0, Event.phase_entered(%Phase{address: [0], name: "loop"}))
 
     append_event(
       id,
@@ -1103,7 +1108,7 @@ defmodule Workflow.Web.RunLiveTest do
     usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
     node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
 
-    append_event(id, 0, Event.phase_entered(%Workflow.Node.Phase{address: [0], name: "loop"}))
+    append_event(id, 0, Event.phase_entered(%Phase{address: [0], name: "loop"}))
 
     append_event(
       id,
@@ -1173,9 +1178,7 @@ defmodule Workflow.Web.RunLiveTest do
   test "scheduler API rejects run ids that cannot be opened by the LiveView route" do
     path = api_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: "foo/bar", provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: "foo/bar", provider: "mock"})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1185,6 +1188,6 @@ defmodule Workflow.Web.RunLiveTest do
              }
            } = json_response(conn, 400)
 
-    refute "foo/bar" in Workflow.Journal.run_ids()
+    refute "foo/bar" in Journal.run_ids()
   end
 end

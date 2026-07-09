@@ -10,7 +10,8 @@ defmodule CodexLoops.MixProject do
       elixirc_options: [warnings_as_errors: true],
       start_permanent: Mix.env() == :prod,
       releases: releases(),
-      deps: deps()
+      deps: deps(),
+      dialyzer: dialyzer()
     ]
   end
 
@@ -60,7 +61,8 @@ defmodule CodexLoops.MixProject do
   end
 
   defp burrito_cpu do
-    :erlang.system_info(:system_architecture)
+    :system_architecture
+    |> :erlang.system_info()
     |> to_string()
     |> case do
       "aarch64" <> _rest -> :aarch64
@@ -79,8 +81,22 @@ defmodule CodexLoops.MixProject do
       {:bandit, "~> 1.5"},
       {:anubis_mcp, "~> 1.6", runtime: false},
       {:burrito, "~> 1.5", runtime: false},
+      {:styler, "~> 1.11", only: [:dev, :test], runtime: false},
+      {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
+      {:sobelow, "~> 0.14.1", only: [:dev, :test], runtime: false},
+      {:mix_audit, "~> 2.1", only: [:dev, :test], runtime: false},
+      {:dialyxir, "~> 1.4", only: :dev, runtime: false},
       {:lazy_html, ">= 0.1.0", only: :test},
-      {:stream_data, "~> 1.3", only: :test}
+      {:stream_data, "~> 1.3", only: :test},
+      {:phoenix_test, "~> 0.11.1", only: :test},
+      {:phoenix_test_playwright, "~> 0.15.0", only: :test, runtime: false}
+    ]
+  end
+
+  defp dialyzer do
+    [
+      plt_add_apps: [:mix, :ex_unit, :anubis_mcp, :peri],
+      ignore_warnings: ".dialyzer_ignore.exs"
     ]
   end
 end

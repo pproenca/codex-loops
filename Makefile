@@ -1,4 +1,4 @@
-.PHONY: setup format-check quality test spec-lint build release release-mcp check-burrito-tools proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: setup format-check quality credo-check security-check audit-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint build release release-mcp check-burrito-tools proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -36,8 +36,32 @@ format-check:
 
 quality:
 	$(MAKE) format-check
+	$(MAKE) audit-check
 	$(MAKE) build
+	$(MAKE) credo-check
+	$(MAKE) security-check
 	$(MAKE) test
+
+credo-check:
+	mix credo
+
+security-check:
+	mix sobelow --router lib/workflow/web/router.ex --private --compact --threshold medium --exit medium --skip --ignore Config.HTTPS,Config.CSP
+
+audit-check:
+	mix deps.audit
+	mix hex.audit
+
+dialyzer-check:
+	mix dialyzer
+
+browser-e2e-setup:
+	npm --prefix assets install
+	npx --prefix assets playwright install chromium
+
+browser-e2e:
+	@test -x assets/node_modules/.bin/playwright || { echo "Playwright is not installed. Run 'make browser-e2e-setup'."; exit 1; }
+	CODEX_LOOPS_BROWSER_E2E=1 mix test --only browser_e2e
 
 test: spec-lint
 	mix test

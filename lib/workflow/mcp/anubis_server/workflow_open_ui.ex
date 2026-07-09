@@ -6,9 +6,7 @@ defmodule Workflow.MCP.AnubisServer.WorkflowOpenUI do
   alias Workflow.MCP.AnubisServer.ToolHelpers
 
   schema do
-    field(:run_id, {:required, {:string, {:min, 1}}},
-      description: "Run id returned by workflow_start."
-    )
+    field(:run_id, {:required, {:string, {:min, 1}}}, description: "Run id returned by workflow_start.")
   end
 
   @impl true

@@ -127,17 +127,13 @@ defmodule Workflow.Schema.Compiler do
 
   # --- AST dispatch for a nested object body (raises on out-of-vocabulary) ---
 
-  defp field({scalar, _meta, [name]}, env) when scalar in @scalars,
-    do: scalar_field(scalar, name, [], env)
+  defp field({scalar, _meta, [name]}, env) when scalar in @scalars, do: scalar_field(scalar, name, [], env)
 
-  defp field({scalar, _meta, [name, opts]}, env) when scalar in @scalars,
-    do: scalar_field(scalar, name, opts, env)
+  defp field({scalar, _meta, [name, opts]}, env) when scalar in @scalars, do: scalar_field(scalar, name, opts, env)
 
-  defp field({:array, _meta, [name, opts, [do: block]]}, env),
-    do: array_field(name, opts, block, env)
+  defp field({:array, _meta, [name, opts, [do: block]]}, env), do: array_field(name, opts, block, env)
 
-  defp field({:array, _meta, [name, opts]}, env),
-    do: array_field(name, opts, nil, env)
+  defp field({:array, _meta, [name, opts]}, env), do: array_field(name, opts, nil, env)
 
   defp field(form, env) do
     raise_finding(env, form, "unknown schema builder outside the field vocabulary",
@@ -151,9 +147,7 @@ defmodule Workflow.Schema.Compiler do
   defp field_key(name, _env) when is_binary(name), do: name
 
   defp field_key(name, env) do
-    raise_finding(env, name, "a schema field name must be a literal atom or string",
-      hint: "e.g. string :file"
-    )
+    raise_finding(env, name, "a schema field name must be a literal atom or string", hint: "e.g. string :file")
   end
 
   defp keyword!(opts, allowed, env) when is_list(opts) do
@@ -192,7 +186,7 @@ defmodule Workflow.Schema.Compiler do
   defp statements(single), do: [single]
 
   defp vocabulary do
-    (Enum.map(@scalars, &Atom.to_string/1) ++ ["array"]) |> Enum.join(", ")
+    Enum.join(Enum.map(@scalars, &Atom.to_string/1) ++ ["array"], ", ")
   end
 
   defp raise_finding(env, form, message, opts \\ []) do

@@ -3,12 +3,11 @@ defmodule Workflow.MCP.AnubisServer.WorkflowValidate do
 
   use Anubis.Server.Component, type: :tool, name: "workflow_validate"
 
-  alias Workflow.MCP.{AnubisServer.ToolHelpers, SchedulerClient}
+  alias Workflow.MCP.AnubisServer.ToolHelpers
+  alias Workflow.MCP.SchedulerClient
 
   schema do
-    field(:script_path, {:required, :string},
-      description: "Path to the workflow .exs file to validate."
-    )
+    field(:script_path, {:required, :string}, description: "Path to the workflow .exs file to validate.")
   end
 
   @impl true

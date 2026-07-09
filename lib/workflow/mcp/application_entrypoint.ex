@@ -2,6 +2,7 @@ defmodule Workflow.MCP.ApplicationEntrypoint do
   @moduledoc false
 
   alias Workflow.MCP.AnubisStdio
+
   require Logger
 
   @spec run :: no_return()

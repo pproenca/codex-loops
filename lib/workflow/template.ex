@@ -7,8 +7,8 @@ defmodule Workflow.Template do
   control flow, or interpolation.
   """
 
-  alias Workflow.Compiler.Finding
   alias __MODULE__.Hole
+  alias Workflow.Compiler.Finding
 
   defmodule Hole do
     @moduledoc "A parsed, inert template hole."
@@ -33,9 +33,7 @@ defmodule Workflow.Template do
   def parse(source, env) when is_binary(source) do
     if String.contains?(source, "\#{") do
       {:error,
-       Finding.at(env, nil, "template interpolation is not allowed",
-         hint: "use `<%= @name %>` holes over `let` bindings"
-       )}
+       Finding.at(env, nil, "template interpolation is not allowed", hint: "use `<%= @name %>` holes over `let` bindings")}
     else
       scan(source, [], [], [], env)
     end
@@ -45,7 +43,8 @@ defmodule Workflow.Template do
   def to_parts(%__MODULE__{segments: segments, holes: holes}, bindings) do
     [head | tail] = segments
 
-    Enum.zip(holes, tail)
+    holes
+    |> Enum.zip(tail)
     |> Enum.reduce([{:text, head}], fn {%Hole{} = hole, segment}, parts ->
       ref = fetch_binding!(hole.assign, bindings)
       parts ++ [hole_part(hole, binding_part(ref)), {:text, segment}]
@@ -71,9 +70,7 @@ defmodule Workflow.Template do
             case :binary.match(hole_and_tail, "%>") do
               :nomatch ->
                 {:error,
-                 Finding.at(env, nil, "template hole is missing `%>`",
-                   hint: "close every hole as `<%= @name %>`"
-                 )}
+                 Finding.at(env, nil, "template hole is missing `%>`", hint: "close every hole as `<%= @name %>`")}
 
               {close_index, 2} ->
                 hole = binary_part(hole_and_tail, 0, close_index)
@@ -108,8 +105,7 @@ defmodule Workflow.Template do
     end
   end
 
-  defp parse_hole("if " <> _rest, env),
-    do: {:error, Finding.at(env, nil, "`if` holes are not allowed in `~P` templates")}
+  defp parse_hole("if " <> _rest, env), do: {:error, Finding.at(env, nil, "`if` holes are not allowed in `~P` templates")}
 
   defp parse_hole("if\n" <> _rest, env),
     do: {:error, Finding.at(env, nil, "`if` holes are not allowed in `~P` templates")}
@@ -150,8 +146,7 @@ defmodule Workflow.Template do
     end
   end
 
-  defp formatter_hole("flatten", assign, nil, _env),
-    do: {:ok, %Hole{op: :flatten, assign: assign, args: %{pointer: ""}}}
+  defp formatter_hole("flatten", assign, nil, _env), do: {:ok, %Hole{op: :flatten, assign: assign, args: %{pointer: ""}}}
 
   defp formatter_hole("flatten", assign, arg, env) when is_binary(arg) do
     with {:ok, pointer} <- pointer_arg(arg, env) do
@@ -159,8 +154,7 @@ defmodule Workflow.Template do
     end
   end
 
-  defp formatter_hole("count", assign, nil, _env),
-    do: {:ok, %Hole{op: :count, assign: assign, args: %{pointer: ""}}}
+  defp formatter_hole("count", assign, nil, _env), do: {:ok, %Hole{op: :count, assign: assign, args: %{pointer: ""}}}
 
   defp formatter_hole("count", assign, arg, env) when is_binary(arg) do
     with {:ok, pointer} <- pointer_arg(arg, env) do
@@ -207,8 +201,7 @@ defmodule Workflow.Template do
   defp quoted_string(<<"\\\\", rest::binary>>, acc), do: quoted_string(rest, ["\\" | acc])
   defp quoted_string(<<"\\", _rest::binary>>, _acc), do: :error
 
-  defp quoted_string(<<char::utf8, rest::binary>>, acc),
-    do: quoted_string(rest, [<<char::utf8>> | acc])
+  defp quoted_string(<<char::utf8, rest::binary>>, acc), do: quoted_string(rest, [<<char::utf8>> | acc])
 
   defp quoted_string(_invalid, _acc), do: :error
 
@@ -233,9 +226,7 @@ defmodule Workflow.Template do
       {:ok, integer_literal_value(source)}
     else
       {:error,
-       Finding.at(env, nil, "truncate formatter expects a non-negative integer",
-         hint: "write `truncate(@name, 4000)`"
-       )}
+       Finding.at(env, nil, "truncate formatter expects a non-negative integer", hint: "write `truncate(@name, 4000)`")}
     end
   end
 
@@ -271,14 +262,11 @@ defmodule Workflow.Template do
     )
   end
 
-  defp integer_literal_value("0x" <> digits),
-    do: digits |> strip_separators() |> String.to_integer(16)
+  defp integer_literal_value("0x" <> digits), do: digits |> strip_separators() |> String.to_integer(16)
 
-  defp integer_literal_value("0o" <> digits),
-    do: digits |> strip_separators() |> String.to_integer(8)
+  defp integer_literal_value("0o" <> digits), do: digits |> strip_separators() |> String.to_integer(8)
 
-  defp integer_literal_value("0b" <> digits),
-    do: digits |> strip_separators() |> String.to_integer(2)
+  defp integer_literal_value("0b" <> digits), do: digits |> strip_separators() |> String.to_integer(2)
 
   defp integer_literal_value(digits), do: digits |> strip_separators() |> String.to_integer(10)
 
@@ -290,8 +278,7 @@ defmodule Workflow.Template do
        env,
        nil,
        "only `<%= @name %>` or closed formatter holes are allowed in `~P` templates",
-       hint:
-         "use `@name`, `path`, `flatten`, `count`, `numbered_findings`, or `truncate` over an assign"
+       hint: "use `@name`, `path`, `flatten`, `count`, `numbered_findings`, or `truncate` over an assign"
      )}
   end
 

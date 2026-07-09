@@ -1,9 +1,9 @@
 defmodule Workflow.RenderTextTest do
   use ExUnit.Case, async: true
 
-  alias Workflow.Provider.Usage
-  alias Workflow.Node.Agent
   alias Workflow.Event
+  alias Workflow.Node.Agent
+  alias Workflow.Provider.Usage
 
   test "renders literal prompt fragments with the existing byte shape" do
     assert Code.ensure_loaded?(Workflow.RenderText)
@@ -43,7 +43,7 @@ defmodule Workflow.RenderTextTest do
              ])
 
     assert synthesize_prompt ==
-             "Write up the winning plan.\n\nInputs: [\"plan A\", \"plan B\", \"plan C\"]"
+             ~s(Write up the winning plan.\n\nInputs: ["plan A", "plan B", "plan C"])
   end
 
   test "renders bound node and map references from a hand-built journal" do

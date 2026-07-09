@@ -8,7 +8,11 @@ defmodule Workflow.DataflowCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Agent, Emit, EmitResult, Refine, Synthesize}
+  alias Workflow.Node.Agent
+  alias Workflow.Node.Emit
+  alias Workflow.Node.EmitResult
+  alias Workflow.Node.Refine
+  alias Workflow.Node.Synthesize
   alias Workflow.Template
   alias Workflow.Template.Hole
 
@@ -247,9 +251,7 @@ defmodule Workflow.DataflowCompilerTest do
       assert f.message =~ "unbound template assign"
 
       assert {:error, %Finding{line: 1} = f} =
-               parse(
-                 ~s|emit(~P"Final draft: <%= @draft %>")\nlet :draft = agent("Write a draft.")|
-               )
+               parse(~s|emit(~P"Final draft: <%= @draft %>")\nlet :draft = agent("Write a draft.")|)
 
       assert f.message =~ "unbound template assign"
     end
@@ -475,13 +477,11 @@ defmodule Workflow.DataflowCompilerTest do
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = struct), do: struct |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(map) when is_map(map),
-    do: map |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(map) when is_map(map), do: map |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(list) when is_list(list), do: Enum.any?(list, &contains_function?/1)
 
-  defp contains_function?(tuple) when is_tuple(tuple),
-    do: tuple |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_other), do: false
 end

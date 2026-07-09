@@ -83,7 +83,7 @@ defmodule Workflow.Refine.Gate do
 
   defp non_empty?(nil), do: false
   defp non_empty?(value) when is_binary(value), do: byte_size(value) > 0
-  defp non_empty?(value) when is_list(value), do: length(value) > 0
+  defp non_empty?(value) when is_list(value), do: value != []
   defp non_empty?(value) when is_map(value), do: map_size(value) > 0
   defp non_empty?(_scalar), do: true
 
@@ -113,8 +113,7 @@ defmodule Workflow.Refine.Gate do
 
   defp valid_escape_tokens?([]), do: true
 
-  defp valid_escape_tokens?(["~", next | rest]) when next in ["0", "1"],
-    do: valid_escape_tokens?(rest)
+  defp valid_escape_tokens?(["~", next | rest]) when next in ["0", "1"], do: valid_escape_tokens?(rest)
 
   defp valid_escape_tokens?(["~" | _rest]), do: false
   defp valid_escape_tokens?([_char | rest]), do: valid_escape_tokens?(rest)

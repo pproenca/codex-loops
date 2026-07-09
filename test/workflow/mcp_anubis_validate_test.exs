@@ -375,7 +375,7 @@ defmodule Workflow.MCPAnubisValidateTest do
 
     assert_received {:responses, responses}
 
-    assert responses[2]["error"]["code"] == -32602
+    assert responses[2]["error"]["code"] == -32_602
     assert responses[2]["error"]["message"] == "Invalid params"
     assert responses[2]["error"]["data"]["message"] =~ "script_path"
   end
@@ -394,7 +394,7 @@ defmodule Workflow.MCPAnubisValidateTest do
 
     assert_received {:responses, responses}
 
-    assert responses[2]["error"]["code"] == -32602
+    assert responses[2]["error"]["code"] == -32_602
     assert responses[2]["error"]["message"] == "Invalid params"
     assert responses[2]["error"]["data"]["message"] =~ "run_id"
   end

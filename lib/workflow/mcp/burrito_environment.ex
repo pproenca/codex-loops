@@ -10,7 +10,7 @@ defmodule Workflow.MCP.BurritoEnvironment do
   @spec argv :: [String.t()]
   def argv do
     if burrito?() do
-      :init.get_plain_arguments() |> Enum.map(&to_string/1)
+      Enum.map(:init.get_plain_arguments(), &to_string/1)
     else
       System.argv()
     end

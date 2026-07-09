@@ -9,8 +9,19 @@ defmodule Workflow.LoopCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Agent, Collect, GenericFanout, Loop, Until, WhileBudget, UntilDry}
-  alias Workflow.Predicate.{Agree, AllOf, Compare, Count, Dry}
+  alias Workflow.Node.Agent
+  alias Workflow.Node.Collect
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Node.Loop
+  alias Workflow.Node.Until
+  alias Workflow.Node.UntilDry
+  alias Workflow.Node.WhileBudget
+  alias Workflow.Predicate.Agree
+  alias Workflow.Predicate.AllOf
+  alias Workflow.Predicate.AnyOf
+  alias Workflow.Predicate.Compare
+  alias Workflow.Predicate.Count
+  alias Workflow.Predicate.Dry
 
   defp env, do: %{__ENV__ | file: "workflows/loops.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
@@ -280,7 +291,7 @@ defmodule Workflow.LoopCompilerTest do
         return :ok
         """)
 
-      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %Workflow.Predicate.AnyOf{}]}}, _] =
+      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %AnyOf{}]}}, _] =
                tree.nodes
     end
 
@@ -298,7 +309,7 @@ defmodule Workflow.LoopCompilerTest do
         return :ok
         """)
 
-      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %Workflow.Predicate.AnyOf{}]}}, _] =
+      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %AnyOf{}]}}, _] =
                tree.nodes
     end
 
@@ -311,9 +322,7 @@ defmodule Workflow.LoopCompilerTest do
 
     test "an out-of-vocabulary predicate is rejected at compile time" do
       assert {:error, %Finding{}} =
-               parse(
-                 "while_budget reserve: 0, until: count(:a) * 2 >= 3 do\n  agent \"w\"\nend\nreturn :ok"
-               )
+               parse("while_budget reserve: 0, until: count(:a) * 2 >= 3 do\n  agent \"w\"\nend\nreturn :ok")
     end
   end
 
@@ -343,18 +352,14 @@ defmodule Workflow.LoopCompilerTest do
 
     test "requires a positive rounds" do
       assert {:error, %Finding{} = f} =
-               parse(
-                 "until_dry rounds: 0, seen_by: [:id] do\n  agent \"s\"\n  collect into: :x\nend\nreturn :ok"
-               )
+               parse("until_dry rounds: 0, seen_by: [:id] do\n  agent \"s\"\n  collect into: :x\nend\nreturn :ok")
 
       assert f.message =~ "rounds"
     end
 
     test "seen_by must be a field list, never a function" do
       assert {:error, %Finding{} = f} =
-               parse(
-                 "until_dry rounds: 1, seen_by: fn x -> x end do\n  agent \"s\"\n  collect into: :x\nend\nreturn :ok"
-               )
+               parse("until_dry rounds: 1, seen_by: fn x -> x end do\n  agent \"s\"\n  collect into: :x\nend\nreturn :ok")
 
       assert f.message =~ "field list"
     end
@@ -427,13 +432,11 @@ defmodule Workflow.LoopCompilerTest do
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(m) when is_map(m),
-    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
 
-  defp contains_function?(t) when is_tuple(t),
-    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
 end

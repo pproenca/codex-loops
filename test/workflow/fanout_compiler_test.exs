@@ -9,17 +9,14 @@ defmodule Workflow.FanoutCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-
-  alias Workflow.Node.{
-    Agent,
-    BudgetSlices,
-    Emit,
-    GenericFanout,
-    Parallel,
-    PathCount,
-    Pipeline,
-    Return
-  }
+  alias Workflow.Node.Agent
+  alias Workflow.Node.BudgetSlices
+  alias Workflow.Node.Emit
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Node.Parallel
+  alias Workflow.Node.PathCount
+  alias Workflow.Node.Pipeline
+  alias Workflow.Node.Return
 
   defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
@@ -273,9 +270,7 @@ defmodule Workflow.FanoutCompilerTest do
 
     test "path_count width requires a preceding binding and an explicit positive max" do
       assert {:error, %Finding{} = f} =
-               parse(
-                 "fanout width: path_count(:items, \"/rows\", max: 4) do\n agent \"w\"\nend\nreturn :ok"
-               )
+               parse(~s{fanout width: path_count(:items, "/rows", max: 4) do\n agent "w"\nend\nreturn :ok})
 
       assert f.message =~ "unknown binding"
 
@@ -326,13 +321,11 @@ defmodule Workflow.FanoutCompilerTest do
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(m) when is_map(m),
-    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
 
-  defp contains_function?(t) when is_tuple(t),
-    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
 end

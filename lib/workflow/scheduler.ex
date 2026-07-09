@@ -7,16 +7,17 @@ defmodule Workflow.Scheduler do
   unexpected process failures are left to crash under supervision.
   """
 
-  alias Workflow.{Journal, Provider, Run, Script, Status}
-
-  alias Workflow.Scheduler.{
-    Error,
-    Health,
-    RunEventsProjection,
-    RunProjection,
-    RunStart,
-    Validation
-  }
+  alias Workflow.Journal
+  alias Workflow.Provider
+  alias Workflow.Run
+  alias Workflow.Scheduler.Error
+  alias Workflow.Scheduler.Health
+  alias Workflow.Scheduler.RunEventsProjection
+  alias Workflow.Scheduler.RunProjection
+  alias Workflow.Scheduler.RunStart
+  alias Workflow.Scheduler.Validation
+  alias Workflow.Script
+  alias Workflow.Status
 
   @app :codex_loops
   @supported_providers ["mock", "codex"]
@@ -25,7 +26,7 @@ defmodule Workflow.Scheduler do
   def health do
     checks = %{
       otp_app: available?(application_started?(@app)),
-      journal: available?(process_alive?(Workflow.Journal)),
+      journal: available?(process_alive?(Journal)),
       pubsub: available?(process_alive?(Workflow.PubSub)),
       endpoint: available?(process_alive?(Workflow.Web.Endpoint))
     }
@@ -44,9 +45,7 @@ defmodule Workflow.Scheduler do
          {:ok, provider} <- run_provider(params),
          {:ok, budget} <- run_budget(params),
          {:ok, tree} <- Script.load_tree(path) do
-      opts =
-        [provider: provider, budget: budget, script_path: Path.expand(path)]
-        |> put_run_id(run_id)
+      opts = put_run_id([provider: provider, budget: budget, script_path: Path.expand(path)], run_id)
 
       case Run.start(tree, opts) do
         {:ok, started_run_id, _pid} ->
@@ -136,14 +135,11 @@ defmodule Workflow.Scheduler do
   def get_run_events(_run_id), do: {:error, Error.invalid_run_id()}
 
   @spec validate_workflow(map()) :: {:ok, Validation.t()} | {:error, Error.t()}
-  def validate_workflow(%{"script_path" => path}) when is_binary(path),
-    do: validate_workflow_path(path)
+  def validate_workflow(%{"script_path" => path}) when is_binary(path), do: validate_workflow_path(path)
 
-  def validate_workflow(%{script_path: path}) when is_binary(path),
-    do: validate_workflow_path(path)
+  def validate_workflow(%{script_path: path}) when is_binary(path), do: validate_workflow_path(path)
 
-  def validate_workflow(%{"script" => path}) when is_binary(path),
-    do: validate_workflow_path(path)
+  def validate_workflow(%{"script" => path}) when is_binary(path), do: validate_workflow_path(path)
 
   def validate_workflow(_params), do: {:error, Error.missing_script_path()}
 
@@ -275,7 +271,7 @@ defmodule Workflow.Scheduler do
   defp put_run_id(opts, run_id), do: Keyword.put(opts, :run_id, run_id)
 
   defp validate_workflow_path(path) do
-    case Workflow.Script.load_tree(path) do
+    case Script.load_tree(path) do
       {:ok, tree} -> {:ok, Validation.from_tree(tree, path)}
       {:error, error} -> {:error, Error.workflow_validation(error)}
     end

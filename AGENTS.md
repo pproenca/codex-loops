@@ -24,6 +24,8 @@ SQLite journal.
 ```sh
 make setup
 make quality
+make browser-e2e
+make dialyzer-check
 make build
 make test
 make release

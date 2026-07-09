@@ -4,7 +4,9 @@ defmodule Workflow.Web.SchedulerRunController do
   use Phoenix.Controller, formats: [:json]
 
   alias Workflow.Scheduler
-  alias Workflow.Scheduler.{RunEventsProjection, RunProjection, RunStart}
+  alias Workflow.Scheduler.RunEventsProjection
+  alias Workflow.Scheduler.RunProjection
+  alias Workflow.Scheduler.RunStart
   alias Workflow.Web.SchedulerAPI
 
   def create(conn, params) do

@@ -119,8 +119,7 @@ defmodule Workflow.Refine.ReviewerAdapter do
 
   defp approval_schema(%{approval_kind: :boolean}), do: %{"type" => "boolean"}
 
-  defp approval_schema(%{approval_kind: :verdict}),
-    do: %{"type" => "string", "enum" => ["approve", "changes"]}
+  defp approval_schema(%{approval_kind: :verdict}), do: %{"type" => "string", "enum" => ["approve", "changes"]}
 
   defp item_schema(config) do
     %{
@@ -131,8 +130,7 @@ defmodule Workflow.Refine.ReviewerAdapter do
     }
   end
 
-  defp item_required(%{require_blocking: true} = config),
-    do: ["id", "blocking", config.issue_field, config.fix_field]
+  defp item_required(%{require_blocking: true} = config), do: ["id", "blocking", config.issue_field, config.fix_field]
 
   defp item_required(config), do: ["id", config.issue_field, config.fix_field]
 
@@ -151,8 +149,7 @@ defmodule Workflow.Refine.ReviewerAdapter do
     end
   end
 
-  defp top_level_keys(config),
-    do: [config.approval_field, config.array_field, "cross_expert_note", "report_snippet"]
+  defp top_level_keys(config), do: [config.approval_field, config.array_field, "cross_expert_note", "report_snippet"]
 
   defp allowed_keys(map, allowed, reason) do
     if Enum.all?(Map.keys(map), &(&1 in allowed)), do: :ok, else: {:error, reason}
@@ -226,8 +223,7 @@ defmodule Workflow.Refine.ReviewerAdapter do
     end
   end
 
-  defp severity_blocking?(severity) when severity in ["blocker", "blocking", "critical", "error"],
-    do: true
+  defp severity_blocking?(severity) when severity in ["blocker", "blocking", "critical", "error"], do: true
 
   defp severity_blocking?(_severity), do: false
 

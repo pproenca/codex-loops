@@ -1,16 +1,20 @@
 defmodule Workflow.RefineRunTest do
   use ExUnit.Case, async: false
 
+  alias Workflow.Journal
+  alias Workflow.Ledger
+  alias Workflow.Provider.Usage
+  alias Workflow.Run
+  alias Workflow.Status
+  alias Workflow.Test.ExplodingProvider
+  alias Workflow.Test.RefineProvider
+  alias Workflow.Test.ScriptedProvider
+
   @moduletag :capture_log
 
-  alias Workflow.{Journal, Ledger, Run, Status}
-  alias Workflow.Provider.Usage
-  alias Workflow.Test.{ExplodingProvider, RefineProvider, ScriptedProvider}
-
   defmodule ReplayStartedProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -66,9 +70,8 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule ProducerRetryCrashProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -89,9 +92,8 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule ReviserRetryCrashProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -131,9 +133,8 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule SlowReviewerProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -160,9 +161,8 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule KilledReviewerProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -188,9 +188,8 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule ColdReadLaneFailureProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -233,9 +232,8 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule ReviewerRoleFailureProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
-
-    alias Workflow.Provider.Usage
 
     @impl true
     def run_agent(prompt, _schema, key, opts) do
@@ -275,11 +273,11 @@ defmodule Workflow.RefineRunTest do
       {:error, {:provider_failure, :timeout, detail, usage(7), activity}}
     end
 
-    defp usage(total),
-      do: %Usage{input_tokens: total, output_tokens: 0, total_tokens: total}
+    defp usage(total), do: %Usage{input_tokens: total, output_tokens: 0, total_tokens: total}
   end
 
   defmodule InlineConverges do
+    @moduledoc false
     use Workflow
 
     workflow "inline-converges" do
@@ -298,6 +296,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule ChangedInlineConverges do
+    @moduledoc false
     use Workflow
 
     workflow "changed-inline-converges" do
@@ -318,6 +317,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule BoundConverges do
+    @moduledoc false
     use Workflow
 
     workflow "bound-converges" do
@@ -338,6 +338,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule BoundInvalidObject do
+    @moduledoc false
     use Workflow
 
     workflow "bound-invalid-object" do
@@ -358,6 +359,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule BoundArtifactObjectConverges do
+    @moduledoc false
     use Workflow
 
     workflow "bound-artifact-object-converges" do
@@ -378,6 +380,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule NonConvergesFail do
+    @moduledoc false
     use Workflow
 
     workflow "non-converges-fail" do
@@ -396,6 +399,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule NonConvergesAccept do
+    @moduledoc false
     use Workflow
 
     workflow "non-converges-accept" do
@@ -415,6 +419,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule AdapterConverges do
+    @moduledoc false
     use Workflow
 
     workflow "adapter-converges" do
@@ -436,6 +441,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule AcceptCurrentEmit do
+    @moduledoc false
     use Workflow
 
     workflow "accept-current-emit" do
@@ -458,6 +464,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule GateColdRepairEmitResult do
+    @moduledoc false
     use Workflow
 
     workflow "gate-cold-repair-emit-result" do
@@ -487,6 +494,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule GateHaltAcceptCurrent do
+    @moduledoc false
     use Workflow
 
     workflow "gate-halt-accept-current" do
@@ -509,6 +517,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule GateRepairReplayExhausted do
+    @moduledoc false
     use Workflow
 
     workflow "gate-repair-replay-exhausted" do
@@ -531,6 +540,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule GateReplayColdTrue do
+    @moduledoc false
     use Workflow
 
     workflow "gate-replay-cold-true" do
@@ -556,6 +566,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defmodule GateReplayColdFalseEdit do
+    @moduledoc false
     use Workflow
 
     workflow "gate-replay-cold-false-edit" do
@@ -582,7 +593,7 @@ defmodule Workflow.RefineRunTest do
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp events(id), do: Journal.fold(id)
-  defp types(id), do: events(id) |> Enum.map(& &1.type)
+  defp types(id), do: id |> events() |> Enum.map(& &1.type)
 
   defp await_lease_released(run_id, tries \\ 200) do
     cond do
@@ -628,10 +639,11 @@ defmodule Workflow.RefineRunTest do
   end
 
   defp append_events(id, journal_events) do
-    Enum.reduce(journal_events, 0, fn event, seq ->
-      assert :ok = Journal.append(id, seq, event)
-      seq + 1
-    end)
+    _next_seq =
+      Enum.reduce(journal_events, 0, fn event, seq ->
+        assert :ok = Journal.append(id, seq, event)
+        seq + 1
+      end)
 
     :ok
   end
@@ -705,7 +717,8 @@ defmodule Workflow.RefineRunTest do
            }
 
     committed =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :agent_committed))
 
     assert [
@@ -829,10 +842,9 @@ defmodule Workflow.RefineRunTest do
            ]
 
     committed_reviews =
-      events(id)
-      |> Enum.filter(
-        &(&1.type == :agent_committed and List.starts_with?(&1.payload.address, [0, 1]))
-      )
+      id
+      |> events()
+      |> Enum.filter(&(&1.type == :agent_committed and List.starts_with?(&1.payload.address, [0, 1])))
       |> Enum.map(& &1.payload.result)
 
     assert committed_reviews == [
@@ -962,7 +974,8 @@ defmodule Workflow.RefineRunTest do
              ]
 
     decisions =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :refine_round_decision))
       |> Enum.map(& &1.payload)
 
@@ -1074,7 +1087,7 @@ defmodule Workflow.RefineRunTest do
         0,
         key.([0, 0], 0),
         "draft-v1",
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.refine_round_started(node, 0, "draft-v1"),
       Workflow.Event.agent_committed(
@@ -1092,14 +1105,14 @@ defmodule Workflow.RefineRunTest do
             }
           ]
         },
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.agent_committed(
         %Workflow.Node.Agent{address: [0, 1, 1], prompt: "Check the runtime."},
         0,
         key.([0, 1, 1], 0),
         %{"approved" => true, "findings" => []},
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.refine_round_decision(node, 0, %{
         consensus: false,
@@ -1125,7 +1138,7 @@ defmodule Workflow.RefineRunTest do
         0,
         key.([0, 2], 0),
         "draft-v2",
-        %Workflow.Provider.Usage{}
+        %Usage{}
       )
     ]
 
@@ -1164,7 +1177,8 @@ defmodule Workflow.RefineRunTest do
     assert round1_runtime_prompt =~ "artifact:\ndraft-v2"
 
     committed_addresses =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :agent_committed))
       |> Enum.map(& &1.payload.address)
 
@@ -1229,7 +1243,8 @@ defmodule Workflow.RefineRunTest do
     refute_received {:reviewer_entered, _, %{node_path: [0, 1, 2]}, _}
 
     committed =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :agent_committed))
 
     assert Enum.map(committed, & &1.payload.address) == [
@@ -1253,7 +1268,8 @@ defmodule Workflow.RefineRunTest do
     assert Enum.count(events(id), &(&1.type == :agent_attempt_rejected)) == 2
 
     prompts =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type in [:agent_committed, :agent_attempt_rejected]))
       |> Enum.map(& &1.payload.prompt)
 
@@ -1281,7 +1297,8 @@ defmodule Workflow.RefineRunTest do
     refute :agent_activity in types(id)
 
     reviewer_events =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :agent_committed and match?([0, 1, _], &1.payload.address)))
 
     assert [
@@ -1294,7 +1311,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     {:ok, script} =
-      Workflow.Test.ScriptedProvider.start([
+      ScriptedProvider.start([
         "bound draft",
         %{"approved" => true, "findings" => []},
         %{"approved" => true, "findings" => []}
@@ -1303,7 +1320,7 @@ defmodule Workflow.RefineRunTest do
     assert {:ok, ^id} =
              Run.run(BoundConverges,
                run_id: id,
-               provider: {Workflow.Test.ScriptedProvider, script: script, sink: self()}
+               provider: {ScriptedProvider, script: script, sink: self()}
              )
 
     assert_received {:agent_called, "Draft."}
@@ -1336,7 +1353,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     {:ok, script} =
-      Workflow.Test.ScriptedProvider.start([
+      ScriptedProvider.start([
         %{"artifact" => "object draft"},
         %{"approved" => true, "findings" => []},
         %{"approved" => true, "findings" => []}
@@ -1345,7 +1362,7 @@ defmodule Workflow.RefineRunTest do
     assert {:ok, ^id} =
              Run.run(BoundArtifactObjectConverges,
                run_id: id,
-               provider: {Workflow.Test.ScriptedProvider, script: script, sink: self()}
+               provider: {ScriptedProvider, script: script, sink: self()}
              )
 
     assert_received {:agent_called, "Draft."}
@@ -1358,7 +1375,8 @@ defmodule Workflow.RefineRunTest do
     assert runtime_prompt =~ "artifact:\nobject draft"
 
     committed_addresses =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :agent_committed))
       |> Enum.map(& &1.payload.address)
 
@@ -1374,14 +1392,14 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     {:ok, script} =
-      Workflow.Test.ScriptedProvider.start([
+      ScriptedProvider.start([
         %{"not_artifact" => "value"}
       ])
 
     assert {:error, {:invalid_refine_input, [1], :artifact_object_unexpected_shape}} =
              Run.run(BoundInvalidObject,
                run_id: id,
-               provider: {Workflow.Test.ScriptedProvider, script: script, sink: self()}
+               provider: {ScriptedProvider, script: script, sink: self()}
              )
 
     assert_received {:agent_called, "Draft."}
@@ -1428,7 +1446,8 @@ defmodule Workflow.RefineRunTest do
              )
 
     rejected =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :agent_attempt_rejected))
 
     assert [
@@ -1469,7 +1488,8 @@ defmodule Workflow.RefineRunTest do
              )
 
     rejected =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :agent_attempt_rejected and &1.payload.address == [0, 2]))
 
     assert [
@@ -1534,7 +1554,7 @@ defmodule Workflow.RefineRunTest do
           attempt,
           %{"artifact" => 123},
           reason,
-          %Workflow.Provider.Usage{}
+          %Usage{}
         )
       end
 
@@ -1558,7 +1578,8 @@ defmodule Workflow.RefineRunTest do
                reason: ^final_reason
              }
            } =
-             events(id)
+             id
+             |> events()
              |> Enum.find(&(&1.type == :agent_failed and &1.payload.address == [0, 0]))
 
     refute :refine_round_started in types(id)
@@ -1597,7 +1618,7 @@ defmodule Workflow.RefineRunTest do
           attempt,
           %{"artifact" => 123},
           reason,
-          %Workflow.Provider.Usage{}
+          %Usage{}
         )
       end
 
@@ -1611,7 +1632,7 @@ defmodule Workflow.RefineRunTest do
           0,
           key(id, [0, 0], 0),
           "draft-v1",
-          %Workflow.Provider.Usage{}
+          %Usage{}
         ),
         Workflow.Event.refine_round_started(node, 0, "draft-v1"),
         Workflow.Event.agent_committed(
@@ -1619,14 +1640,14 @@ defmodule Workflow.RefineRunTest do
           0,
           key(id, [0, 1, 0], 0),
           %{"approved" => false, "findings" => [finding]},
-          %Workflow.Provider.Usage{}
+          %Usage{}
         ),
         Workflow.Event.agent_committed(
           runtime_reviewer,
           0,
           key(id, [0, 1, 1], 0),
           %{"approved" => true, "findings" => []},
-          %Workflow.Provider.Usage{}
+          %Usage{}
         ),
         Workflow.Event.refine_round_decision(node, 0, %{
           consensus: false,
@@ -1654,7 +1675,8 @@ defmodule Workflow.RefineRunTest do
                reason: ^final_reason
              }
            } =
-             events(id)
+             id
+             |> events()
              |> Enum.find(&(&1.type == :agent_failed and &1.payload.address == [0, 2]))
 
     refute :refine_non_converged in types(id)
@@ -1736,7 +1758,8 @@ defmodule Workflow.RefineRunTest do
            }
 
     [round0, round1] =
-      events(id)
+      id
+      |> events()
       |> Enum.filter(&(&1.type == :refine_round_decision))
       |> Enum.map(& &1.payload)
 
@@ -1832,14 +1855,17 @@ defmodule Workflow.RefineRunTest do
              %{type: :refine_role_failed, payload: %{role_address: [0, 1, 0], attempts: 1}},
              %{type: :agent_committed, payload: %{address: [0, 1, 1]}}
            ] =
-             events(id)
-             |> Enum.filter(&(&1.type in [:refine_role_failed, :agent_committed]))
+             id
+             |> events()
              |> Enum.filter(fn
                %{type: :refine_role_failed, payload: payload} ->
                  payload.role_address in [[0, 1, 0]]
 
                %{type: :agent_committed, payload: payload} ->
                  match?([0, 1, _], payload.address) and payload.iteration == 0
+
+               _event ->
+                 false
              end)
 
     assert Enum.find(events(id), &(&1.type == :refine_started)).payload.reviewer_timeout_ms == 10
@@ -1863,14 +1889,17 @@ defmodule Workflow.RefineRunTest do
              },
              %{type: :agent_committed, payload: %{address: [0, 1, 1]}}
            ] =
-             events(id)
-             |> Enum.filter(&(&1.type in [:refine_role_failed, :agent_committed]))
+             id
+             |> events()
              |> Enum.filter(fn
                %{type: :refine_role_failed, payload: payload} ->
                  payload.role_address in [[0, 1, 0]]
 
                %{type: :agent_committed, payload: payload} ->
                  match?([0, 1, _], payload.address) and payload.iteration == 0
+
+               _event ->
+                 false
              end)
 
     assert :refine_round_decision in types(id)
@@ -2189,7 +2218,7 @@ defmodule Workflow.RefineRunTest do
         0,
         key.([0, 0]),
         "draft-v1",
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.refine_round_started(node, 0, "draft-v1"),
       Workflow.Event.agent_committed(
@@ -2197,14 +2226,14 @@ defmodule Workflow.RefineRunTest do
         0,
         key.([0, 1, 0]),
         %{"approved" => false, "findings" => []},
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.agent_committed(
         %Workflow.Node.Agent{address: [0, 1, 1], prompt: "Check the runtime."},
         0,
         key.([0, 1, 1]),
         %{"approved" => true, "findings" => []},
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.refine_round_decision(node, 0, %{
         consensus: false,
@@ -2409,7 +2438,7 @@ defmodule Workflow.RefineRunTest do
         0,
         key.([0, 0]),
         "draft-v1",
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.refine_round_started(
         hd(InlineConverges.__workflow__(:tree).nodes),
@@ -2421,14 +2450,14 @@ defmodule Workflow.RefineRunTest do
         0,
         key.([0, 1, 0]),
         %{"approved" => true, "findings" => []},
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.agent_committed(
         %Workflow.Node.Agent{address: [0, 1, 1], prompt: "Check the runtime."},
         0,
         key.([0, 1, 1]),
         %{"approved" => true, "findings" => []},
-        %Workflow.Provider.Usage{}
+        %Usage{}
       ),
       Workflow.Event.refine_round_decision(hd(InlineConverges.__workflow__(:tree).nodes), 0, %{
         consensus: true,

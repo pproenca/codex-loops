@@ -31,34 +31,34 @@ defmodule Workflow.Compiler do
   failure.
   """
 
-  alias Workflow.{Tree, Predicate, RenderText, Template}
-  alias Workflow.Refine.{Gate, ReviewerAdapter}
-
-  alias Workflow.Node.{
-    Phase,
-    Log,
-    Agent,
-    Emit,
-    EmitResult,
-    Return,
-    Parallel,
-    Pipeline,
-    Collect,
-    Loop,
-    Until,
-    WhileBudget,
-    UntilDry,
-    Verify,
-    Refine,
-    Judge,
-    Synthesize,
-    GenericFanout,
-    FanOut,
-    BudgetSlices,
-    PathCount
-  }
-
   alias Workflow.Compiler.Finding
+  alias Workflow.Node.Agent
+  alias Workflow.Node.BudgetSlices
+  alias Workflow.Node.Collect
+  alias Workflow.Node.Emit
+  alias Workflow.Node.EmitResult
+  alias Workflow.Node.FanOut
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Node.Judge
+  alias Workflow.Node.Log
+  alias Workflow.Node.Loop
+  alias Workflow.Node.Parallel
+  alias Workflow.Node.PathCount
+  alias Workflow.Node.Phase
+  alias Workflow.Node.Pipeline
+  alias Workflow.Node.Refine
+  alias Workflow.Node.Return
+  alias Workflow.Node.Synthesize
+  alias Workflow.Node.Until
+  alias Workflow.Node.UntilDry
+  alias Workflow.Node.Verify
+  alias Workflow.Node.WhileBudget
+  alias Workflow.Predicate
+  alias Workflow.Refine.Gate
+  alias Workflow.Refine.ReviewerAdapter
+  alias Workflow.RenderText
+  alias Workflow.Template
+  alias Workflow.Tree
 
   # The closed combinator vocabulary. Determinism is a property of this set: it
   # contains no randomness or wall-clock node, so neither can be expressed.
@@ -176,16 +176,7 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp finish_build(
-         %GenericFanout{bind: bind} = fanout,
-         _stmt,
-         rest,
-         index,
-         acc,
-         seen,
-         env,
-         binding_env
-       )
+  defp finish_build(%GenericFanout{bind: bind} = fanout, _stmt, rest, index, acc, seen, env, binding_env)
        when not is_nil(bind) do
     build(
       rest,
@@ -213,12 +204,7 @@ defmodule Workflow.Compiler do
     build(rest, index + 1, [node | acc], seen, env, binding_env)
   end
 
-  defp let_node(
-         {:let, _meta, [{:=, _eq_meta, [name, producer]}]} = form,
-         address,
-         env,
-         binding_env
-       ) do
+  defp let_node({:let, _meta, [{:=, _eq_meta, [name, producer]}]} = form, address, env, binding_env) do
     with :ok <- binding_name(name, form, env),
          {:ok, node} <- node(producer, address, env, binding_env),
          :ok <- bindable_producer(node, form, env) do
@@ -280,8 +266,7 @@ defmodule Workflow.Compiler do
   defp node({:log, _meta, [message]}, address, _env, _binding_env) when is_binary(message),
     do: {:ok, %Log{address: address, message: message}}
 
-  defp node({:agent, _meta, [prompt]} = form, address, env, _binding_env)
-       when is_binary(prompt) do
+  defp node({:agent, _meta, [prompt]} = form, address, env, _binding_env) when is_binary(prompt) do
     with {:ok, prompt} <- prompt_text(prompt, form, env, "agent prompt") do
       {:ok, %Agent{address: address, prompt: prompt, schema: nil, retries: @default_retries}}
     end
@@ -312,15 +297,13 @@ defmodule Workflow.Compiler do
   # A schema-backed agent: `agent "…", schema: %{…}, retries: n`. The options must
   # be a literal keyword list drawn from @agent_option_keys; the schema must be a
   # literal map (materialized to its runtime value so the node stays inert data).
-  defp node({:agent, _meta, [prompt, opts]} = form, address, env, _binding_env)
-       when is_binary(prompt) do
+  defp node({:agent, _meta, [prompt, opts]} = form, address, env, _binding_env) when is_binary(prompt) do
     with {:ok, prompt} <- prompt_text(prompt, form, env, "agent prompt"),
          {:ok, kw} <- agent_options(opts, form, env),
          {:ok, schema} <- agent_schema(kw, form, env),
          {:ok, retries} <- agent_retries(kw, form, env),
          {:ok, label} <- agent_label(kw, form, env) do
-      {:ok,
-       %Agent{address: address, prompt: prompt, label: label, schema: schema, retries: retries}}
+      {:ok, %Agent{address: address, prompt: prompt, label: label, schema: schema, retries: retries}}
     end
   end
 
@@ -378,13 +361,11 @@ defmodule Workflow.Compiler do
   # `parallel [agent(...), ...]` — a barrier fan-out over a literal list of agent
   # branches, optionally capped by `max_concurrency:`. Each branch is addressed
   # `address ++ [branch_index]`, so branches journal and key independently.
-  defp node({:parallel, _meta, [branches]} = form, address, env, binding_env)
-       when is_list(branches),
-       do: parallel(branches, [], address, form, env, binding_env)
+  defp node({:parallel, _meta, [branches]} = form, address, env, binding_env) when is_list(branches),
+    do: parallel(branches, [], address, form, env, binding_env)
 
-  defp node({:parallel, _meta, [branches, opts]} = form, address, env, binding_env)
-       when is_list(branches),
-       do: parallel(branches, opts, address, form, env, binding_env)
+  defp node({:parallel, _meta, [branches, opts]} = form, address, env, binding_env) when is_list(branches),
+    do: parallel(branches, opts, address, form, env, binding_env)
 
   # `pipeline items, [agent(...), ...]` — per-item lanes through ordered stages,
   # optionally capped by `max_concurrency:`. `items` is a literal list; the lanes
@@ -532,8 +513,7 @@ defmodule Workflow.Compiler do
 
   # `synthesize inputs, "prompt"` — fold literal inputs into one result under a
   # static prompt. Both are compile-time literals, so the node stays inert.
-  defp node({:synthesize, _meta, [inputs, prompt]} = form, address, env, _binding_env)
-       when is_binary(prompt) do
+  defp node({:synthesize, _meta, [inputs, prompt]} = form, address, env, _binding_env) when is_binary(prompt) do
     with {:ok, prompt} <- prompt_text(prompt, form, env, "synthesize prompt") do
       if Macro.quoted_literal?(inputs) do
         {:ok, %Synthesize{address: address, inputs: materialize(inputs), prompt: prompt}}
@@ -546,12 +526,7 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp node(
-         {:synthesize, _meta, [inputs, {:<<>>, _, _parts}]} = form,
-         _address,
-         env,
-         _binding_env
-       ) do
+  defp node({:synthesize, _meta, [inputs, {:<<>>, _, _parts}]} = form, _address, env, _binding_env) do
     if Macro.quoted_literal?(inputs) do
       {:error, interpolation_finding(form, env, "synthesize prompt")}
     else
@@ -621,9 +596,8 @@ defmodule Workflow.Compiler do
 
   # A known combinator invoked with the wrong argument shape: recoverable finding,
   # located at the declaration site.
-  defp node({combinator, _meta, _args} = form, _address, env, _binding_env)
-       when combinator in @combinators,
-       do: {:error, Finding.at(env, form, "`#{combinator}` was called with invalid arguments")}
+  defp node({combinator, _meta, _args} = form, _address, env, _binding_env) when combinator in @combinators,
+    do: {:error, Finding.at(env, form, "`#{combinator}` was called with invalid arguments")}
 
   # --- Forbidden-form catalog: everything below raises, so non-determinism and
   # escape hatches are unrepresentable in a compiled tree. ---
@@ -647,8 +621,7 @@ defmodule Workflow.Compiler do
   end
 
   # An unknown bare call: reject with a closed-vocabulary suggestion.
-  defp node({name, _meta, args} = form, _address, env, _binding_env)
-       when is_atom(name) and is_list(args) do
+  defp node({name, _meta, args} = form, _address, env, _binding_env) when is_atom(name) and is_list(args) do
     raise_finding(Finding.at(env, form, "unknown combinator `#{name}`", hint: suggest(name)))
   end
 
@@ -729,8 +702,7 @@ defmodule Workflow.Compiler do
         end
 
       {:error, _reason} ->
-        {:error,
-         Finding.at(env, form, "`schema:` references an unknown module #{inspect(module)}")}
+        {:error, Finding.at(env, form, "`schema:` references an unknown module #{inspect(module)}")}
     end
   end
 
@@ -759,9 +731,7 @@ defmodule Workflow.Compiler do
         {:ok, nil}
 
       {:ok, label} when is_binary(label) ->
-        with {:ok, label} <- prompt_text(label, form, env, "agent label") do
-          {:ok, label}
-        end
+        prompt_text(label, form, env, "agent label")
 
       {:ok, _} ->
         {:error, Finding.at(env, form, "`agent` label must be a string literal")}
@@ -772,9 +742,7 @@ defmodule Workflow.Compiler do
 
   defp parallel([], _opts, _address, form, env, _binding_env) do
     {:error,
-     Finding.at(env, form, "`parallel` requires at least one branch",
-       hint: "parallel [agent(\"...\"), agent(\"...\")]"
-     )}
+     Finding.at(env, form, "`parallel` requires at least one branch", hint: ~s{parallel [agent("..."), agent("...")]})}
   end
 
   defp parallel(branches, opts, address, form, env, binding_env) do
@@ -900,17 +868,14 @@ defmodule Workflow.Compiler do
       end
     else
       {:error,
-       Finding.at(env, form, "invalid fan-out options",
-         hint: "the only option is `max_concurrency: <pos integer>`"
-       )}
+       Finding.at(env, form, "invalid fan-out options", hint: "the only option is `max_concurrency: <pos integer>`")}
     end
   end
 
   # Materialize a **verified-literal** AST into its runtime value. Total over the
   # literal subset `Macro.quoted_literal?/1` admits; used only after that gate, so
   # the compiled node carries plain data (a map), never a fragment of AST.
-  defp materialize({:%{}, _, pairs}),
-    do: Map.new(pairs, fn {k, v} -> {materialize(k), materialize(v)} end)
+  defp materialize({:%{}, _, pairs}), do: Map.new(pairs, fn {k, v} -> {materialize(k), materialize(v)} end)
 
   defp materialize({:{}, _, elems}), do: elems |> Enum.map(&materialize/1) |> List.to_tuple()
   defp materialize({left, right}), do: {materialize(left), materialize(right)}
@@ -964,8 +929,7 @@ defmodule Workflow.Compiler do
            )}
 
         body_until_count > 1 ->
-          {:error,
-           Finding.at(env, form, "a generic loop body may contain at most one `until(...)`")}
+          {:error, Finding.at(env, form, "a generic loop body may contain at most one `until(...)`")}
 
         true ->
           {:ok, body}
@@ -973,8 +937,7 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp build_body([], _loop_address, _index, acc, _seen, _env, _binding_env, _mode),
-    do: {:ok, Enum.reverse(acc)}
+  defp build_body([], _loop_address, _index, acc, _seen, _env, _binding_env, _mode), do: {:ok, Enum.reverse(acc)}
 
   defp build_body([stmt | rest], loop_address, index, acc, seen, env, binding_env, mode) do
     case body_node(stmt, loop_address ++ [index], env, binding_env, mode) do
@@ -1128,10 +1091,7 @@ defmodule Workflow.Compiler do
          Enum.all?(Keyword.keys(opts), &(&1 in allowed)) do
       :ok
     else
-      {:error,
-       Finding.at(env, form, "invalid loop options",
-         hint: "allowed options: #{Enum.join(allowed, ", ")}"
-       )}
+      {:error, Finding.at(env, form, "invalid loop options", hint: "allowed options: #{Enum.join(allowed, ", ")}")}
     end
   end
 
@@ -1181,11 +1141,9 @@ defmodule Workflow.Compiler do
 
   defp contains_dry?(%Predicate.Dry{}), do: true
 
-  defp contains_dry?(%Predicate.AllOf{predicates: predicates}),
-    do: Enum.any?(predicates, &contains_dry?/1)
+  defp contains_dry?(%Predicate.AllOf{predicates: predicates}), do: Enum.any?(predicates, &contains_dry?/1)
 
-  defp contains_dry?(%Predicate.AnyOf{predicates: predicates}),
-    do: Enum.any?(predicates, &contains_dry?/1)
+  defp contains_dry?(%Predicate.AnyOf{predicates: predicates}), do: Enum.any?(predicates, &contains_dry?/1)
 
   defp contains_dry?(_predicate), do: false
 
@@ -1198,8 +1156,7 @@ defmodule Workflow.Compiler do
         {:ok, policy}
 
       {:ok, _} ->
-        {:error,
-         Finding.at(env, form, "`on_exhausted` must be one of :stop, :fail, or :accept_current")}
+        {:error, Finding.at(env, form, "`on_exhausted` must be one of :stop, :fail, or :accept_current")}
     end
   end
 
@@ -1264,13 +1221,11 @@ defmodule Workflow.Compiler do
         if Enum.all?(lenses, &is_atom/1) do
           {:ok, {:lenses, lenses}}
         else
-          {:error,
-           Finding.at(env, form, "`verify` `lenses:` must be a list of perspective atoms")}
+          {:error, Finding.at(env, form, "`verify` `lenses:` must be a list of perspective atoms")}
         end
 
       {:error, {:ok, _bad}} ->
-        {:error,
-         Finding.at(env, form, "`verify` `lenses:` must be a non-empty list of perspective atoms")}
+        {:error, Finding.at(env, form, "`verify` `lenses:` must be a non-empty list of perspective atoms")}
 
       {{:ok, _}, {:ok, _}} ->
         {:error,
@@ -1366,8 +1321,7 @@ defmodule Workflow.Compiler do
   defp refine_input(_input, _binding_env, _address, form, env) do
     {:error,
      Finding.at(env, form, "`refine` V1 input must be an inline `agent(\"...\")` or binding atom",
-       hint:
-         "use `refine agent(\"Draft.\"), ...` or `let :draft = ...` followed by `refine :draft, ...`"
+       hint: "use `refine agent(\"Draft.\"), ...` or `let :draft = ...` followed by `refine :draft, ...`"
      )}
   end
 
@@ -1414,11 +1368,9 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp keyword_count(opts, key),
-    do: Enum.count(opts, fn {candidate, _value} -> candidate == key end)
+  defp keyword_count(opts, key), do: Enum.count(opts, fn {candidate, _value} -> candidate == key end)
 
-  defp refine_producer({:agent, _meta, [prompt]} = form, address, _refine_form, env)
-       when is_binary(prompt) do
+  defp refine_producer({:agent, _meta, [prompt]} = form, address, _refine_form, env) when is_binary(prompt) do
     with {:ok, prompt} <- prompt_text(prompt, form, env, "refine producer prompt") do
       {:ok,
        {:producer,
@@ -1493,32 +1445,20 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp refine_reviewer({:reviewer, _meta, [name, prompt]} = form, address, index, env)
-       when is_binary(prompt) do
+  defp refine_reviewer({:reviewer, _meta, [name, prompt]} = form, address, index, env) when is_binary(prompt) do
     refine_reviewer(form, name, prompt, [], address, index, env)
   end
 
-  defp refine_reviewer({:reviewer, _meta, [name, prompt, opts]} = form, address, index, env)
-       when is_binary(prompt) do
+  defp refine_reviewer({:reviewer, _meta, [name, prompt, opts]} = form, address, index, env) when is_binary(prompt) do
     refine_reviewer(form, name, prompt, opts, address, index, env)
   end
 
-  defp refine_reviewer(
-         {:reviewer, _meta, [_name, {:<<>>, _, _parts} | _rest]} = form,
-         _address,
-         _index,
-         env
-       ),
-       do: {:error, interpolation_finding(form, env, "reviewer prompt")}
+  defp refine_reviewer({:reviewer, _meta, [_name, {:<<>>, _, _parts} | _rest]} = form, _address, _index, env),
+    do: {:error, interpolation_finding(form, env, "reviewer prompt")}
 
   defp refine_reviewer(_reviewer, _address, _index, env),
     do:
-      {:error,
-       Finding.at(
-         env,
-         nil,
-         "`reviewers:` entries must be `reviewer(:name, \"prompt\", adapter: :findings_v1)`"
-       )}
+      {:error, Finding.at(env, nil, "`reviewers:` entries must be `reviewer(:name, \"prompt\", adapter: :findings_v1)`")}
 
   defp refine_reviewer(form, name, prompt, opts, address, index, env) do
     refine_reviewer_at(form, name, prompt, opts, address ++ [1, index], index, env)
@@ -1681,8 +1621,7 @@ defmodule Workflow.Compiler do
              )}
 
           duplicate = Enum.find(@refine_gate_options, &(keyword_count(gates, &1) > 1)) ->
-            {:error,
-             Finding.at(env, form, "`refine` gate `#{duplicate}:` must appear at most once")}
+            {:error, Finding.at(env, form, "`refine` gate `#{duplicate}:` must appear at most once")}
 
           true ->
             build_refine_gates(gates, address, reviser, form, env)
@@ -1692,9 +1631,8 @@ defmodule Workflow.Compiler do
 
   defp build_refine_gates(gates, address, %Agent{} = reviser, form, env) do
     with {:ok, acc} <- maybe_cold_read_gate(gates, address, form, env),
-         {:ok, acc} <- maybe_repair_gate(gates, address, reviser, acc, form, env),
-         {:ok, acc} <- maybe_halt_gate(gates, acc, form, env) do
-      {:ok, acc}
+         {:ok, acc} <- maybe_repair_gate(gates, address, reviser, acc, form, env) do
+      maybe_halt_gate(gates, acc, form, env)
     end
   end
 
@@ -1713,8 +1651,7 @@ defmodule Workflow.Compiler do
   defp cold_read_gate(opts, address, form, env) do
     cond do
       not (is_list(opts) and Keyword.keyword?(opts) and keyword_literal?(opts)) ->
-        {:error,
-         Finding.at(env, form, "`cold_read:` gate must be [reviewer: reviewer(...), when: gate]")}
+        {:error, Finding.at(env, form, "`cold_read:` gate must be [reviewer: reviewer(...), when: gate]")}
 
       unknown = Enum.find(Keyword.keys(opts), &(&1 not in [:reviewer, :when])) ->
         {:error, Finding.at(env, form, "`cold_read:` gate option `#{unknown}:` is not allowed")}
@@ -1740,22 +1677,16 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp cold_read_reviewer({:reviewer, _meta, [name, prompt]} = form, address, env)
-       when is_binary(prompt) do
+  defp cold_read_reviewer({:reviewer, _meta, [name, prompt]} = form, address, env) when is_binary(prompt) do
     refine_reviewer_at(form, name, prompt, [], address, nil, env)
   end
 
-  defp cold_read_reviewer({:reviewer, _meta, [name, prompt, opts]} = form, address, env)
-       when is_binary(prompt) do
+  defp cold_read_reviewer({:reviewer, _meta, [name, prompt, opts]} = form, address, env) when is_binary(prompt) do
     refine_reviewer_at(form, name, prompt, opts, address, nil, env)
   end
 
-  defp cold_read_reviewer(
-         {:reviewer, _meta, [_name, {:<<>>, _, _parts} | _rest]} = form,
-         _address,
-         env
-       ),
-       do: {:error, interpolation_finding(form, env, "cold-read reviewer prompt")}
+  defp cold_read_reviewer({:reviewer, _meta, [_name, {:<<>>, _, _parts} | _rest]} = form, _address, env),
+    do: {:error, interpolation_finding(form, env, "cold-read reviewer prompt")}
 
   defp cold_read_reviewer(_reviewer, _address, env) do
     {:error,
@@ -1807,22 +1738,14 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp gate_predicate(
-         {op, _meta, [{:path_count, _count_meta, [pointer]} = count_form, right]},
-         _parent_form,
-         env
-       )
+  defp gate_predicate({op, _meta, [{:path_count, _count_meta, [pointer]} = count_form, right]}, _parent_form, env)
        when op in @gate_compare_ops and is_integer(right) do
     with {:ok, pointer} <- gate_pointer(pointer, count_form, env) do
       {:ok, {:path_count, pointer, op, right}}
     end
   end
 
-  defp gate_predicate(
-         {_op, _meta, [{:path_count, _count_meta, [_pointer]}, _right]} = form,
-         _parent_form,
-         env
-       ) do
+  defp gate_predicate({_op, _meta, [{:path_count, _count_meta, [_pointer]}, _right]} = form, _parent_form, env) do
     {:error, Finding.at(env, form, "`path_count` gate must compare with one of >, <, >=, <=, ==")}
   end
 
@@ -1848,7 +1771,7 @@ defmodule Workflow.Compiler do
        Finding.at(
          env,
          form,
-         "gate JSON pointer must be \"\" or start with \"/\" and use RFC 6901 escapes"
+         ~s(gate JSON pointer must be "" or start with "/" and use RFC 6901 escapes)
        )}
     end
   end
@@ -1862,8 +1785,7 @@ defmodule Workflow.Compiler do
   defp gate_literal_to_json(value, _form, _env) when is_integer(value), do: {:ok, value}
   defp gate_literal_to_json(value, _form, _env) when is_binary(value), do: {:ok, value}
 
-  defp gate_literal_to_json(value, _form, _env) when is_atom(value),
-    do: {:ok, Atom.to_string(value)}
+  defp gate_literal_to_json(value, _form, _env) when is_atom(value), do: {:ok, Atom.to_string(value)}
 
   defp gate_literal_to_json(values, form, env) when is_list(values) do
     values
@@ -1920,8 +1842,7 @@ defmodule Workflow.Compiler do
     else
       {:error,
        Finding.at(env, form, "`judge` candidates must be a literal list",
-         hint:
-           ~s|pass a compile-time list, e.g. judge ["a", "b"], by: [:quality], pick: :max_score|
+         hint: ~s|pass a compile-time list, e.g. judge ["a", "b"], by: [:quality], pick: :max_score|
        )}
     end
   end
@@ -1934,8 +1855,7 @@ defmodule Workflow.Compiler do
           else: {:error, Finding.at(env, form, "`judge` `by:` must be a list of criterion atoms")}
 
       {:ok, _} ->
-        {:error,
-         Finding.at(env, form, "`judge` `by:` must be a non-empty list of criterion atoms")}
+        {:error, Finding.at(env, form, "`judge` `by:` must be a non-empty list of criterion atoms")}
 
       :error ->
         {:error,
@@ -1957,8 +1877,7 @@ defmodule Workflow.Compiler do
          )}
 
       :error ->
-        {:error,
-         Finding.at(env, form, "`judge` requires `pick: :max_score` or `pick: :min_score`")}
+        {:error, Finding.at(env, form, "`judge` requires `pick: :max_score` or `pick: :min_score`")}
     end
   end
 
@@ -2006,8 +1925,7 @@ defmodule Workflow.Compiler do
       {:ok, _} ->
         {:error,
          Finding.at(env, form, "`fanout` width must be a closed WidthExpr",
-           hint:
-             ~s|use an integer, budget_slices(per: N, max: M), or path_count(:binding, "/pointer", max: M)|
+           hint: ~s|use an integer, budget_slices(per: N, max: M), or path_count(:binding, "/pointer", max: M)|
          )}
 
       :error ->
@@ -2042,14 +1960,10 @@ defmodule Workflow.Compiler do
         {:error, Finding.at(env, form, "#{label} options must be a keyword list")}
 
       duplicates != [] ->
-        {:error,
-         Finding.at(env, form, "#{label} has duplicate option #{inspect(hd(duplicates))}")}
+        {:error, Finding.at(env, form, "#{label} has duplicate option #{inspect(hd(duplicates))}")}
 
       Enum.any?(keys, &(&1 not in allowed)) ->
-        {:error,
-         Finding.at(env, form, "invalid #{label} options",
-           hint: "allowed options: #{Enum.join(allowed, ", ")}"
-         )}
+        {:error, Finding.at(env, form, "invalid #{label} options", hint: "allowed options: #{Enum.join(allowed, ", ")}")}
 
       Enum.any?(required, &(&1 not in keys)) ->
         missing = required -- keys
@@ -2070,8 +1984,7 @@ defmodule Workflow.Compiler do
         if binding_ref?(ref) do
           {:ok, binding, ref}
         else
-          {:error,
-           Finding.at(env, form, "binding #{inspect(binding)} does not resolve to a binding ref")}
+          {:error, Finding.at(env, form, "binding #{inspect(binding)} does not resolve to a binding ref")}
         end
 
       :error ->
@@ -2090,7 +2003,7 @@ defmodule Workflow.Compiler do
        Finding.at(
          env,
          form,
-         "`path_count` JSON pointer must be \"\" or start with \"/\" and use RFC 6901 escapes"
+         ~s(`path_count` JSON pointer must be "" or start with "/" and use RFC 6901 escapes)
        )}
     end
   end
@@ -2098,26 +2011,21 @@ defmodule Workflow.Compiler do
   defp fanout_width_pointer(_pointer, form, env),
     do: {:error, Finding.at(env, form, "`path_count` JSON pointer must be a literal string")}
 
-  defp positive_width_integer(n, _key, _form, _env) when is_integer(n) and n > 0,
-    do: {:ok, n}
+  defp positive_width_integer(n, _key, _form, _env) when is_integer(n) and n > 0, do: {:ok, n}
 
   defp positive_width_integer(_value, key, form, env),
     do: {:error, Finding.at(env, form, "`#{key}` must be a positive integer")}
 
   defp optional_positive_width_integer(nil, _key, _form, _env), do: {:ok, nil}
 
-  defp optional_positive_width_integer(value, key, form, env),
-    do: positive_width_integer(value, key, form, env)
+  defp optional_positive_width_integer(value, key, form, env), do: positive_width_integer(value, key, form, env)
 
-  defp binding_ref?({kind, address})
-       when kind in [:node, :map, :refine] and is_list(address),
-       do: address?(address)
+  defp binding_ref?({kind, address}) when kind in [:node, :map, :refine] and is_list(address), do: address?(address)
 
   defp binding_ref?({:fanout, address, :global}) when is_list(address), do: address?(address)
 
-  defp binding_ref?({:fanout, address, {:loop_local, loop_address}})
-       when is_list(address) and is_list(loop_address),
-       do: address?(address) and address?(loop_address)
+  defp binding_ref?({:fanout, address, {:loop_local, loop_address}}) when is_list(address) and is_list(loop_address),
+    do: address?(address) and address?(loop_address)
 
   defp binding_ref?(_ref), do: false
 
@@ -2145,8 +2053,7 @@ defmodule Workflow.Compiler do
              )}
 
           Map.has_key?(binding_env, name) ->
-            {:error,
-             Finding.at(env, form, "`fanout bind:` name #{inspect(name)} is already bound")}
+            {:error, Finding.at(env, form, "`fanout bind:` name #{inspect(name)} is already bound")}
 
           true ->
             {:ok, name}
@@ -2217,8 +2124,7 @@ defmodule Workflow.Compiler do
       {:ok, []} ->
         {:error,
          Finding.at(env, form, "`fan_out` requires at least one body step",
-           hint:
-             "the body is a lane of agent turns, e.g. fan_out width: ... do agent(\"...\") end"
+           hint: "the body is a lane of agent turns, e.g. fan_out width: ... do agent(\"...\") end"
          )}
 
       {:ok, agents} ->
@@ -2275,8 +2181,7 @@ defmodule Workflow.Compiler do
       _other ->
         {:error,
          Finding.at(env, nil, "workflow must terminate with `return`, `emit`, or `emit_result`",
-           hint:
-             "end the workflow with `return literal`, `emit(~P\"...\")`, or `emit_result(:name)`"
+           hint: "end the workflow with `return literal`, `emit(~P\"...\")`, or `emit_result(:name)`"
          )}
     end
   end
@@ -2295,20 +2200,15 @@ defmodule Workflow.Compiler do
     )
   end
 
-  defp emit_template({:sigil_P, meta, [{:<<>>, _content_meta, [source]}, _mods]}, env)
-       when is_binary(source) do
+  defp emit_template({:sigil_P, meta, [{:<<>>, _content_meta, [source]}, _mods]}, env) when is_binary(source) do
     Template.parse(source, %{env | line: Keyword.get(meta, :line, env.line)})
   end
 
   defp emit_template(_other, env) do
-    {:error,
-     Finding.at(env, nil, "`emit` expects a `~P` template",
-       hint: ~s|emit(~P"Final: <%= @draft %>")|
-     )}
+    {:error, Finding.at(env, nil, "`emit` expects a `~P` template", hint: ~s|emit(~P"Final: <%= @draft %>")|)}
   end
 
-  defp prompt_template({:sigil_P, meta, [{:<<>>, _content_meta, [source]}, _mods]}, env)
-       when is_binary(source) do
+  defp prompt_template({:sigil_P, meta, [{:<<>>, _content_meta, [source]}, _mods]}, env) when is_binary(source) do
     Template.parse(source, %{env | line: Keyword.get(meta, :line, env.line)})
   end
 
@@ -2331,8 +2231,7 @@ defmodule Workflow.Compiler do
           {:halt,
            {:error,
             Finding.at(env, form, "unbound template assign @#{assign}",
-              hint:
-                "bind it earlier with `let :#{assign} = agent(...)`, `synthesize(...)`, or `fanout bind: :#{assign}`"
+              hint: "bind it earlier with `let :#{assign} = agent(...)`, `synthesize(...)`, or `fanout bind: :#{assign}`"
             )}}
       end
     end)
@@ -2359,8 +2258,7 @@ defmodule Workflow.Compiler do
          )}
 
       :error ->
-        {:error,
-         Finding.at(env, form, "`emit_result` references unknown binding #{inspect(binding)}")}
+        {:error, Finding.at(env, form, "`emit_result` references unknown binding #{inspect(binding)}")}
     end
   end
 
@@ -2399,10 +2297,9 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp vocabulary, do: @combinators |> Enum.map(&Atom.to_string/1) |> Enum.join(", ")
+  defp vocabulary, do: Enum.map_join(@combinators, ", ", &Atom.to_string/1)
 
   defp callee({{:., _, [module, fun]}, _, _}), do: "#{Macro.to_string(module)}.#{fun}"
 
-  defp raise_finding(%Finding{} = finding),
-    do: raise(Workflow.CompileError, Finding.format(finding))
+  defp raise_finding(%Finding{} = finding), do: raise(Workflow.CompileError, Finding.format(finding))
 end

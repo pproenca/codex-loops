@@ -14,7 +14,8 @@ defmodule Workflow.Accumulator do
   the fold never dedups again.
   """
 
-  alias Workflow.{Journal, Event}
+  alias Workflow.Event
+  alias Workflow.Journal
 
   @doc "Fold the whole journal of `run_id` into `%{acc_name => items}`."
   @spec of(String.t()) :: %{atom() => list()}
@@ -24,8 +25,7 @@ defmodule Workflow.Accumulator do
   @spec fold([Event.t()]) :: %{atom() => list()}
   def fold(events), do: Enum.reduce(events, %{}, &apply_event/2)
 
-  defp apply_event(%Event{type: :accumulate, payload: p}, acc),
-    do: Map.update(acc, p.into, p.added, &(&1 ++ p.added))
+  defp apply_event(%Event{type: :accumulate, payload: p}, acc), do: Map.update(acc, p.into, p.added, &(&1 ++ p.added))
 
   defp apply_event(%Event{}, acc), do: acc
 

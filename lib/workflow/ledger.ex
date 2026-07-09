@@ -21,7 +21,8 @@ defmodule Workflow.Ledger do
   three are derivable purely from the journal.
   """
 
-  alias Workflow.{Journal, Event}
+  alias Workflow.Event
+  alias Workflow.Journal
   alias Workflow.Provider.Usage
 
   defstruct total: nil, spent: 0
@@ -45,18 +46,12 @@ defmodule Workflow.Ledger do
   def remaining(%__MODULE__{total: total, spent: spent}), do: total - spent
 
   # The run's target is declared once, at start; `nil` means unbounded.
-  defp apply_event(%Event{type: :run_started, payload: %{budget: budget}}, ledger),
-    do: %{ledger | total: budget}
+  defp apply_event(%Event{type: :run_started, payload: %{budget: budget}}, ledger), do: %{ledger | total: budget}
 
   # Committed turns, rejected fail-closed attempts, and expected provider failures
   # with non-nil usage are paid provider effects, so each counts against the budget.
   defp apply_event(%Event{type: type, payload: %{usage: %Usage{} = usage}}, ledger)
-       when type in [
-              :agent_committed,
-              :agent_attempt_rejected,
-              :agent_failed,
-              :refine_role_failed
-            ],
+       when type in [:agent_committed, :agent_attempt_rejected, :agent_failed, :refine_role_failed],
        do: %{ledger | spent: ledger.spent + usage.total_tokens}
 
   # Structural markers, logs, terminal failure, completion: no budget movement.

@@ -7,7 +7,11 @@ defmodule Workflow.RenderText do
   same fragment list and are rendered by the same pure fold.
   """
 
-  alias Workflow.{Journal, Event, BoundValue, BoundList, Template}
+  alias Workflow.BoundList
+  alias Workflow.BoundValue
+  alias Workflow.Event
+  alias Workflow.Journal
+  alias Workflow.Template
 
   @type part ::
           {:text, String.t()}
@@ -153,8 +157,7 @@ defmodule Workflow.RenderText do
     value
     |> flatten_value()
     |> Enum.with_index(1)
-    |> Enum.map(fn {item, index} -> numbered_finding(item, index) end)
-    |> Enum.join("\n")
+    |> Enum.map_join("\n", fn {item, index} -> numbered_finding(item, index) end)
   end
 
   defp numbered_finding(map, index) when is_map(map) do

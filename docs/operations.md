@@ -12,9 +12,10 @@ make proof
 `make setup` installs Hex/Rebar and fetches Elixir dependencies.
 `.tool-versions` pins the known-good local toolchain for `mise`/`asdf`.
 
-`make quality` is the fast pre-handoff gate: it checks formatting, compiles with
-warnings as errors, runs the spec lint, and runs the scheduler/API/UI Elixir test
-suite. `make release` produces the distributable local scheduler artifact under
+`make quality` is the fast pre-handoff gate: it checks formatting through
+Styler, audits dependencies, compiles with warnings as errors, runs Credo, runs
+Sobelow, runs the spec lint, and runs the scheduler/API/UI Elixir test suite.
+`make release` produces the distributable local scheduler artifact under
 `_build/prod/rel/agent_loops/`.
 
 For a repeatable local dogfood run, use:
@@ -34,9 +35,57 @@ make quality
 ```
 
 Run this before handing off ordinary code changes. It is intentionally local and
-fast: `mix format --check-formatted`, compile with warnings as errors, the spec
-lint, and the scheduler/API/UI test suite. It does not build releases, package
-the MCP executable, reinstall the plugin, or spend live Codex provider turns.
+fast: `mix format --check-formatted` with Styler, dependency audits, compile
+with warnings as errors, Credo, Sobelow, the spec lint, and the scheduler/API/UI
+test suite. It does not build releases, package the MCP executable, reinstall
+the plugin, run browser tests, build Dialyzer PLTs, or spend live Codex provider
+turns.
+
+The individual fast gates are also available:
+
+```sh
+make format-check
+make audit-check
+make build
+make credo-check
+make security-check
+make test
+```
+
+Sobelow runs against the explicit Phoenix router and intentionally ignores
+`Config.HTTPS` and `Config.CSP`. Codex Loops is a local loopback scheduler UI,
+not a hosted HTTPS deployment, and it does not yet ship an asset pipeline policy.
+The journal's local term decoding uses `binary_to_term(..., [:safe])`; the two
+remaining Sobelow term-decoding reports are skipped at the function level with
+that rationale in code.
+
+## Optional Analysis
+
+```sh
+make dialyzer-check
+```
+
+Dialyzer is available through Dialyxir but stays out of `make quality` so the
+ordinary handoff loop does not depend on PLT setup. Run it when changing specs,
+cross-module data contracts, or runtime boundaries. The current opt-in baseline
+is intentionally not hidden: first setup builds the dev PLT, then Dialyzer
+reports the existing type-shape warnings for later cleanup.
+
+## Browser E2E
+
+```sh
+make browser-e2e-setup
+make browser-e2e
+```
+
+`make browser-e2e-setup` installs the Playwright Node package and Chromium under
+the local `assets` workspace. `make browser-e2e` starts the test endpoint on a
+local port and runs only tests tagged `:browser_e2e`. These tests use mock
+providers and isolated test state; they do not spend live Codex provider turns.
+
+The browser stack is PhoenixTest plus PhoenixTest Playwright. Recode, Green,
+Wallaby, Hound, Selenium, Cypress, and non-Elixir browser frameworks are not
+part of the selected gate for this rollout.
 
 ## Release Proof
 

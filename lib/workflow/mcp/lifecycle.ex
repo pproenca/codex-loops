@@ -6,8 +6,9 @@ defmodule Workflow.MCP.Lifecycle do
   workflow state. All workflow behavior stays behind the scheduler HTTP API.
   """
 
-  alias Workflow.MCP.SchedulerClient
   import Bitwise, only: [band: 2]
+
+  alias Workflow.MCP.SchedulerClient
 
   @api_version "codex-loops.mcp.v1"
 
@@ -88,7 +89,8 @@ defmodule Workflow.MCP.Lifecycle do
   end
 
   defp wait_for_health(state) do
-    Enum.reduce_while(1..100, state, fn _attempt, acc ->
+    1..100
+    |> Enum.reduce_while(state, fn _attempt, acc ->
       acc = collect_port_messages(acc)
 
       case SchedulerClient.health() do
@@ -328,9 +330,7 @@ defmodule Workflow.MCP.Lifecycle do
   defp listener_pid do
     port = SchedulerClient.config().port
 
-    case System.cmd("lsof", ["-nP", "-t", "-iTCP:#{port}", "-sTCP:LISTEN"],
-           stderr_to_stdout: true
-         ) do
+    case System.cmd("lsof", ["-nP", "-t", "-iTCP:#{port}", "-sTCP:LISTEN"], stderr_to_stdout: true) do
       {output, 0} ->
         output
         |> String.split()
@@ -381,7 +381,7 @@ defmodule Workflow.MCP.Lifecycle do
         Path.join([plugin_root(), "scheduler", "bin", "agent_loops"]),
         Path.join([repo_root(), "_build", "prod", "rel", "agent_loops", "bin", "agent_loops"])
       ]
-      |> Enum.reject(&is_nil_or_empty?/1)
+      |> Enum.reject(&nil_or_empty?/1)
       |> Enum.map(&Path.expand/1)
 
     case Enum.find(candidates, &executable_file?/1) do
@@ -431,9 +431,9 @@ defmodule Workflow.MCP.Lifecycle do
     end
   end
 
-  defp is_nil_or_empty?(nil), do: true
-  defp is_nil_or_empty?(""), do: true
-  defp is_nil_or_empty?(_value), do: false
+  defp nil_or_empty?(nil), do: true
+  defp nil_or_empty?(""), do: true
+  defp nil_or_empty?(_value), do: false
 
   defp port_env(env) do
     Enum.map(env, fn

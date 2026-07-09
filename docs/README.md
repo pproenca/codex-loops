@@ -28,9 +28,11 @@ make proof-mcp-live
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
-`make quality` is the fast local gate for formatting, compile, spec lint, and
-the scheduler/API/UI test suite. The proof commands remain the packaged product
-readiness checks.
+`make quality` is the fast local gate for Styler-backed formatting, dependency
+audits, compile, Credo, Sobelow, spec lint, and the scheduler/API/UI test suite.
+`make browser-e2e` runs the separate PhoenixTest Playwright browser suite, and
+`make dialyzer-check` runs optional Dialyzer analysis. The proof commands remain
+the packaged product readiness checks.
 
 ## Supported Scope
 

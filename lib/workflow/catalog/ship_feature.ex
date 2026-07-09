@@ -40,9 +40,7 @@ defmodule Workflow.Catalog.ShipFeature do
   use Workflow
 
   workflow "ship-feature" do
-    log(
-      "shipping one feature slice end to end: scope -> implement -> harden -> review -> integrate"
-    )
+    log("shipping one feature slice end to end: scope -> implement -> harden -> review -> integrate")
 
     phase("scope")
 

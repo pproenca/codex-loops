@@ -9,12 +9,18 @@ defmodule Workflow.LedgerTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Ledger, Event}
+  alias Workflow.Event
+  alias Workflow.Journal
+  alias Workflow.Ledger
   alias Workflow.Node.Agent
   alias Workflow.Provider.Usage
-  alias Workflow.Test.{EchoProvider, ProviderFailureProvider, ScriptedProvider}
+  alias Workflow.Run
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.ProviderFailureProvider
+  alias Workflow.Test.ScriptedProvider
 
   defmodule Demo do
+    @moduledoc false
     use Workflow
 
     workflow "demo" do
@@ -26,6 +32,7 @@ defmodule Workflow.LedgerTest do
   # A schema-backed agent: three attempts (retries: 2), used to produce a run whose
   # journal holds several paid usage events (rejections + a commit).
   defmodule Classify do
+    @moduledoc false
     use Workflow
 
     workflow "classify" do
@@ -154,7 +161,7 @@ defmodule Workflow.LedgerTest do
       # Each step is <= the one before it (:infinity sorts above every integer, so a
       # plain >= comparison is total over the mixed sequence).
       assert remainings == [:infinity, 10, 8, 6, 4, 4]
-      assert Enum.chunk_every(remainings, 2, 1, :discard) |> Enum.all?(fn [a, b] -> a >= b end)
+      assert remainings |> Enum.chunk_every(2, 1, :discard) |> Enum.all?(fn [a, b] -> a >= b end)
     end
 
     test ":infinity answers `remaining > 0` for an unbounded run, driving termination checks" do
@@ -163,7 +170,7 @@ defmodule Workflow.LedgerTest do
 
       assert unbounded > 0
       assert bounded > 0
-      refute Ledger.remaining(Ledger.fold([started(5), committed(5)])) > 0
+      assert Ledger.remaining(Ledger.fold([started(5), committed(5)])) <= 0
     end
   end
 
@@ -219,8 +226,7 @@ defmodule Workflow.LedgerTest do
                  run_id: id,
                  provider:
                    {ProviderFailureProvider,
-                    detail: %{"message" => "deadline"},
-                    usage: %Usage{input_tokens: 2, output_tokens: 1, total_tokens: 3}},
+                    detail: %{"message" => "deadline"}, usage: %Usage{input_tokens: 2, output_tokens: 1, total_tokens: 3}},
                  budget: 50
                )
 

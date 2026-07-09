@@ -1,8 +1,8 @@
 defmodule Workflow.Web.SchedulerAPI do
   @moduledoc "JSON response envelopes for the scheduler API."
 
-  import Plug.Conn
   import Phoenix.Controller, only: [json: 2]
+  import Plug.Conn
 
   alias Workflow.Scheduler.Error
 

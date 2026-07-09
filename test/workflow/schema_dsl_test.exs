@@ -203,8 +203,7 @@ defmodule Workflow.SchemaDslTest do
   defp contains_function?(list) when is_list(list), do: Enum.any?(list, &contains_function?/1)
   defp contains_function?({k, v}), do: contains_function?(k) or contains_function?(v)
 
-  defp contains_function?(tuple) when is_tuple(tuple),
-    do: contains_function?(Tuple.to_list(tuple))
+  defp contains_function?(tuple) when is_tuple(tuple), do: contains_function?(Tuple.to_list(tuple))
 
   defp contains_function?(_), do: false
 end

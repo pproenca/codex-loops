@@ -110,7 +110,7 @@ defmodule Workflow.MCP.SchedulerClient do
 
   defp env_config do
     host = System.get_env("CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1")
-    port = System.get_env("CODEX_LOOPS_SCHEDULER_PORT", "47125") |> parse_positive_integer(47_125)
+    port = "CODEX_LOOPS_SCHEDULER_PORT" |> System.get_env("47125") |> parse_positive_integer(47_125)
 
     %{
       base_url: "http://" <> format_host(host) <> ":#{port}",
@@ -162,9 +162,7 @@ defmodule Workflow.MCP.SchedulerClient do
   end
 
   defp http_request(:get, url, nil) do
-    case :httpc.request(:get, {String.to_charlist(url), headers()}, http_options(),
-           body_format: :binary
-         ) do
+    case :httpc.request(:get, {String.to_charlist(url), headers()}, http_options(), body_format: :binary) do
       {:ok, {{_version, status, _reason}, _headers, body}} -> {:ok, status, normalize_body(body)}
       {:error, reason} -> {:error, inspect(reason)}
     end
@@ -219,9 +217,7 @@ defmodule Workflow.MCP.SchedulerClient do
   defp path_segment(value), do: URI.encode(value, &path_segment_unreserved?/1)
 
   defp path_segment_unreserved?(character)
-       when character in ?a..?z or character in ?A..?Z or character in ?0..?9 or
-              character in [?-, ?., ?_, ?~],
-       do: true
+       when character in ?a..?z or character in ?A..?Z or character in ?0..?9 or character in [?-, ?., ?_, ?~], do: true
 
   defp path_segment_unreserved?(_character), do: false
 end

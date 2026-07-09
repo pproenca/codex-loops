@@ -6,14 +6,24 @@ defmodule Workflow.RunTest do
   """
   use ExUnit.Case, async: true
 
+  alias Workflow.Event
+  alias Workflow.Idempotency
+  alias Workflow.IdempotencyKey
+  alias Workflow.Journal
+  alias Workflow.Node.Phase
+  alias Workflow.Provider.Usage
+  alias Workflow.Run
+  alias Workflow.Scheduler.RunProjection
+  alias Workflow.Status
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.ExplodingProvider
+  alias Workflow.Test.GateProvider
+  alias Workflow.Test.ProviderFailureProvider
+
   @receive_timeout 1_000
 
-  alias Workflow.{Run, Journal, Status, IdempotencyKey, Idempotency, Event}
-  alias Workflow.Provider.Usage
-  alias Workflow.Scheduler.RunProjection
-  alias Workflow.Test.{EchoProvider, ExplodingProvider, GateProvider, ProviderFailureProvider}
-
   defmodule ActivityProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
 
     @impl true
@@ -29,12 +39,12 @@ defmodule Workflow.RunTest do
         }
       ]
 
-      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 2, output_tokens: 3, total_tokens: 5},
-       activity}
+      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 2, output_tokens: 3, total_tokens: 5}, activity}
     end
   end
 
   defmodule StreamingActivityProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
 
     @impl true
@@ -53,6 +63,7 @@ defmodule Workflow.RunTest do
   end
 
   defmodule ConfigurableProvider do
+    @moduledoc false
     @behaviour Workflow.Provider
 
     @impl true
@@ -66,6 +77,7 @@ defmodule Workflow.RunTest do
   end
 
   defmodule DemoWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "demo" do
@@ -77,6 +89,7 @@ defmodule Workflow.RunTest do
   end
 
   defmodule SettledRetryThenCrashWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "settled-retry-then-crash" do
@@ -161,9 +174,7 @@ defmodule Workflow.RunTest do
     assert {:error, {:provider_config, {:missing_config, :api_key}}} =
              Run.run(DemoWorkflow,
                run_id: id,
-               provider:
-                 {ConfigurableProvider,
-                  [sink: self(), validate_result: {:error, {:missing_config, :api_key}}]}
+               provider: {ConfigurableProvider, [sink: self(), validate_result: {:error, {:missing_config, :api_key}}]}
              )
 
     assert_no_run_started(id)
@@ -223,12 +234,10 @@ defmodule Workflow.RunTest do
              Run.run(DemoWorkflow,
                run_id: id,
                provider:
-                 {ProviderFailureProvider,
-                  sink: self(), kind: :timeout, detail: detail, usage: usage, activity: activity}
+                 {ProviderFailureProvider, sink: self(), kind: :timeout, detail: detail, usage: usage, activity: activity}
              )
 
-    assert_received {:agent_called, "say hello",
-                     %IdempotencyKey{run_id: ^id, node_path: [2], iteration: 0, attempt: 0}}
+    assert_received {:agent_called, "say hello", %IdempotencyKey{run_id: ^id, node_path: [2], iteration: 0, attempt: 0}}
 
     refute_received {:agent_called, _, _}
 
@@ -284,8 +293,7 @@ defmodule Workflow.RunTest do
     assert {:error, {:run_crashed, _reason}} =
              Run.run(DemoWorkflow,
                run_id: missing_total_tokens,
-               provider:
-                 {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
+               provider: {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
              )
 
     refute Enum.any?(Journal.fold(missing_total_tokens), &(&1.type == :agent_failed))
@@ -295,9 +303,7 @@ defmodule Workflow.RunTest do
     assert {:error, {:run_crashed, _reason}} =
              Run.run(DemoWorkflow,
                run_id: scalar_activity,
-               provider:
-                 {ProviderFailureProvider,
-                  activity: [%{kind: "provider", label: "ok"}, "not an activity object"]}
+               provider: {ProviderFailureProvider, activity: [%{kind: "provider", label: "ok"}, "not an activity object"]}
              )
 
     refute Enum.any?(Journal.fold(scalar_activity), &(&1.type == :agent_failed))
@@ -310,15 +316,14 @@ defmodule Workflow.RunTest do
     assert {:ok, ^id, pid} =
              Run.start(DemoWorkflow,
                run_id: id,
-               provider:
-                 {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
+               provider: {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
              )
 
     ref = Process.monitor(pid)
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, @receive_timeout
 
     assert [:run_started, :phase_entered, :log_emitted, :run_failed] =
-             Journal.fold(id) |> Enum.map(& &1.type)
+             id |> Journal.fold() |> Enum.map(& &1.type)
 
     assert %{state: :failed, failure: %{reason: {:run_crashed, detail}}} = Status.of(id)
     assert detail["kind"] == "error"
@@ -357,9 +362,7 @@ defmodule Workflow.RunTest do
     assert {:error, {:run_crashed, _reason}} =
              Run.run(SettledRetryThenCrashWorkflow,
                run_id: id,
-               provider:
-                 {ProviderFailureProvider,
-                  sink: self(), usage: %{"input_tokens" => 1, "output_tokens" => 2}}
+               provider: {ProviderFailureProvider, sink: self(), usage: %{"input_tokens" => 1, "output_tokens" => 2}}
              )
 
     assert_received {:agent_called, "later crash", _key}
@@ -369,7 +372,7 @@ defmodule Workflow.RunTest do
              :agent_attempt_rejected,
              :agent_committed,
              :run_failed
-           ] = Journal.fold(id) |> Enum.map(& &1.type)
+           ] = id |> Journal.fold() |> Enum.map(& &1.type)
 
     assert %{state: :failed, failure: %{reason: {:run_crashed, detail}}} = Status.of(id)
     assert detail["message"] =~ "invalid provider usage"
@@ -416,8 +419,8 @@ defmodule Workflow.RunTest do
 
     status = Status.of(id)
     assert [%{activity: [first_entry, second_entry]}] = status.agents
-    assert Map.drop(first_entry, [:activity_index]) == entry
-    assert Map.drop(second_entry, [:activity_index]) == entry
+    assert Map.delete(first_entry, :activity_index) == entry
+    assert Map.delete(second_entry, :activity_index) == entry
     assert first_entry.activity_index == 0
     assert second_entry.activity_index == 1
   end
@@ -462,7 +465,7 @@ defmodule Workflow.RunTest do
              }
            ] = status.rejected
 
-    assert Map.drop(rejected_activity, [:activity_index]) == attempt_0_activity
+    assert Map.delete(rejected_activity, :activity_index) == attempt_0_activity
 
     assert [
              %{
@@ -472,7 +475,7 @@ defmodule Workflow.RunTest do
              }
            ] = status.agents
 
-    assert Map.drop(in_flight_activity, [:activity_index]) == attempt_1_activity
+    assert Map.delete(in_flight_activity, :activity_index) == attempt_1_activity
   end
 
   test "agent events journal workflow-authored labels into the folded read model" do
@@ -565,7 +568,7 @@ defmodule Workflow.RunTest do
         :preflight,
         usage
       ),
-      Event.phase_entered(%Workflow.Node.Phase{address: [1], name: "plan"}),
+      Event.phase_entered(%Phase{address: [1], name: "plan"}),
       Event.agent_committed(
         %Workflow.Node.Agent{address: [2], prompt: "plan"},
         0,
@@ -573,7 +576,7 @@ defmodule Workflow.RunTest do
         :plan,
         usage
       ),
-      Event.phase_entered(%Workflow.Node.Phase{address: [3], name: "build"}),
+      Event.phase_entered(%Phase{address: [3], name: "build"}),
       Event.agent_committed(
         %Workflow.Node.Agent{address: [4], prompt: "build"},
         0,
@@ -599,7 +602,7 @@ defmodule Workflow.RunTest do
     node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
 
     events = [
-      Event.phase_entered(%Workflow.Node.Phase{address: [0], name: "loop"}),
+      Event.phase_entered(%Phase{address: [0], name: "loop"}),
       Event.agent_attempt_rejected(
         node,
         0,

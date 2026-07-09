@@ -13,23 +13,24 @@ defmodule Workflow.QualityRunTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Status}
-  alias Workflow.Catalog.{AdversarialVerify, JudgePanel}
-
-  alias Workflow.Test.{
-    VerdictProvider,
-    PanelProvider,
-    EchoProvider,
-    ExplodingProvider,
-    ScriptedProvider
-  }
+  alias Workflow.Catalog.AdversarialVerify
+  alias Workflow.Catalog.JudgePanel
+  alias Workflow.Journal
+  alias Workflow.Run
+  alias Workflow.Status
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.ExplodingProvider
+  alias Workflow.Test.PanelProvider
+  alias Workflow.Test.ScriptedProvider
+  alias Workflow.Test.VerdictProvider
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
-  defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
-  defp event(id, type), do: Journal.fold(id) |> Enum.find(&(&1.type == type))
+  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+  defp event(id, type), do: id |> Journal.fold() |> Enum.find(&(&1.type == type))
 
   defp committed_addresses(id) do
-    Journal.fold(id)
+    id
+    |> Journal.fold()
     |> Enum.filter(&(&1.type == :agent_committed))
     |> Enum.map(& &1.payload.address)
   end
@@ -37,6 +38,7 @@ defmodule Workflow.QualityRunTest do
   # --- verify: a finding survives only when the threshold of voters confirms ---
 
   defmodule Voters do
+    @moduledoc false
     use Workflow
 
     workflow "voters" do
@@ -72,7 +74,8 @@ defmodule Workflow.QualityRunTest do
              ]
 
     vote_prompts =
-      Journal.fold(id)
+      id
+      |> Journal.fold()
       |> Enum.filter(&(&1.type == :agent_committed))
       |> Enum.map(& &1.payload.prompt)
 
@@ -153,17 +156,18 @@ defmodule Workflow.QualityRunTest do
              )
 
     for _ <- 1..3, do: assert_received({:agent_called, _})
-    before = Journal.fold(id) |> length()
+    before = id |> Journal.fold() |> length()
 
     # Re-invoking folds to :completed: votes replay from the journal, so the provider
     # never runs again and no new events are appended.
     assert {:ok, ^id} = Run.run(Voters, run_id: id, provider: {ExplodingProvider, []})
     refute_received {:agent_called, _}
-    assert Journal.fold(id) |> length() == before
+    assert id |> Journal.fold() |> length() == before
     assert Status.of(id).verifications |> hd() |> Map.fetch!(:survived) == true
   end
 
   defmodule StrictVote do
+    @moduledoc false
     use Workflow
 
     # A voter whose output must carry a boolean verdict; a provider that returns
@@ -183,15 +187,18 @@ defmodule Workflow.QualityRunTest do
              Run.run(StrictVote, run_id: id, provider: {EchoProvider, sink: self()})
 
     assert address in [[0, 0], [0, 1]]
-    assert Enum.count(types(id), &(&1 == :agent_failed)) >= 1
-    refute :verify_settled in types(id)
-    refute :run_completed in types(id)
+    event_types = types(id)
+
+    assert :agent_failed in event_types
+    refute :verify_settled in event_types
+    refute :run_completed in event_types
     assert Status.of(id).state == :failed
   end
 
   # --- refine: inline producer converges when every reviewer clears round 0 ---
 
   defmodule InlineRefine do
+    @moduledoc false
     use Workflow
 
     workflow "inline-refine" do
@@ -256,7 +263,8 @@ defmodule Workflow.QualityRunTest do
              ]
 
     committed =
-      Journal.fold(id)
+      id
+      |> Journal.fold()
       |> Enum.filter(&(&1.type == :agent_committed))
 
     assert [
@@ -342,7 +350,8 @@ defmodule Workflow.QualityRunTest do
     assert :judge_settled in types(id)
 
     scorer_prompts =
-      Journal.fold(id)
+      id
+      |> Journal.fold()
       |> Enum.filter(&(&1.type == :agent_committed and &1.payload.address != [1]))
       |> Enum.map(& &1.payload.prompt)
 
@@ -365,11 +374,12 @@ defmodule Workflow.QualityRunTest do
     assert status.result == :done
 
     synthesis =
-      Journal.fold(id)
+      id
+      |> Journal.fold()
       |> Enum.find(&(&1.type == :agent_committed and &1.payload.address == [1]))
 
     assert synthesis.payload.prompt ==
-             "Write up the winning plan.\n\nInputs: [\"plan A\", \"plan B\", \"plan C\"]"
+             ~s(Write up the winning plan.\n\nInputs: ["plan A", "plan B", "plan C"])
 
     assert status.judgments == [
              %{
@@ -384,6 +394,7 @@ defmodule Workflow.QualityRunTest do
   # --- fan_out: floor(remaining / per) branches, deterministically ---
 
   defmodule Widen do
+    @moduledoc false
     use Workflow
 
     workflow "widen" do

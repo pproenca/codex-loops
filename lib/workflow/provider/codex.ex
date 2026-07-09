@@ -133,10 +133,10 @@ defmodule Workflow.Provider.Codex do
   defp executable_command_result(path) do
     case File.stat(path) do
       {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        if Bitwise.band(mode, 0o111) != 0 do
-          {:ok, {path, @exec_args}}
-        else
+        if Bitwise.band(mode, 0o111) == 0 do
           {:error, unavailable_failure("#{@codex_bin_env} is not executable: #{path}")}
+        else
+          {:ok, {path, @exec_args}}
         end
 
       _other ->
@@ -222,15 +222,13 @@ defmodule Workflow.Provider.Codex do
   defp raise_on_failure(%{"type" => "turn.failed", "error" => %{"message" => message}}),
     do: raise("codex turn failed: #{message}")
 
-  defp raise_on_failure(%{"type" => "error", "message" => message}),
-    do: raise("codex turn failed: #{message}")
+  defp raise_on_failure(%{"type" => "error", "message" => message}), do: raise("codex turn failed: #{message}")
 
   defp raise_on_failure(_event), do: :ok
 
   defp final_message(events) do
     Enum.reduce(events, "", fn
-      %{"type" => "item.completed", "item" => %{"type" => "agent_message", "text" => text}},
-      _acc ->
+      %{"type" => "item.completed", "item" => %{"type" => "agent_message", "text" => text}}, _acc ->
         text
 
       _event, acc ->
@@ -285,8 +283,7 @@ defmodule Workflow.Provider.Codex do
 
   defp stream_activity_entries(event), do: activity_entry(event)
 
-  defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "agent_message"}}),
-    do: []
+  defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "agent_message"}}), do: []
 
   defp activity_entry(%{"type" => "item.completed", "item" => %{"type" => "reasoning"} = item}) do
     [%{kind: "reasoning", label: "Reasoning", summary: item_summary(item), status: "completed"}]

@@ -1,7 +1,9 @@
 defmodule Workflow.JournalPersistenceTest do
   use ExUnit.Case, async: false
 
-  alias Workflow.{Event, Journal, Tree}
+  alias Workflow.Event
+  alias Workflow.Journal
+  alias Workflow.Tree
 
   defp restart_journal do
     old = Process.whereis(Journal)
@@ -36,12 +38,12 @@ defmodule Workflow.JournalPersistenceTest do
     assert :ok = Journal.append(run_id, 1, %{second | run_id: run_id, seq: 1})
 
     assert Journal.last_seq(run_id) == 1
-    assert Journal.fold(run_id) |> Enum.map(& &1.type) == [:run_started, :run_completed]
+    assert run_id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :run_completed]
 
     assert restart_journal()
 
     assert Journal.last_seq(run_id) == 1
-    assert Journal.fold(run_id) |> Enum.map(& &1.type) == [:run_started, :run_completed]
+    assert run_id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :run_completed]
     assert run_id in Journal.run_ids()
     assert Journal.latest_run_id() == run_id
   end

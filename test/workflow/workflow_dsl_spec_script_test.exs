@@ -1,7 +1,13 @@
 defmodule Workflow.WorkflowDslSpecScriptTest do
   use ExUnit.Case, async: true
 
-  alias Workflow.Node.{Agent, FanOut, Parallel, Pipeline, Refine, UntilDry, WhileBudget}
+  alias Workflow.Node.Agent
+  alias Workflow.Node.FanOut
+  alias Workflow.Node.Parallel
+  alias Workflow.Node.Pipeline
+  alias Workflow.Node.Refine
+  alias Workflow.Node.UntilDry
+  alias Workflow.Node.WhileBudget
   alias Workflow.Script
   alias Workflow.Tree
 
@@ -87,7 +93,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     assert gates.repair.predicate == {:path_non_empty, "/coldRead/openFindings"}
     assert gates.halt.predicate == {:path_non_empty, "/roleFailures"}
 
-    prompts = reviewers |> Enum.map(& &1.prompt) |> Enum.join("\n---PROMPT---\n")
+    prompts = Enum.map_join(reviewers, "\n---PROMPT---\n", & &1.prompt)
     assert prompts =~ "Return approved=false with blocking findings"
     assert prompts =~ "LENS: NON-DESTRUCTIVENESS (the safety guard)"
     assert prompts =~ "§10 dataflow core is normative"
@@ -104,7 +110,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
            )
 
     assert %Refine{gates: %{cold_read: cold_read, repair: repair, halt: halt}} =
-             tree.nodes |> Enum.find(&match?(%Refine{}, &1))
+             Enum.find(tree.nodes, &match?(%Refine{}, &1))
 
     assert cold_read.reviewer.agent.label == "cold_read"
     assert repair.agent.prompt =~ "The adversarial refine panel found blocking defects"
@@ -119,8 +125,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
 
   defp agent_prompts(%Tree{nodes: nodes}), do: agent_prompts(nodes)
 
-  defp agent_prompts(nodes) when is_list(nodes),
-    do: nodes |> Enum.flat_map(&agent_prompts/1)
+  defp agent_prompts(nodes) when is_list(nodes), do: Enum.flat_map(nodes, &agent_prompts/1)
 
   defp agent_prompts(%Agent{prompt: prompt}), do: [prompt_text(prompt)]
 
@@ -136,12 +141,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_prompts(%UntilDry{body: body}), do: agent_prompts(body)
   defp agent_prompts(%WhileBudget{body: body}), do: agent_prompts(body)
 
-  defp agent_prompts(%Refine{
-         input: {:producer, producer},
-         reviewers: reviewers,
-         reviser: reviser,
-         gates: gates
-       }) do
+  defp agent_prompts(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser, gates: gates}) do
     [producer, reviser | refine_gate_agents(gates)]
     |> Kernel.++(Enum.map(reviewers, & &1.agent))
     |> agent_prompts()
@@ -154,26 +154,22 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
 
   defp prompt_text(prompt) when is_binary(prompt), do: prompt
 
-  defp prompt_text(%Workflow.Template{segments: segments}),
-    do: Enum.join(segments, "<template-hole>")
+  defp prompt_text(%Workflow.Template{segments: segments}), do: Enum.join(segments, "<template-hole>")
 
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(m) when is_map(m),
-    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
 
-  defp contains_function?(t) when is_tuple(t),
-    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
 
   defp agent_labels(%Tree{nodes: nodes}), do: agent_labels(nodes)
 
-  defp agent_labels(nodes) when is_list(nodes),
-    do: nodes |> Enum.flat_map(&agent_labels/1)
+  defp agent_labels(nodes) when is_list(nodes), do: Enum.flat_map(nodes, &agent_labels/1)
 
   defp agent_labels(%Agent{label: nil}), do: []
   defp agent_labels(%Agent{label: label}), do: [label]
@@ -189,12 +185,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agent_labels(%UntilDry{body: body}), do: agent_labels(body)
   defp agent_labels(%WhileBudget{body: body}), do: agent_labels(body)
 
-  defp agent_labels(%Refine{
-         input: {:producer, producer},
-         reviewers: reviewers,
-         reviser: reviser,
-         gates: gates
-       }) do
+  defp agent_labels(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser, gates: gates}) do
     [producer, reviser | refine_gate_agents(gates)]
     |> Kernel.++(Enum.map(reviewers, & &1.agent))
     |> agent_labels()
@@ -207,8 +198,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
 
   defp agents(%Tree{nodes: nodes}), do: agents(nodes)
 
-  defp agents(nodes) when is_list(nodes),
-    do: nodes |> Enum.flat_map(&agents/1)
+  defp agents(nodes) when is_list(nodes), do: Enum.flat_map(nodes, &agents/1)
 
   defp agents(%Agent{} = agent), do: [agent]
   defp agents(%Parallel{branches: branches}), do: agents(branches)
@@ -223,12 +213,7 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   defp agents(%UntilDry{body: body}), do: agents(body)
   defp agents(%WhileBudget{body: body}), do: agents(body)
 
-  defp agents(%Refine{
-         input: {:producer, producer},
-         reviewers: reviewers,
-         reviser: reviser,
-         gates: gates
-       }) do
+  defp agents(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser, gates: gates}) do
     [producer, reviser | refine_gate_agents(gates)]
     |> Kernel.++(Enum.map(reviewers, & &1.agent))
     |> agents()

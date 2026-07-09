@@ -290,6 +290,8 @@ defmodule Workflow.Node.Refine do
   reviser handles blocking findings, and a terminal refine event commits or
   fails the result.
   """
+  alias Workflow.Refine.ReviewerAdapter
+
   @enforce_keys [:address, :input, :reviewers, :reviser, :until, :max_rounds]
   defstruct [
     :address,
@@ -311,7 +313,7 @@ defmodule Workflow.Node.Refine do
           reviewer: %{
             name: atom(),
             prompt: String.t(),
-            adapter: Workflow.Refine.ReviewerAdapter.t(),
+            adapter: ReviewerAdapter.t(),
             agent: Workflow.Node.Agent.t()
           }
         }
@@ -323,7 +325,7 @@ defmodule Workflow.Node.Refine do
           index: non_neg_integer(),
           name: atom(),
           prompt: String.t(),
-          adapter: Workflow.Refine.ReviewerAdapter.t(),
+          adapter: ReviewerAdapter.t(),
           agent: Workflow.Node.Agent.t()
         }
 

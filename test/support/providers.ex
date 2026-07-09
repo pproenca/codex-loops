@@ -140,8 +140,7 @@ defmodule Workflow.Test.LedgeredProvider do
         else
           crash? = Keyword.get(opts, :crash_once, false) and not state.crashed
 
-          {crash?,
-           %{state | charges: Map.put(state.charges, key, 1), crashed: state.crashed or crash?}}
+          {crash?, %{state | charges: Map.put(state.charges, key, 1), crashed: state.crashed or crash?}}
         end
       end)
 
@@ -173,8 +172,7 @@ defmodule Workflow.Test.DedupingProvider do
   alias Workflow.Provider.Usage
 
   @doc "Start the shared store seeded with the outputs to return, in order."
-  def start(outputs),
-    do: Agent.start_link(fn -> %{script: outputs, results: %{}, charges: %{}} end)
+  def start(outputs), do: Agent.start_link(fn -> %{script: outputs, results: %{}, charges: %{}} end)
 
   @doc "How many times the paid effect for `key` was actually charged (0 or 1)."
   def charges(store, key), do: Agent.get(store, &Map.get(&1.charges, key, 0))
@@ -235,8 +233,7 @@ defmodule Workflow.Test.LoopProvider do
   alias Workflow.Provider.Usage
 
   @doc "Start the shared store seeded with the per-iteration outputs to return, in order."
-  def start(outputs),
-    do: Agent.start_link(fn -> %{outputs: outputs, results: %{}, charges: %{}} end)
+  def start(outputs), do: Agent.start_link(fn -> %{outputs: outputs, results: %{}, charges: %{}} end)
 
   @doc "How many times the paid effect for `key` was actually charged (0 or 1)."
   def charges(store, key), do: Agent.get(store, &Map.get(&1.charges, key, 0))

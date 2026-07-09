@@ -1,9 +1,10 @@
 defmodule Workflow.BindingResolutionTest do
   use ExUnit.Case, async: true
 
-  alias Workflow.Provider.Usage
-  alias Workflow.Node.{Agent, GenericFanout}
   alias Workflow.Event
+  alias Workflow.Node.Agent
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Provider.Usage
 
   test "bound value folds a committed node result from a hand-built journal" do
     assert Code.ensure_loaded?(Workflow.BoundValue)

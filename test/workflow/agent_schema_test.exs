@@ -7,19 +7,20 @@ defmodule Workflow.AgentSchemaTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Status, IdempotencyKey}
+  alias Workflow.IdempotencyKey
+  alias Workflow.Journal
   alias Workflow.Provider.Usage
-
-  alias Workflow.Test.{
-    DedupingProvider,
-    ExplodingProvider,
-    FlakyProvider,
-    ProviderFailureProvider,
-    ScriptedProvider
-  }
+  alias Workflow.Run
+  alias Workflow.Status
+  alias Workflow.Test.DedupingProvider
+  alias Workflow.Test.ExplodingProvider
+  alias Workflow.Test.FlakyProvider
+  alias Workflow.Test.ProviderFailureProvider
+  alias Workflow.Test.ScriptedProvider
 
   # A workflow with a single schema-backed agent requiring an object with "label".
   defmodule Classify do
+    @moduledoc false
     use Workflow
 
     workflow "classify" do
@@ -33,6 +34,7 @@ defmodule Workflow.AgentSchemaTest do
   end
 
   defmodule InjectedClassify do
+    @moduledoc false
     use Workflow
 
     workflow "injected-classify" do
@@ -54,7 +56,7 @@ defmodule Workflow.AgentSchemaTest do
     {ScriptedProvider, sink: self(), script: script}
   end
 
-  defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
+  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
 
   test "a schema-backed agent returns a validated term through the mock provider" do
     id = run_id()
@@ -94,14 +96,10 @@ defmodule Workflow.AgentSchemaTest do
                run_id: id,
                provider:
                  {ProviderFailureProvider,
-                  sink: self(),
-                  kind: :quota_exceeded,
-                  detail: detail,
-                  usage: usage_map,
-                  activity: activity}
+                  sink: self(), kind: :quota_exceeded, detail: detail, usage: usage_map, activity: activity}
              )
 
-    assert_received {:agent_called, "classify", %Workflow.IdempotencyKey{attempt: 0}}
+    assert_received {:agent_called, "classify", %IdempotencyKey{attempt: 0}}
     refute_received {:agent_called, _, _}
 
     assert types(id) == [:run_started, :agent_failed]

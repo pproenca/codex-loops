@@ -7,8 +7,10 @@ defmodule Workflow.MCP.AnubisStdio do
   """
 
   alias Anubis.Server.Registry, as: AnubisRegistry
-  alias Workflow.MCP.{AnubisServer, BurritoEnvironment}
+  alias Anubis.Server.Transport.STDIO
+  alias Workflow.MCP.AnubisServer
   alias Workflow.MCP.AnubisServer.ToolHelpers
+  alias Workflow.MCP.BurritoEnvironment
 
   @spec main([String.t()]) :: :ok | {:error, 2} | no_return()
   def main(args \\ BurritoEnvironment.argv()) do
@@ -55,26 +57,22 @@ defmodule Workflow.MCP.AnubisStdio do
   end
 
   defp run_with_supervisor(task_supervisor, io_device) do
-    try do
-      with {:ok, session} <- start_session() do
-        run_with_session(session, io_device)
-      end
-    after
-      stop_supervisor(task_supervisor)
+    with {:ok, session} <- start_session() do
+      run_with_session(session, io_device)
     end
+  after
+    stop_supervisor(task_supervisor)
   end
 
   defp run_with_session(session, io_device) do
-    try do
-      with {:ok, transport} <- start_transport(io_device) do
-        wait_for_transport(transport)
-        stop_process(transport)
-        :ok
-      end
-    after
-      ToolHelpers.stop_stored_lifecycle()
-      stop_process(session)
+    with {:ok, transport} <- start_transport(io_device) do
+      wait_for_transport(transport)
+      stop_process(transport)
+      :ok
     end
+  after
+    ToolHelpers.stop_stored_lifecycle()
+    stop_process(session)
   end
 
   defp start_task_supervisor do
@@ -86,13 +84,13 @@ defmodule Workflow.MCP.AnubisStdio do
       session_id: "stdio",
       server_module: AnubisServer,
       name: session_name(),
-      transport: [layer: Anubis.Server.Transport.STDIO, name: transport_name()],
+      transport: [layer: STDIO, name: transport_name()],
       task_supervisor: task_supervisor_name()
     )
   end
 
   defp start_transport(io_device) do
-    Anubis.Server.Transport.STDIO.start_link(
+    STDIO.start_link(
       server: AnubisServer,
       name: transport_name(),
       io_device: io_device
@@ -124,7 +122,7 @@ defmodule Workflow.MCP.AnubisStdio do
   defp transport_name, do: AnubisRegistry.transport_name(AnubisServer, :stdio)
 
   defp help do
-    """
+    String.trim_trailing("""
     Usage: codex-loops-mcp --stdio
 
     Runs the Codex Loops Anubis MCP server over stdio.
@@ -132,7 +130,6 @@ defmodule Workflow.MCP.AnubisStdio do
     Options:
       --stdio   Start the MCP stdio server.
       --help    Show this help.
-    """
-    |> String.trim_trailing()
+    """)
   end
 end

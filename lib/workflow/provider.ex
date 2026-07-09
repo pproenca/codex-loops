@@ -27,6 +27,8 @@ defmodule Workflow.Provider do
   and commits it.
   """
 
+  alias Workflow.Provider.Usage
+
   @type result :: term()
   @type failure_kind :: :quota_exceeded | :model_limit | :timeout | :unavailable
   @type failure_detail ::
@@ -52,11 +54,9 @@ defmodule Workflow.Provider do
               key :: Workflow.IdempotencyKey.t(),
               opts :: term()
             ) ::
-              {:ok, result(), Workflow.Provider.Usage.t()}
-              | {:ok, result(), Workflow.Provider.Usage.t(), activity()}
-              | {:error,
-                 {:provider_failure, failure_kind(), failure_detail(),
-                  Workflow.Provider.Usage.t() | map() | nil, activity()}}
+              {:ok, result(), Usage.t()}
+              | {:ok, result(), Usage.t(), activity()}
+              | {:error, {:provider_failure, failure_kind(), failure_detail(), Usage.t() | map() | nil, activity()}}
 
   @typedoc "A resolved backend: the provider module plus its opaque per-run opts."
   @type t :: {module(), term()}

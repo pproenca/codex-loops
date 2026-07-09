@@ -3,7 +3,8 @@ defmodule Workflow.MCP.AnubisServer.WorkflowInspect do
 
   use Anubis.Server.Component, type: :tool, name: "workflow_inspect"
 
-  alias Workflow.MCP.{AnubisServer.ToolHelpers, SchedulerClient}
+  alias Workflow.MCP.AnubisServer.ToolHelpers
+  alias Workflow.MCP.SchedulerClient
 
   schema do
     field(:run_id, {:required, {:string, {:min, 1}}},

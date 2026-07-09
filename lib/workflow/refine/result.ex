@@ -7,7 +7,8 @@ defmodule Workflow.Refine.Result do
   atom-keyed internal payloads directly.
   """
 
-  alias Workflow.{Event, Journal}
+  alias Workflow.Event
+  alias Workflow.Journal
   alias Workflow.Provider.Usage
 
   @type result :: {:ok, map()} | {:error, {:unbound, Workflow.Node.binding_ref()}}
@@ -58,8 +59,7 @@ defmodule Workflow.Refine.Result do
     }
   end
 
-  defp projection(events, run_id, address, completed),
-    do: public(completed.payload, events, run_id, address)
+  defp projection(events, run_id, address, completed), do: public(completed.payload, events, run_id, address)
 
   defp completed_event(events, address) do
     Enum.find(
@@ -70,16 +70,13 @@ defmodule Workflow.Refine.Result do
 
   defp final_decision(events, address, final_round) do
     events
-    |> Enum.filter(
-      &(&1.type == :refine_round_decision and Map.get(&1.payload, :address) == address)
-    )
+    |> Enum.filter(&(&1.type == :refine_round_decision and Map.get(&1.payload, :address) == address))
     |> Enum.find(&(Map.get(&1.payload, :round) == final_round))
   end
 
   defp decision_field(nil, _field, default), do: default
 
-  defp decision_field(%Event{payload: payload}, field, default),
-    do: Map.get(payload, field, default)
+  defp decision_field(%Event{payload: payload}, field, default), do: Map.get(payload, field, default)
 
   defp open_finding_json(finding) do
     %{
@@ -164,11 +161,9 @@ defmodule Workflow.Refine.Result do
   defp reason_json({:malformed_output, detail}),
     do: %{"code" => "malformed_output", "detail" => diagnostic_string(detail)}
 
-  defp reason_json({:reviewer_timeout, timeout_ms}),
-    do: %{"code" => "reviewer_timeout", "timeoutMs" => timeout_ms}
+  defp reason_json({:reviewer_timeout, timeout_ms}), do: %{"code" => "reviewer_timeout", "timeoutMs" => timeout_ms}
 
-  defp reason_json({:cold_read_timeout, timeout_ms}),
-    do: %{"code" => "cold_read_timeout", "timeoutMs" => timeout_ms}
+  defp reason_json({:cold_read_timeout, timeout_ms}), do: %{"code" => "cold_read_timeout", "timeoutMs" => timeout_ms}
 
   defp reason_json({:reviewer_crashed, detail}),
     do: %{"code" => "reviewer_crashed", "detail" => diagnostic_string(detail)}
@@ -176,8 +171,7 @@ defmodule Workflow.Refine.Result do
   defp reason_json({:cold_read_crashed, detail}),
     do: %{"code" => "cold_read_crashed", "detail" => diagnostic_string(detail)}
 
-  defp reason_json({:repair_failed, detail}),
-    do: %{"code" => "repair_failed", "detail" => diagnostic_string(detail)}
+  defp reason_json({:repair_failed, detail}), do: %{"code" => "repair_failed", "detail" => diagnostic_string(detail)}
 
   defp role_failure_detail_json(nil), do: nil
   defp role_failure_detail_json(detail) when is_binary(detail), do: detail
@@ -230,8 +224,7 @@ defmodule Workflow.Refine.Result do
               :refine_round_decision,
               :refine_role_failed,
               :refine_gate_evaluated
-            ],
-       do: true
+            ], do: true
 
   defp refine_result_ref?(%Event{payload: %{address: role_address}, type: type}, address)
        when type in [:agent_activity, :agent_committed, :agent_attempt_rejected, :agent_failed],
@@ -254,9 +247,7 @@ defmodule Workflow.Refine.Result do
 
   defp diagnostic_string(term), do: term |> diagnostic_value() |> deterministic_json_encode()
 
-  defp diagnostic_value(value)
-       when is_nil(value) or is_boolean(value) or is_integer(value) or is_binary(value),
-       do: value
+  defp diagnostic_value(value) when is_nil(value) or is_boolean(value) or is_integer(value) or is_binary(value), do: value
 
   defp diagnostic_value(value) when is_atom(value), do: %{"atom" => Atom.to_string(value)}
   defp diagnostic_value(value) when is_list(value), do: Enum.map(value, &diagnostic_value/1)
@@ -284,17 +275,16 @@ defmodule Workflow.Refine.Result do
   defp deterministic_json_encode(value) when is_binary(value), do: Jason.encode!(value)
 
   defp deterministic_json_encode(value) when is_list(value) do
-    "[" <> (value |> Enum.map(&deterministic_json_encode/1) |> Enum.join(",")) <> "]"
+    "[" <> Enum.map_join(value, ",", &deterministic_json_encode/1) <> "]"
   end
 
   defp deterministic_json_encode(value) when is_map(value) do
     encoded =
       value
       |> Enum.sort_by(fn {key, _nested} -> key end)
-      |> Enum.map(fn {key, nested} ->
+      |> Enum.map_join(",", fn {key, nested} ->
         deterministic_json_encode(key) <> ":" <> deterministic_json_encode(nested)
       end)
-      |> Enum.join(",")
 
     "{" <> encoded <> "}"
   end

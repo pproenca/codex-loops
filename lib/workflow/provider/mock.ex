@@ -13,6 +13,5 @@ defmodule Workflow.Provider.Mock do
   alias Workflow.Provider.Usage
 
   @impl true
-  def run_agent(prompt, _schema, _key, _opts),
-    do: {:ok, %{"echo" => prompt}, %Usage{}}
+  def run_agent(prompt, _schema, _key, _opts), do: {:ok, %{"echo" => prompt}, %Usage{}}
 end

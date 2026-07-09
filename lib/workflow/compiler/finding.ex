@@ -71,8 +71,7 @@ defmodule Workflow.Compiler.Finding do
   defp append_note(lines, nil), do: lines
   defp append_note(lines, hint), do: lines ++ ["   = hint: #{hint}"]
 
-  defp location(%__MODULE__{file: file, line: line}),
-    do: "#{Path.relative_to_cwd(file)}:#{line}"
+  defp location(%__MODULE__{file: file, line: line}), do: "#{Path.relative_to_cwd(file)}:#{line}"
 
   defp caret_length(snippet) do
     snippet |> String.split("\n") |> List.first() |> String.length() |> max(1)

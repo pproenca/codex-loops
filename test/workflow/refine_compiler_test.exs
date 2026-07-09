@@ -2,7 +2,10 @@ defmodule Workflow.RefineCompilerTest do
   use ExUnit.Case, async: true
 
   alias Workflow.Compiler
-  alias Workflow.Node.{Agent, Refine, Return}
+  alias Workflow.Compiler.Finding
+  alias Workflow.Node.Agent
+  alias Workflow.Node.Refine
+  alias Workflow.Node.Return
 
   defp env, do: %{__ENV__ | file: "workflows/refine.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
@@ -173,7 +176,7 @@ defmodule Workflow.RefineCompilerTest do
   end
 
   test "rejects invalid refine gate option shapes" do
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -187,7 +190,7 @@ defmodule Workflow.RefineCompilerTest do
 
     assert finding.message =~ "`refine` `gates:` must be a literal keyword list"
 
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -206,7 +209,7 @@ defmodule Workflow.RefineCompilerTest do
   end
 
   test "rejects invalid refine gate predicates and literals" do
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -220,7 +223,7 @@ defmodule Workflow.RefineCompilerTest do
 
     assert finding.message =~ "gate JSON pointer"
 
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -234,7 +237,7 @@ defmodule Workflow.RefineCompilerTest do
 
     assert finding.message =~ "`path_count` gate must compare with one of"
 
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -250,7 +253,7 @@ defmodule Workflow.RefineCompilerTest do
   end
 
   test "rejects invalid cold-read gate descriptors" do
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -264,7 +267,7 @@ defmodule Workflow.RefineCompilerTest do
 
     assert finding.message =~ "`cold_read:` requires `reviewer:`"
 
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -285,7 +288,7 @@ defmodule Workflow.RefineCompilerTest do
   end
 
   test "rejects unsupported reviewer adapter options" do
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [
@@ -301,7 +304,7 @@ defmodule Workflow.RefineCompilerTest do
 
     assert finding.message =~ "unsupported reviewer adapter"
 
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [
@@ -365,7 +368,7 @@ defmodule Workflow.RefineCompilerTest do
   end
 
   test "rejects duplicate required refine options" do
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],
@@ -381,7 +384,7 @@ defmodule Workflow.RefineCompilerTest do
   end
 
   test "rejects duplicate optional refine options" do
-    assert {:error, %Workflow.Compiler.Finding{} = finding} =
+    assert {:error, %Finding{} = finding} =
              parse("""
              refine agent("Draft."),
                reviewers: [reviewer(:spec, "Find spec gaps."), reviewer(:runtime, "Find runtime bugs.")],

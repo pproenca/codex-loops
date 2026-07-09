@@ -10,6 +10,7 @@ schema SchemaAgentFixtures.BugReport do
 end
 
 defmodule SchemaAgentFixtures.ViaModule do
+  @moduledoc false
   use Workflow
 
   workflow "via_module" do
@@ -19,6 +20,7 @@ defmodule SchemaAgentFixtures.ViaModule do
 end
 
 defmodule SchemaAgentFixtures.ViaRawMap do
+  @moduledoc false
   use Workflow
 
   workflow "via_raw_map" do
@@ -55,7 +57,9 @@ defmodule Workflow.SchemaAgentTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Status}
+  alias Workflow.Journal
+  alias Workflow.Run
+  alias Workflow.Status
   alias Workflow.Test.ScriptedProvider
 
   @via_module SchemaAgentFixtures.ViaModule
@@ -75,7 +79,7 @@ defmodule Workflow.SchemaAgentTest do
     schema
   end
 
-  defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
+  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
 
   test "the module-backed agent compiles to exactly the raw map from #3" do
     assert agent_schema(@via_module) == SchemaAgentFixtures.BugReport.__schema__(:json)

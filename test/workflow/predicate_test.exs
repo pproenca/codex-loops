@@ -7,26 +7,21 @@ defmodule Workflow.PredicateTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.Predicate
-
-  alias Workflow.Predicate.{
-    Agree,
-    AllOf,
-    AnyOf,
-    BudgetRemaining,
-    Compare,
-    Count,
-    Dry,
-    PathCount,
-    PathEquals,
-    PathExists,
-    PathNonEmpty
-  }
-
   alias Workflow.Compiler.Finding
+  alias Workflow.Predicate
+  alias Workflow.Predicate.Agree
+  alias Workflow.Predicate.AllOf
+  alias Workflow.Predicate.AnyOf
+  alias Workflow.Predicate.BudgetRemaining
+  alias Workflow.Predicate.Compare
+  alias Workflow.Predicate.Count
+  alias Workflow.Predicate.Dry
+  alias Workflow.Predicate.PathCount
+  alias Workflow.Predicate.PathEquals
+  alias Workflow.Predicate.PathExists
+  alias Workflow.Predicate.PathNonEmpty
 
-  defp parse(source, binding_env \\ %{}),
-    do: Predicate.parse(Code.string_to_quoted!(source), __ENV__, binding_env)
+  defp parse(source, binding_env \\ %{}), do: Predicate.parse(Code.string_to_quoted!(source), __ENV__, binding_env)
 
   describe "parsing the closed vocabulary" do
     test "count(:acc) compared to a literal integer" do
@@ -89,8 +84,7 @@ defmodule Workflow.PredicateTest do
       assert {:ok, %PathNonEmpty{binding: :reviews, ref: {:map, [0]}, pointer: "/summary"}} =
                parse(~s|path_non_empty(:reviews, "/summary")|, bindings)
 
-      assert {:ok,
-              %PathEquals{binding: :reviews, ref: {:map, [0]}, pointer: "/ok", literal: true}} =
+      assert {:ok, %PathEquals{binding: :reviews, ref: {:map, [0]}, pointer: "/ok", literal: true}} =
                parse(~s|path_equals(:reviews, "/ok", true)|, bindings)
     end
 
@@ -423,13 +417,11 @@ defmodule Workflow.PredicateTest do
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(m) when is_map(m),
-    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
 
-  defp contains_function?(t) when is_tuple(t),
-    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
 end

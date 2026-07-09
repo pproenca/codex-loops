@@ -8,13 +8,21 @@ defmodule Workflow.ResumeTest do
   """
   use ExUnit.Case, async: true
 
-  @receive_timeout 1_000
+  alias Workflow.Event
+  alias Workflow.IdempotencyKey
+  alias Workflow.Journal
+  alias Workflow.Ledger
+  alias Workflow.Run
+  alias Workflow.Status
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.GateProvider
+  alias Workflow.Test.LedgeredProvider
 
-  alias Workflow.{Run, Journal, Status, Ledger, Event, IdempotencyKey}
-  alias Workflow.Test.{EchoProvider, GateProvider, LedgeredProvider}
+  @receive_timeout 1_000
 
   # A run whose first turn commits and whose second turn can be held in flight.
   defmodule TwoAgents do
+    @moduledoc false
     use Workflow
 
     workflow "two-agents" do
@@ -26,6 +34,7 @@ defmodule Workflow.ResumeTest do
 
   # A single paid turn, used for lease-takeover and the return→commit crash window.
   defmodule OneAgent do
+    @moduledoc false
     use Workflow
 
     workflow "one-agent" do
@@ -37,6 +46,7 @@ defmodule Workflow.ResumeTest do
   # A fan-out region that precedes a gated agent, so a run can be held in flight
   # *after* the whole parallel bracket is journaled but before the gate settles.
   defmodule FanoutThenGate do
+    @moduledoc false
     use Workflow
 
     workflow "fanout-then-gate" do
@@ -47,6 +57,7 @@ defmodule Workflow.ResumeTest do
   end
 
   defmodule InjectedThenGate do
+    @moduledoc false
     use Workflow
 
     workflow "injected-then-gate" do
@@ -57,6 +68,7 @@ defmodule Workflow.ResumeTest do
   end
 
   defmodule JournaledDynamicFanout do
+    @moduledoc false
     use Workflow
 
     workflow "journaled-dynamic-fanout" do
@@ -144,7 +156,7 @@ defmodule Workflow.ResumeTest do
 
     # The fan-out region is fully journaled before the crash: one started, both
     # branches, one completed.
-    before = Journal.fold(id) |> Enum.map(& &1.type)
+    before = id |> Journal.fold() |> Enum.map(& &1.type)
     assert Enum.count(before, &(&1 == :parallel_started)) == 1
     assert Enum.count(before, &(&1 == :parallel_completed)) == 1
 
@@ -162,7 +174,7 @@ defmodule Workflow.ResumeTest do
 
     # The bracket is exactly-once: resume did not double-emit the started/completed
     # markers, so a fold that pairs them sees a single region.
-    types = Journal.fold(id) |> Enum.map(& &1.type)
+    types = id |> Journal.fold() |> Enum.map(& &1.type)
     assert Enum.count(types, &(&1 == :parallel_started)) == 1
     assert Enum.count(types, &(&1 == :parallel_completed)) == 1
 

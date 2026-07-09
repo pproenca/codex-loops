@@ -14,20 +14,28 @@ defmodule Workflow.LoopRunTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Status, Ledger, Accumulator, IdempotencyKey}
-  alias Workflow.Catalog.{LoopUntilBudget, LoopUntilDry}
-  alias Workflow.Test.{EchoProvider, ExplodingProvider, ScriptedProvider, LoopProvider}
+  alias Workflow.Accumulator
+  alias Workflow.Catalog.LoopUntilBudget
+  alias Workflow.Catalog.LoopUntilDry
+  alias Workflow.IdempotencyKey
+  alias Workflow.Journal
+  alias Workflow.Ledger
+  alias Workflow.Run
+  alias Workflow.Status
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.ExplodingProvider
+  alias Workflow.Test.LoopProvider
+  alias Workflow.Test.ScriptedProvider
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
-  defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
-  defp events(id, type), do: Journal.fold(id) |> Enum.filter(&(&1.type == type))
-  defp decisions(id), do: events(id, :loop_decision) |> Enum.map(& &1.payload.decision)
+  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+  defp events(id, type), do: id |> Journal.fold() |> Enum.filter(&(&1.type == type))
+  defp decisions(id), do: id |> events(:loop_decision) |> Enum.map(& &1.payload.decision)
 
   defp decision_shapes(id) do
-    events(id, :loop_decision)
-    |> Enum.map(
-      &Map.take(&1.payload, [:decision, :predicate_result, :exhausted, :source_address])
-    )
+    id
+    |> events(:loop_decision)
+    |> Enum.map(&Map.take(&1.payload, [:decision, :predicate_result, :exhausted, :source_address]))
   end
 
   defp await_lease_released(run_id, tries \\ 200) do
@@ -119,14 +127,14 @@ defmodule Workflow.LoopRunTest do
                provider: {EchoProvider, sink: self()}
              )
 
-    before = Journal.fold(id) |> length()
+    before = id |> Journal.fold() |> length()
 
     # Re-invoking folds to :completed and reuses it verbatim — no decision recomputed,
     # no paid turn re-run, no new events appended.
     assert {:ok, ^id} =
-             Run.run(LoopUntilBudget, run_id: id, provider: {Workflow.Test.ExplodingProvider, []})
+             Run.run(LoopUntilBudget, run_id: id, provider: {ExplodingProvider, []})
 
-    assert Journal.fold(id) |> length() == before
+    assert id |> Journal.fold() |> length() == before
     assert Status.of(id).state == :completed
   end
 
@@ -134,13 +142,7 @@ defmodule Workflow.LoopRunTest do
 
   # Two rows, then two dry rounds surfacing only already-seen ids: added counts are
   # [2, 1, 0, 0], so with rounds: 2 the loop stops after the fourth iteration.
-  defp dry_script,
-    do: [
-      [%{"id" => 1}, %{"id" => 2}],
-      [%{"id" => 2}, %{"id" => 3}],
-      [%{"id" => 3}],
-      [%{"id" => 3}]
-    ]
+  defp dry_script, do: [[%{"id" => 1}, %{"id" => 2}], [%{"id" => 2}, %{"id" => 3}], [%{"id" => 3}], [%{"id" => 3}]]
 
   test "loop-until-dry accumulates deduped items and terminates after K dry rounds" do
     id = run_id()
@@ -161,7 +163,7 @@ defmodule Workflow.LoopRunTest do
     assert Status.of(id).accumulators == %{items: [%{"id" => 1}, %{"id" => 2}, %{"id" => 3}]}
 
     # Per-iteration accumulate events record exactly what each round added.
-    added = events(id, :accumulate) |> Enum.map(&length(&1.payload.added))
+    added = id |> events(:accumulate) |> Enum.map(&length(&1.payload.added))
     assert added == [2, 1, 0, 0]
 
     assert decisions(id) == [:continue, :continue, :continue, :continue, {:stop, :until}]
@@ -217,6 +219,7 @@ defmodule Workflow.LoopRunTest do
   # --- the predicate sub-vocabulary driving a real loop ---
 
   defmodule CountStop do
+    @moduledoc false
     use Workflow
 
     # No budget bound (remaining is :infinity, so `reserve: 0` never stops it); the
@@ -232,6 +235,7 @@ defmodule Workflow.LoopRunTest do
   end
 
   defmodule DryPredicateStop do
+    @moduledoc false
     use Workflow
 
     workflow "dry-predicate-stop" do
@@ -299,6 +303,7 @@ defmodule Workflow.LoopRunTest do
   # --- generic loop core ---
 
   defmodule GenericMaxLoop do
+    @moduledoc false
     use Workflow
 
     workflow "generic-max-loop" do
@@ -311,6 +316,7 @@ defmodule Workflow.LoopRunTest do
   end
 
   defmodule BodyUntilStop do
+    @moduledoc false
     use Workflow
 
     workflow "body-until-stop" do
@@ -326,6 +332,7 @@ defmodule Workflow.LoopRunTest do
   end
 
   defmodule HeaderUntilStop do
+    @moduledoc false
     use Workflow
 
     workflow "header-until-stop" do
@@ -339,6 +346,7 @@ defmodule Workflow.LoopRunTest do
   end
 
   defmodule ExhaustFail do
+    @moduledoc false
     use Workflow
 
     workflow "generic-loop-exhaust-fail" do
@@ -351,6 +359,7 @@ defmodule Workflow.LoopRunTest do
   end
 
   defmodule BodyUntilFanoutStop do
+    @moduledoc false
     use Workflow
 
     workflow "body-until-fanout-stop" do
@@ -544,12 +553,12 @@ defmodule Workflow.LoopRunTest do
              reason: {:loop_exhausted, [0], 1}
            }
 
-    event_count = Journal.fold(id) |> length()
+    event_count = id |> Journal.fold() |> length()
 
     assert {:error, {:loop_exhausted, [0], 1}} =
              Run.run(ExhaustFail, run_id: id, provider: {ExplodingProvider, []})
 
-    assert Journal.fold(id) |> length() == event_count
+    assert id |> Journal.fold() |> length() == event_count
   end
 
   test "body-local until can stop from a loop-local fanout binding" do

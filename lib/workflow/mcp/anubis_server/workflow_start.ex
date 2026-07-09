@@ -3,22 +3,18 @@ defmodule Workflow.MCP.AnubisServer.WorkflowStart do
 
   use Anubis.Server.Component, type: :tool, name: "workflow_start"
 
-  alias Workflow.MCP.{AnubisServer.ToolHelpers, SchedulerClient}
+  alias Workflow.MCP.AnubisServer.ToolHelpers
+  alias Workflow.MCP.SchedulerClient
 
   @allowed_keys [:script_path, :run_id, :provider, :budget]
 
   schema do
-    field(:script_path, {:required, :string},
-      description: "Path to the workflow .exs file to run."
-    )
+    field(:script_path, {:required, :string}, description: "Path to the workflow .exs file to run.")
 
-    field(:run_id, :string,
-      description: "Optional route-safe run id to preserve across status and UI links."
-    )
+    field(:run_id, :string, description: "Optional route-safe run id to preserve across status and UI links.")
 
     field(:provider, {:enum, ["mock", "codex"]},
-      description:
-        "Optional scheduler provider. Defaults to mock; codex spends a real Codex turn."
+      description: "Optional scheduler provider. Defaults to mock; codex spends a real Codex turn."
     )
 
     field(:budget, {:integer, {:gte, 0}}, description: "Optional non-negative scheduler budget.")

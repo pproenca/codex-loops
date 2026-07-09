@@ -1,11 +1,16 @@
 defmodule Workflow.CodexProviderEnvTest do
   use ExUnit.Case, async: false
 
-  alias Workflow.{Journal, Provider, Run, Status}
+  alias Workflow.Journal
+  alias Workflow.Provider
+  alias Workflow.Provider.Codex
+  alias Workflow.Run
+  alias Workflow.Status
 
   @codex_bin_env "CODEX_LOOPS_CODEX_BIN"
 
   defmodule EchoWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "codex_env_echo" do
@@ -36,7 +41,7 @@ defmodule Workflow.CodexProviderEnvTest do
               "--json",
               "--dangerously-bypass-approvals-and-sandbox",
               "--skip-git-repo-check"
-            ]} = Workflow.Provider.Codex.default_command()
+            ]} = Codex.default_command()
   end
 
   test "a missing codex CLI is journaled as an unavailable provider failure" do
@@ -52,7 +57,7 @@ defmodule Workflow.CodexProviderEnvTest do
     assert detail["message"] =~ "no `codex` executable"
     assert detail["hint"] =~ @codex_bin_env
 
-    assert Journal.fold(id) |> Enum.map(& &1.type) == [:run_started, :agent_failed]
+    assert id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :agent_failed]
 
     failed = Enum.find(Journal.fold(id), &(&1.type == :agent_failed))
     assert failed.payload.reason == {:provider_failure, :unavailable, detail}
@@ -70,12 +75,12 @@ defmodule Workflow.CodexProviderEnvTest do
     assert {:error, {:provider_failure, [0], :unavailable, detail}} =
              Run.run(EchoWorkflow,
                run_id: id,
-               provider: {Workflow.Provider.Codex, command: {"/bin/sh", ["-c", "exit 127"]}}
+               provider: {Codex, command: {"/bin/sh", ["-c", "exit 127"]}}
              )
 
     assert detail["env"] == @codex_bin_env
     assert detail["message"] =~ "exit status 127"
-    assert Journal.fold(id) |> Enum.map(& &1.type) == [:run_started, :agent_failed]
+    assert id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :agent_failed]
     assert Status.of(id).state == :failed
   end
 

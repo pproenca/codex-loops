@@ -9,7 +9,10 @@ defmodule Workflow.CompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Phase, Log, Agent, Return}
+  alias Workflow.Node.Agent
+  alias Workflow.Node.Log
+  alias Workflow.Node.Phase
+  alias Workflow.Node.Return
 
   # An env whose file we control, so located messages are readable and asserted.
   defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
@@ -61,9 +64,7 @@ defmodule Workflow.CompilerTest do
 
     test "an agent label composes with schema-backed options" do
       {:ok, tree} =
-        parse(
-          ~s|agent("go", schema: %{"type" => "object"}, label: "gate:consensus")\nreturn(:ok)|
-        )
+        parse(~s|agent("go", schema: %{"type" => "object"}, label: "gate:consensus")\nreturn(:ok)|)
 
       assert [
                %Agent{
@@ -125,7 +126,7 @@ defmodule Workflow.CompilerTest do
 
     test "a non-string label is rejected" do
       assert {:error, %Finding{line: 1} = f} =
-               parse("agent(\"go\", schema: %{\"type\" => \"object\"}, label: :bad)\nreturn(:ok)")
+               parse(~s|agent("go", schema: %{"type" => "object"}, label: :bad)\nreturn(:ok)|)
 
       assert f.message =~ "label must be a string literal"
     end
@@ -246,17 +247,13 @@ defmodule Workflow.CompilerTest do
   # A term with no functions anywhere: proves inertness/serializability.
   defp contains_function?(term) when is_function(term), do: true
 
-  defp contains_function?(%_{} = struct),
-    do: struct |> Map.from_struct() |> contains_function?()
+  defp contains_function?(%_{} = struct), do: struct |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(map) when is_map(map),
-    do: map |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(map) when is_map(map), do: map |> Map.values() |> Enum.any?(&contains_function?/1)
 
-  defp contains_function?(list) when is_list(list),
-    do: Enum.any?(list, &contains_function?/1)
+  defp contains_function?(list) when is_list(list), do: Enum.any?(list, &contains_function?/1)
 
-  defp contains_function?(tuple) when is_tuple(tuple),
-    do: tuple |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(tuple) when is_tuple(tuple), do: tuple |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_other), do: false
 end

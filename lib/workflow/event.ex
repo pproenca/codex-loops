@@ -9,6 +9,15 @@ defmodule Workflow.Event do
   keeps the fold deterministic.
   """
 
+  alias Workflow.Node.FanOut
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Node.Judge
+  alias Workflow.Node.Parallel
+  alias Workflow.Node.Pipeline
+  alias Workflow.Node.Refine
+  alias Workflow.Node.Verify
+  alias Workflow.Refine.ReviewerAdapter
+
   @schema 1
 
   @enforce_keys [:type, :payload]
@@ -21,8 +30,6 @@ defmodule Workflow.Event do
           payload: map(),
           schema: pos_integer()
         }
-
-  alias Workflow.Refine.ReviewerAdapter
 
   @spec schema_version() :: pos_integer()
   def schema_version, do: @schema
@@ -60,14 +67,7 @@ defmodule Workflow.Event do
     %__MODULE__{type: :log_emitted, payload: %{address: node.address, message: node.message}}
   end
 
-  def agent_committed(
-        %Workflow.Node.Agent{} = node,
-        iteration,
-        key,
-        result,
-        usage,
-        activity \\ []
-      ) do
+  def agent_committed(%Workflow.Node.Agent{} = node, iteration, key, result, usage, activity \\ []) do
     %__MODULE__{
       type: :agent_committed,
       payload: %{
@@ -115,15 +115,7 @@ defmodule Workflow.Event do
   the rejected output and the validator's reason so replay reconstructs every retry
   decision; the paid `usage` is still ledgered.
   """
-  def agent_attempt_rejected(
-        %Workflow.Node.Agent{} = node,
-        iteration,
-        attempt,
-        output,
-        reason,
-        usage,
-        activity \\ []
-      ) do
+  def agent_attempt_rejected(%Workflow.Node.Agent{} = node, iteration, attempt, output, reason, usage, activity \\ []) do
     %__MODULE__{
       type: :agent_attempt_rejected,
       payload: %{
@@ -145,14 +137,7 @@ defmodule Workflow.Event do
   structured output). This is the run's terminal event on the fail path — there is
   no `run_completed`.
   """
-  def agent_failed(
-        %Workflow.Node.Agent{} = node,
-        iteration,
-        attempts,
-        reason,
-        usage \\ nil,
-        activity \\ []
-      ) do
+  def agent_failed(%Workflow.Node.Agent{} = node, iteration, attempts, reason, usage \\ nil, activity \\ []) do
     %__MODULE__{
       type: :agent_failed,
       payload: %{
@@ -172,14 +157,14 @@ defmodule Workflow.Event do
   own paid turn is journaled as an ordinary `agent_*` event at its branch address,
   so these markers carry no results — they only bracket the concurrent region.
   """
-  def parallel_started(%Workflow.Node.Parallel{} = node) do
+  def parallel_started(%Parallel{} = node) do
     %__MODULE__{
       type: :parallel_started,
       payload: %{address: node.address, branch_count: length(node.branches)}
     }
   end
 
-  def parallel_completed(%Workflow.Node.Parallel{} = node) do
+  def parallel_completed(%Parallel{} = node) do
     %__MODULE__{type: :parallel_completed, payload: %{address: node.address}}
   end
 
@@ -188,7 +173,7 @@ defmodule Workflow.Event do
   stage count; `pipeline_completed` marks the join. Each item lane's stage turns are
   journaled as ordinary `agent_*` events at their `[item, stage]` addresses.
   """
-  def pipeline_started(%Workflow.Node.Pipeline{} = node) do
+  def pipeline_started(%Pipeline{} = node) do
     stage_count = node.lanes |> List.first([]) |> length()
 
     %__MODULE__{
@@ -202,7 +187,7 @@ defmodule Workflow.Event do
     }
   end
 
-  def pipeline_completed(%Workflow.Node.Pipeline{} = node) do
+  def pipeline_completed(%Pipeline{} = node) do
     %__MODULE__{type: :pipeline_completed, payload: %{address: node.address}}
   end
 
@@ -212,7 +197,7 @@ defmodule Workflow.Event do
   qualify the marker by the owning loop iteration. `fanout_failed` is terminal for
   declared fanout failures such as `on_zero: :fail`.
   """
-  def fanout_started(%Workflow.Node.GenericFanout{} = node, width, iteration \\ nil) do
+  def fanout_started(%GenericFanout{} = node, width, iteration \\ nil) do
     %__MODULE__{
       type: :fanout_started,
       payload: %{
@@ -225,14 +210,14 @@ defmodule Workflow.Event do
     }
   end
 
-  def fanout_completed(%Workflow.Node.GenericFanout{} = node, iteration \\ nil) do
+  def fanout_completed(%GenericFanout{} = node, iteration \\ nil) do
     %__MODULE__{
       type: :fanout_completed,
       payload: %{address: node.address, iteration: iteration}
     }
   end
 
-  def fanout_failed(%Workflow.Node.GenericFanout{} = node, reason, iteration \\ nil) do
+  def fanout_failed(%GenericFanout{} = node, reason, iteration \\ nil) do
     %__MODULE__{
       type: :fanout_failed,
       payload: %{address: node.address, iteration: iteration, reason: reason}
@@ -315,7 +300,7 @@ defmodule Workflow.Event do
   ordinary `agent_committed` event at its voter address, so `verify_settled` is a
   pure summary a resume replays.
   """
-  def verify_started(%Workflow.Node.Verify{} = node) do
+  def verify_started(%Verify{} = node) do
     %__MODULE__{
       type: :verify_started,
       payload: %{
@@ -327,8 +312,7 @@ defmodule Workflow.Event do
     }
   end
 
-  def verify_settled(%Workflow.Node.Verify{} = node, confirmations, total, survived)
-      when is_boolean(survived) do
+  def verify_settled(%Verify{} = node, confirmations, total, survived) when is_boolean(survived) do
     %__MODULE__{
       type: :verify_settled,
       payload: %{
@@ -349,7 +333,7 @@ defmodule Workflow.Event do
   round records the reviewed artifact, `refine_round_decision` records the folded
   reviewer outcome, and `refine_completed` exposes the bindable final artifact.
   """
-  def refine_started(%Workflow.Node.Refine{} = node) do
+  def refine_started(%Refine{} = node) do
     %__MODULE__{
       type: :refine_started,
       payload: %{
@@ -370,14 +354,14 @@ defmodule Workflow.Event do
     }
   end
 
-  def refine_round_started(%Workflow.Node.Refine{} = node, round, artifact) do
+  def refine_round_started(%Refine{} = node, round, artifact) do
     %__MODULE__{
       type: :refine_round_started,
       payload: %{address: node.address, round: round, artifact: artifact}
     }
   end
 
-  def refine_round_decision(%Workflow.Node.Refine{} = node, round, decision) do
+  def refine_round_decision(%Refine{} = node, round, decision) do
     %__MODULE__{
       type: :refine_round_decision,
       payload:
@@ -419,7 +403,7 @@ defmodule Workflow.Event do
     }
   end
 
-  def refine_completed(%Workflow.Node.Refine{} = node, attrs) do
+  def refine_completed(%Refine{} = node, attrs) do
     %__MODULE__{
       type: :refine_completed,
       payload:
@@ -440,7 +424,7 @@ defmodule Workflow.Event do
     }
   end
 
-  def refine_non_converged(%Workflow.Node.Refine{} = node, attrs) do
+  def refine_non_converged(%Refine{} = node, attrs) do
     %__MODULE__{
       type: :refine_non_converged,
       payload:
@@ -461,8 +445,7 @@ defmodule Workflow.Event do
     }
   end
 
-  def refine_gate_evaluated(%Workflow.Node.Refine{} = node, gate, predicate, opts)
-      when gate in [:cold_read, :repair, :halt] do
+  def refine_gate_evaluated(%Refine{} = node, gate, predicate, opts) when gate in [:cold_read, :repair, :halt] do
     %__MODULE__{
       type: :refine_gate_evaluated,
       payload: %{
@@ -476,7 +459,7 @@ defmodule Workflow.Event do
     }
   end
 
-  def refine_input_invalid(%Workflow.Node.Refine{} = node, input, reason) do
+  def refine_input_invalid(%Refine{} = node, input, reason) do
     %__MODULE__{
       type: :refine_input_invalid,
       payload: %{address: node.address, input: input, reason: reason}
@@ -484,7 +467,7 @@ defmodule Workflow.Event do
   end
 
   defp refine_input_descriptor({:producer, %Workflow.Node.Agent{} = agent}) do
-    agent_descriptor(agent) |> Map.put(:kind, :producer)
+    agent |> agent_descriptor() |> Map.put(:kind, :producer)
   end
 
   defp refine_input_descriptor({:binding, name, ref}) do
@@ -501,7 +484,8 @@ defmodule Workflow.Event do
   end
 
   defp reviewer_descriptor(%{index: index, name: name, agent: agent} = reviewer) do
-    agent_descriptor(agent)
+    agent
+    |> agent_descriptor()
     |> Map.merge(%{
       index: index,
       name: name,
@@ -509,9 +493,9 @@ defmodule Workflow.Event do
     })
   end
 
-  defp gate_descriptors(%Workflow.Node.Refine{gates: gates}) when map_size(gates) == 0, do: %{}
+  defp gate_descriptors(%Refine{gates: gates}) when map_size(gates) == 0, do: %{}
 
-  defp gate_descriptors(%Workflow.Node.Refine{gates: gates}) do
+  defp gate_descriptors(%Refine{gates: gates}) do
     %{}
     |> maybe_put_gate(:cold_read, gates, fn %{predicate: predicate, reviewer: reviewer} ->
       %{predicate: predicate, descriptor: reviewer_descriptor(reviewer)}
@@ -530,8 +514,7 @@ defmodule Workflow.Event do
   end
 
   defp review_adapter_versions(_reviewers) do
-    ReviewerAdapter.all()
-    |> Map.new(&{&1, ReviewerAdapter.version(&1)})
+    Map.new(ReviewerAdapter.all(), &{&1, ReviewerAdapter.version(&1)})
   end
 
   @doc """
@@ -541,7 +524,7 @@ defmodule Workflow.Event do
   journaled as an ordinary `agent_committed` event at its `[candidate, criterion]`
   address, so `judge_settled` is a pure summary a resume replays.
   """
-  def judge_started(%Workflow.Node.Judge{} = node) do
+  def judge_started(%Judge{} = node) do
     %__MODULE__{
       type: :judge_started,
       payload: %{
@@ -552,7 +535,7 @@ defmodule Workflow.Event do
     }
   end
 
-  def judge_settled(%Workflow.Node.Judge{} = node, scores, winner) do
+  def judge_settled(%Judge{} = node, scores, winner) do
     %__MODULE__{
       type: :judge_settled,
       payload: %{
@@ -571,14 +554,14 @@ defmodule Workflow.Event do
   branch's turns are journaled as ordinary `agent_committed` events at their
   `[branch, stage]` addresses.
   """
-  def fan_out_started(%Workflow.Node.FanOut{} = node, width) do
+  def fan_out_started(%FanOut{} = node, width) do
     %__MODULE__{
       type: :fan_out_started,
       payload: %{address: node.address, per: node.width.per, width: width}
     }
   end
 
-  def fan_out_completed(%Workflow.Node.FanOut{} = node) do
+  def fan_out_completed(%FanOut{} = node) do
     %__MODULE__{type: :fan_out_completed, payload: %{address: node.address}}
   end
 

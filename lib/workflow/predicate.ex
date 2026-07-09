@@ -147,8 +147,7 @@ defmodule Workflow.Predicate do
   def parse(ast, env), do: parse(ast, env, %{})
 
   @spec parse(Macro.t(), Macro.Env.t(), binding_env()) :: {:ok, t()} | {:error, Finding.t()}
-  def parse(ast, env, binding_env) when is_map(binding_env),
-    do: predicate(ast, env, binding_env)
+  def parse(ast, env, binding_env) when is_map(binding_env), do: predicate(ast, env, binding_env)
 
   @doc """
   Return the shared `seen_by` list required by any `dry(...)` predicates in a tree.
@@ -173,16 +172,13 @@ defmodule Workflow.Predicate do
     end
   end
 
-  defp predicate({name, _meta, [branches]} = form, env, binding_env)
-       when name in [:all, :all_of] and is_list(branches),
-       do: combine(AllOf, name, branches, form, env, binding_env)
+  defp predicate({name, _meta, [branches]} = form, env, binding_env) when name in [:all, :all_of] and is_list(branches),
+    do: combine(AllOf, name, branches, form, env, binding_env)
 
-  defp predicate({name, _meta, [branches]} = form, env, binding_env)
-       when name in [:any, :any_of] and is_list(branches),
-       do: combine(AnyOf, name, branches, form, env, binding_env)
+  defp predicate({name, _meta, [branches]} = form, env, binding_env) when name in [:any, :any_of] and is_list(branches),
+    do: combine(AnyOf, name, branches, form, env, binding_env)
 
-  defp predicate({:dry, _meta, [opts]} = form, env, _binding_env) when is_list(opts),
-    do: dry(opts, form, env)
+  defp predicate({:dry, _meta, [opts]} = form, env, _binding_env) when is_list(opts), do: dry(opts, form, env)
 
   defp predicate({:path_exists, _meta, [binding, pointer]} = form, env, binding_env),
     do: path_predicate(PathExists, binding, pointer, form, env, binding_env)
@@ -224,10 +220,7 @@ defmodule Workflow.Predicate do
   end
 
   defp predicate(form, env, _binding_env) do
-    {:error,
-     Finding.at(env, form, "unsupported predicate",
-       hint: "the predicate vocabulary is: #{vocabulary()}"
-     )}
+    {:error, Finding.at(env, form, "unsupported predicate", hint: "the predicate vocabulary is: #{vocabulary()}")}
   end
 
   defp combine(module, name, branches, form, env, binding_env) do
@@ -266,11 +259,9 @@ defmodule Workflow.Predicate do
   end
 
   defp operand({:count, _meta, [acc]}, _form, _env, _binding_env)
-       when is_atom(acc) and not is_boolean(acc) and not is_nil(acc),
-       do: {:ok, %Count{acc: acc}}
+       when is_atom(acc) and not is_boolean(acc) and not is_nil(acc), do: {:ok, %Count{acc: acc}}
 
-  defp operand({:budget_remaining, _meta, []}, _form, _env, _binding_env),
-    do: {:ok, %BudgetRemaining{}}
+  defp operand({:budget_remaining, _meta, []}, _form, _env, _binding_env), do: {:ok, %BudgetRemaining{}}
 
   defp operand({:path_count, _meta, [binding, pointer]} = form, _outer_form, env, binding_env) do
     with {:ok, binding, ref} <- binding_ref(binding, form, env, binding_env),
@@ -282,8 +273,7 @@ defmodule Workflow.Predicate do
   defp operand(_other, form, env, _binding_env) do
     {:error,
      Finding.at(env, form, "unsupported predicate operand",
-       hint:
-         "the left side must be `count(:acc)`, `budget_remaining()`, or `path_count(:binding, \"/pointer\")`"
+       hint: "the left side must be `count(:acc)`, `budget_remaining()`, or `path_count(:binding, \"/pointer\")`"
      )}
   end
 
@@ -301,14 +291,10 @@ defmodule Workflow.Predicate do
         {:error, Finding.at(env, form, "#{label} options must be a keyword list")}
 
       duplicates != [] ->
-        {:error,
-         Finding.at(env, form, "#{label} has duplicate option #{inspect(hd(duplicates))}")}
+        {:error, Finding.at(env, form, "#{label} has duplicate option #{inspect(hd(duplicates))}")}
 
       Enum.any?(keys, &(&1 not in allowed)) or Enum.any?(required, &(&1 not in keys)) ->
-        {:error,
-         Finding.at(env, form, "invalid #{label} options",
-           hint: "allowed options: #{Enum.join(allowed, ", ")}"
-         )}
+        {:error, Finding.at(env, form, "invalid #{label} options", hint: "allowed options: #{Enum.join(allowed, ", ")}")}
 
       true ->
         {:ok, opts}
@@ -317,8 +303,7 @@ defmodule Workflow.Predicate do
 
   defp positive_integer(n, _key, _form, _env) when is_integer(n) and n >= 1, do: {:ok, n}
 
-  defp positive_integer(_value, key, form, env),
-    do: {:error, Finding.at(env, form, "`#{key}` must be an integer >= 1")}
+  defp positive_integer(_value, key, form, env), do: {:error, Finding.at(env, form, "`#{key}` must be an integer >= 1")}
 
   defp seen_by(fields, form, env) when is_list(fields) do
     if Enum.all?(fields, &field_atom?/1) do
@@ -328,8 +313,7 @@ defmodule Workflow.Predicate do
     end
   end
 
-  defp seen_by(_fields, form, env),
-    do: {:error, Finding.at(env, form, "`dry` `seen_by:` must be a list of field atoms")}
+  defp seen_by(_fields, form, env), do: {:error, Finding.at(env, form, "`dry` `seen_by:` must be a list of field atoms")}
 
   defp field_atom?(field), do: is_atom(field) and not is_boolean(field) and not is_nil(field)
 
@@ -357,18 +341,14 @@ defmodule Workflow.Predicate do
     {:error, Finding.at(env, form, "predicate binding must be a literal binding atom")}
   end
 
-  defp binding_ref?({kind, address})
-       when kind in @binding_ref_kinds and is_list(address),
-       do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
+  defp binding_ref?({kind, address}) when kind in @binding_ref_kinds and is_list(address),
+    do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
 
   defp binding_ref?({:fanout, address, :global}) when is_list(address),
     do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
 
-  defp binding_ref?({:fanout, address, {:loop_local, loop_address}})
-       when is_list(address) and is_list(loop_address),
-       do:
-         Enum.all?(address, &(is_integer(&1) and &1 >= 0)) and
-           Enum.all?(loop_address, &(is_integer(&1) and &1 >= 0))
+  defp binding_ref?({:fanout, address, {:loop_local, loop_address}}) when is_list(address) and is_list(loop_address),
+    do: Enum.all?(address, &(is_integer(&1) and &1 >= 0)) and Enum.all?(loop_address, &(is_integer(&1) and &1 >= 0))
 
   defp binding_ref?(_ref), do: false
 
@@ -380,7 +360,7 @@ defmodule Workflow.Predicate do
        Finding.at(
          env,
          form,
-         "predicate JSON pointer must be \"\" or start with \"/\" and use RFC 6901 escapes"
+         ~s(predicate JSON pointer must be "" or start with "/" and use RFC 6901 escapes)
        )}
     end
   end
@@ -400,8 +380,7 @@ defmodule Workflow.Predicate do
 
   defp valid_escape_tokens?([]), do: true
 
-  defp valid_escape_tokens?(["~", next | rest]) when next in ["0", "1"],
-    do: valid_escape_tokens?(rest)
+  defp valid_escape_tokens?(["~", next | rest]) when next in ["0", "1"], do: valid_escape_tokens?(rest)
 
   defp valid_escape_tokens?(["~" | _rest]), do: false
   defp valid_escape_tokens?([_char | rest]), do: valid_escape_tokens?(rest)
@@ -419,8 +398,7 @@ defmodule Workflow.Predicate do
     end
   end
 
-  defp literal_to_json(value, _form, _env) when is_atom(value),
-    do: {:ok, Atom.to_string(value)}
+  defp literal_to_json(value, _form, _env) when is_atom(value), do: {:ok, Atom.to_string(value)}
 
   defp literal_to_json(values, form, env) when is_list(values) do
     values
@@ -472,8 +450,7 @@ defmodule Workflow.Predicate do
     end
   end
 
-  defp literal_to_json(_value, form, env),
-    do: literal_error({:error, :not_json}, form, env)
+  defp literal_to_json(_value, form, env), do: literal_error({:error, :not_json}, form, env)
 
   defp literal_key_to_json(key, _form, _env) when is_binary(key), do: {:ok, key}
   defp literal_key_to_json(key, _form, _env) when is_atom(key), do: {:ok, Atom.to_string(key)}
@@ -492,11 +469,9 @@ defmodule Workflow.Predicate do
   defp literal_error({:error, _reason}, form, env),
     do: {:error, Finding.at(env, form, "predicate literal is not JSON-encodable")}
 
-  defp agreement_threshold(threshold, _form, _env) when threshold in [:all, :any],
-    do: {:ok, threshold}
+  defp agreement_threshold(threshold, _form, _env) when threshold in [:all, :any], do: {:ok, threshold}
 
-  defp agreement_threshold(threshold, _form, _env) when is_integer(threshold) and threshold >= 1,
-    do: {:ok, threshold}
+  defp agreement_threshold(threshold, _form, _env) when is_integer(threshold) and threshold >= 1, do: {:ok, threshold}
 
   defp agreement_threshold(_threshold, form, env) do
     {:error, Finding.at(env, form, "`agree` threshold must be :all, :any, or a positive integer")}
@@ -505,7 +480,7 @@ defmodule Workflow.Predicate do
   defp vocabulary do
     "count(:acc) >= n, budget_remaining() > n, path_count(:binding, \"/pointer\") == n, " <>
       "dry(rounds: n), agree(:binding, path: \"/pointer\", equals: literal, threshold: :all), " <>
-      "path_exists(:binding, \"/pointer\"), path_non_empty(:binding, \"/pointer\"), " <>
+      ~s{path_exists(:binding, "/pointer"), path_non_empty(:binding, "/pointer"), } <>
       "path_equals(:binding, \"/pointer\", literal), all([...]), any([...])"
   end
 
@@ -516,8 +491,7 @@ defmodule Workflow.Predicate do
   defp dry_seen_by_value(_predicate), do: {:ok, nil}
 
   defp dry_seen_by_values(predicates) do
-    predicates
-    |> Enum.reduce_while({:ok, nil}, fn predicate, {:ok, acc} ->
+    Enum.reduce_while(predicates, {:ok, nil}, fn predicate, {:ok, acc} ->
       case dry_seen_by_value(predicate) do
         {:ok, nil} ->
           {:cont, {:ok, acc}}
@@ -538,8 +512,7 @@ defmodule Workflow.Predicate do
 
   @doc "Evaluate a parsed predicate against a folded journal context."
   @spec evaluate(t(), context()) :: boolean()
-  def evaluate(%Compare{op: op, left: left, right: right}, ctx),
-    do: compare(op, resolve(left, ctx), right)
+  def evaluate(%Compare{op: op, left: left, right: right}, ctx), do: compare(op, resolve(left, ctx), right)
 
   def evaluate(%Dry{rounds: rounds}, ctx), do: dry_streak(ctx) >= rounds
 
@@ -562,8 +535,7 @@ defmodule Workflow.Predicate do
   def evaluate(%AllOf{predicates: preds}, ctx), do: Enum.all?(preds, &evaluate(&1, ctx))
   def evaluate(%AnyOf{predicates: preds}, ctx), do: Enum.any?(preds, &evaluate(&1, ctx))
 
-  defp resolve(%Count{acc: acc}, ctx),
-    do: ctx |> Map.get(:accumulators, %{}) |> Map.get(acc, []) |> length()
+  defp resolve(%Count{acc: acc}, ctx), do: ctx |> Map.get(:accumulators, %{}) |> Map.get(acc, []) |> length()
 
   defp resolve(%BudgetRemaining{}, ctx), do: Map.get(ctx, :remaining, :infinity)
 
@@ -632,7 +604,7 @@ defmodule Workflow.Predicate do
   defp path_non_empty?(:missing), do: false
   defp path_non_empty?({:present, nil}), do: false
   defp path_non_empty?({:present, value}) when is_binary(value), do: byte_size(value) > 0
-  defp path_non_empty?({:present, value}) when is_list(value), do: length(value) > 0
+  defp path_non_empty?({:present, value}) when is_list(value), do: value != []
   defp path_non_empty?({:present, value}) when is_map(value), do: map_size(value) > 0
   defp path_non_empty?({:present, _scalar}), do: true
 
@@ -643,6 +615,8 @@ defmodule Workflow.Predicate do
   defp path_count({:present, _scalar}), do: 1
 
   defp agree?(value, pointer, literal, threshold) when is_list(value) do
+    value_count = length(value)
+
     matches =
       Enum.count(value, fn item ->
         case path_resolve(item, pointer) do
@@ -652,7 +626,7 @@ defmodule Workflow.Predicate do
       end)
 
     case threshold do
-      :all -> matches == length(value) and length(value) > 0
+      :all -> matches == value_count and value_count > 0
       :any -> matches >= 1
       n when is_integer(n) -> matches >= n
     end
@@ -671,7 +645,8 @@ defmodule Workflow.Predicate do
 
   defp json_equal?(left, right) when is_list(left) and is_list(right) do
     length(left) == length(right) and
-      Enum.zip(left, right)
+      left
+      |> Enum.zip(right)
       |> Enum.all?(fn {left_item, right_item} -> json_equal?(left_item, right_item) end)
   end
 

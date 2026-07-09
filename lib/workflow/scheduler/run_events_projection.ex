@@ -7,8 +7,9 @@ defmodule Workflow.Scheduler.RunEventsProjection do
   boundary because they can contain internal terms that are not API contracts.
   """
 
-  alias Workflow.{Event, Status}
+  alias Workflow.Event
   alias Workflow.Scheduler.RunProjection
+  alias Workflow.Status
 
   @enforce_keys [:run_id, :events, :run_projection]
   defstruct [:run_id, :events, :run_projection]
@@ -44,8 +45,7 @@ defmodule Workflow.Scheduler.RunEventsProjection do
   end
 
   defp event_to_map(%Event{seq: seq, type: type, payload: payload}) do
-    %{seq: seq, type: Atom.to_string(type)}
-    |> put_present(:address, Map.get(payload, :address))
+    put_present(%{seq: seq, type: Atom.to_string(type)}, :address, Map.get(payload, :address))
   end
 
   defp put_present(map, _key, nil), do: map

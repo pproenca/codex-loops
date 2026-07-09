@@ -116,10 +116,12 @@ defmodule Workflow.Journal do
     {:reply, {:ok, event}, state}
   end
 
+  # sobelow_skip ["Misc.BinToTerm"]
   def handle_call({:fold, run_id}, _from, %{db: db} = state) do
     events =
-      query(db, "SELECT event_blob FROM events WHERE run_id = ? ORDER BY seq ASC", [run_id])
-      |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob) end)
+      db
+      |> query("SELECT event_blob FROM events WHERE run_id = ? ORDER BY seq ASC", [run_id])
+      |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob, [:safe]) end)
 
     {:reply, events, state}
   end
@@ -196,26 +198,18 @@ defmodule Workflow.Journal do
     ])
   end
 
-  defp idempotent_activity_event(
-         db,
-         run_id,
-         %Workflow.Event{
-           type: :agent_activity,
-           payload: %{
-             address: address,
-             iteration: iteration,
-             attempt: attempt,
-             activity_index: index
-           }
-         }
-       )
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp idempotent_activity_event(db, run_id, %Workflow.Event{
+         type: :agent_activity,
+         payload: %{address: address, iteration: iteration, attempt: attempt, activity_index: index}
+       })
        when not is_nil(index) do
     db
     |> query("SELECT event_blob FROM events WHERE run_id = ? AND type = ? ORDER BY seq ASC", [
       run_id,
       "agent_activity"
     ])
-    |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob) end)
+    |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob, [:safe]) end)
     |> Enum.find(fn %Workflow.Event{payload: payload} ->
       payload.address == address and payload.iteration == iteration and
         payload.attempt == attempt and Map.get(payload, :activity_index) == index

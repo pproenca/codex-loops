@@ -10,7 +10,14 @@ defmodule Workflow.QualityCompilerTest do
 
   alias Workflow.Compiler
   alias Workflow.Compiler.Finding
-  alias Workflow.Node.{Agent, Verify, Refine, Judge, Synthesize, FanOut, BudgetSlices, Return}
+  alias Workflow.Node.Agent
+  alias Workflow.Node.BudgetSlices
+  alias Workflow.Node.FanOut
+  alias Workflow.Node.Judge
+  alias Workflow.Node.Refine
+  alias Workflow.Node.Return
+  alias Workflow.Node.Synthesize
+  alias Workflow.Node.Verify
 
   defp env, do: %{__ENV__ | file: "workflows/quality.ex", line: 1}
   defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
@@ -28,8 +35,7 @@ defmodule Workflow.QualityCompilerTest do
                  voters: [
                    %Agent{
                      address: [0, 0],
-                     prompt:
-                       "Confirm or refute this finding, answering with a boolean verdict: finding",
+                     prompt: "Confirm or refute this finding, answering with a boolean verdict: finding",
                      schema: %{"required" => ["verdict"]} = schema,
                      retries: 0
                    },
@@ -126,8 +132,7 @@ defmodule Workflow.QualityCompilerTest do
                    [
                      %Agent{
                        address: [0, 0, 0],
-                       prompt:
-                         "Score this candidate on quality, answering with a numeric score: a",
+                       prompt: "Score this candidate on quality, answering with a numeric score: a",
                        schema: sc
                      },
                      %Agent{
@@ -207,8 +212,7 @@ defmodule Workflow.QualityCompilerTest do
       assert [
                %Refine{
                  address: [0],
-                 input:
-                   {:producer, %Agent{address: [0, 0], prompt: "Draft.", schema: artifact_schema}},
+                 input: {:producer, %Agent{address: [0, 0], prompt: "Draft.", schema: artifact_schema}},
                  reviewers: [
                    %{
                      index: 0,
@@ -265,9 +269,7 @@ defmodule Workflow.QualityCompilerTest do
 
     test "carries an optional concurrency cap" do
       {:ok, tree} =
-        parse(
-          "fan_out width: budget_slices(per: 4), max_concurrency: 2 do\n agent \"w\"\nend\nreturn :ok"
-        )
+        parse("fan_out width: budget_slices(per: 4), max_concurrency: 2 do\n agent \"w\"\nend\nreturn :ok")
 
       assert [%FanOut{max_concurrency: 2}, _] = tree.nodes
     end
@@ -316,13 +318,11 @@ defmodule Workflow.QualityCompilerTest do
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(m) when is_map(m),
-    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
 
-  defp contains_function?(t) when is_tuple(t),
-    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
 end

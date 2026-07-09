@@ -1,10 +1,16 @@
 defmodule Workflow.StatusProjectionTest do
   use ExUnit.Case, async: true
 
+  alias Workflow.Event
+  alias Workflow.IdempotencyKey
+  alias Workflow.Node.Agent
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Node.Loop
+  alias Workflow.Node.Refine
   alias Workflow.Provider.Usage
   alias Workflow.Scheduler.RunProjection
-  alias Workflow.{Event, IdempotencyKey, Status, Tree}
-  alias Workflow.Node.{Agent, GenericFanout, Loop, Refine}
+  alias Workflow.Status
+  alias Workflow.Tree
 
   test "status folds refines, tool activity, and ordered raw journal refs" do
     run_id = "status_projection_refine"
@@ -48,59 +54,60 @@ defmodule Workflow.StatusProjectionTest do
     }
 
     events =
-      [
-        Event.run_started(%Tree{name: "refine-status", nodes: [node]}),
-        Event.refine_started(node)
-        |> put_in([Access.key!(:payload), :future_payload_key], :ignored_by_status),
-        Event.refine_round_started(node, 0, "draft-v1"),
-        Event.agent_activity(cold_reader, 0, 0, 0, streamed_activity),
-        Event.agent_committed(
-          cold_reader,
-          0,
-          %IdempotencyKey{run_id: run_id, node_path: [0, 3], iteration: 0, attempt: 0},
-          %{"approved" => false, "findings" => []},
-          usage,
-          [committed_activity]
-        ),
-        Event.refine_role_failed(role_failure),
-        Event.refine_gate_evaluated(node, :cold_read, {:path_non_empty, "/openFindings"},
-          result: true,
-          input_round: 0,
-          input_refs: []
-        ),
-        Event.refine_round_decision(node, 0, %{
-          consensus: false,
-          approval_count: 0,
-          total: 1,
-          reviewer_decisions: [
-            %{
-              reviewer: :spec,
-              reviewer_index: 0,
-              approved: false,
-              clear: false,
-              adapter: :findings_v1,
-              status: :completed
-            }
-          ],
-          artifact: "draft-v1",
-          open_findings: [finding()],
-          role_failures: [role_failure],
-          failed_reviewers: [:cold],
-          report_snippets: ["cold read timed out"]
-        }),
-        Event.refine_completed(node, %{
-          converged: true,
-          final_round: 0,
-          rounds: 1,
-          artifact: "draft-v2",
-          open_findings: [],
-          role_failures: [role_failure],
-          failed_reviewers: [:cold],
-          report_snippets: ["cold read timed out"]
-        }),
-        Event.run_completed("draft-v2")
-      ]
-      |> stamp(run_id)
+      stamp(
+        [
+          Event.run_started(%Tree{name: "refine-status", nodes: [node]}),
+          node |> Event.refine_started() |> put_in([Access.key!(:payload), :future_payload_key], :ignored_by_status),
+          Event.refine_round_started(node, 0, "draft-v1"),
+          Event.agent_activity(cold_reader, 0, 0, 0, streamed_activity),
+          Event.agent_committed(
+            cold_reader,
+            0,
+            %IdempotencyKey{run_id: run_id, node_path: [0, 3], iteration: 0, attempt: 0},
+            %{"approved" => false, "findings" => []},
+            usage,
+            [committed_activity]
+          ),
+          Event.refine_role_failed(role_failure),
+          Event.refine_gate_evaluated(node, :cold_read, {:path_non_empty, "/openFindings"},
+            result: true,
+            input_round: 0,
+            input_refs: []
+          ),
+          Event.refine_round_decision(node, 0, %{
+            consensus: false,
+            approval_count: 0,
+            total: 1,
+            reviewer_decisions: [
+              %{
+                reviewer: :spec,
+                reviewer_index: 0,
+                approved: false,
+                clear: false,
+                adapter: :findings_v1,
+                status: :completed
+              }
+            ],
+            artifact: "draft-v1",
+            open_findings: [finding()],
+            role_failures: [role_failure],
+            failed_reviewers: [:cold],
+            report_snippets: ["cold read timed out"]
+          }),
+          Event.refine_completed(node, %{
+            converged: true,
+            final_round: 0,
+            rounds: 1,
+            artifact: "draft-v2",
+            open_findings: [],
+            role_failures: [role_failure],
+            failed_reviewers: [:cold],
+            report_snippets: ["cold read timed out"]
+          }),
+          Event.run_completed("draft-v2")
+        ],
+        run_id
+      )
 
     status = Status.fold(events, run_id)
     started_event = Enum.find(events, &(&1.type == :refine_started))
@@ -119,9 +126,9 @@ defmodule Workflow.StatusProjectionTest do
              %{entry: failed_entry, raw_ref: %{seq: 5, type: "refine_role_failed"}}
            ] = status.tool_activity
 
-    assert Map.drop(streamed_entry, [:activity_index]) == streamed_activity
-    assert Map.drop(committed_entry, [:activity_index]) == committed_activity
-    assert Map.drop(failed_entry, [:activity_index]) == failed_activity
+    assert Map.delete(streamed_entry, :activity_index) == streamed_activity
+    assert Map.delete(committed_entry, :activity_index) == committed_activity
+    assert Map.delete(failed_entry, :activity_index) == failed_activity
 
     assert [refine] = status.refines
     assert refine.address == [0]
@@ -150,13 +157,13 @@ defmodule Workflow.StatusProjectionTest do
     assert envelope["treeName"] == "refine-status"
     assert envelope["agentCount"] == 1
     assert envelope["eventCount"] == 10
-    assert envelope["rawRefs"]["journal"] |> Enum.map(& &1["seq"]) == Enum.to_list(0..9)
-    assert envelope["toolActivity"] |> Enum.map(&get_in(&1, ["rawRef", "seq"])) == [3, 4, 5]
+    assert Enum.map(envelope["rawRefs"]["journal"], & &1["seq"]) == Enum.to_list(0..9)
+    assert Enum.map(envelope["toolActivity"], &get_in(&1, ["rawRef", "seq"])) == [3, 4, 5]
 
     assert [public_refine] = envelope["refines"]
     assert public_refine["rawRefs"]["started"]["seq"] == 1
-    assert public_refine["rawRefs"]["gateRoleAgents"] |> Enum.map(& &1["seq"]) == [3, 4]
-    assert public_refine["rawRefs"]["journal"] |> Enum.map(& &1["seq"]) == Enum.to_list(1..8)
+    assert Enum.map(public_refine["rawRefs"]["gateRoleAgents"], & &1["seq"]) == [3, 4]
+    assert Enum.map(public_refine["rawRefs"]["journal"], & &1["seq"]) == Enum.to_list(1..8)
   end
 
   test "status folds generic fanout failure as a terminal run failure" do
@@ -170,12 +177,14 @@ defmodule Workflow.StatusProjectionTest do
     }
 
     events =
-      [
-        Event.run_started(%Tree{name: "fanout-status", nodes: [node]}),
-        Event.fanout_started(node, 0, nil),
-        Event.fanout_failed(node, :zero_width, nil)
-      ]
-      |> stamp(run_id)
+      stamp(
+        [
+          Event.run_started(%Tree{name: "fanout-status", nodes: [node]}),
+          Event.fanout_started(node, 0, nil),
+          Event.fanout_failed(node, :zero_width, nil)
+        ],
+        run_id
+      )
 
     status = Status.fold(events, run_id)
 
@@ -200,22 +209,16 @@ defmodule Workflow.StatusProjectionTest do
     node = %Loop{address: [0], max_iterations: 1, body: [], on_exhausted: :fail}
 
     events =
-      [
-        Event.run_started(%Tree{name: "loop-status", nodes: [node]}),
-        Event.loop_decision(node, 0, :continue,
-          predicate_result: false,
-          exhausted: false,
-          source_address: nil
-        ),
-        Event.iteration_started(node, 0),
-        Event.loop_decision(node, 1, {:exhausted, :fail},
-          predicate_result: nil,
-          exhausted: true,
-          source_address: nil
-        ),
-        Event.loop_exhausted(node, 1, :max_iterations)
-      ]
-      |> stamp(run_id)
+      stamp(
+        [
+          Event.run_started(%Tree{name: "loop-status", nodes: [node]}),
+          Event.loop_decision(node, 0, :continue, predicate_result: false, exhausted: false, source_address: nil),
+          Event.iteration_started(node, 0),
+          Event.loop_decision(node, 1, {:exhausted, :fail}, predicate_result: nil, exhausted: true, source_address: nil),
+          Event.loop_exhausted(node, 1, :max_iterations)
+        ],
+        run_id
+      )
 
     status = Status.fold(events, run_id)
 

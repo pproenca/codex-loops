@@ -18,7 +18,11 @@ defmodule Workflow.CodexProviderTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.{Run, Journal, Status, Provider}
+  alias Workflow.Journal
+  alias Workflow.Provider
+  alias Workflow.Provider.Codex
+  alias Workflow.Run
+  alias Workflow.Status
 
   # A hermetic stub `codex exec --json`: read the prompt on stdin, emit
   # the real JSONL event stream, exit 0. Output is chosen by argv mode. The `retry`
@@ -106,6 +110,7 @@ defmodule Workflow.CodexProviderTest do
   }
 
   defmodule EchoWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "codex_echo" do
@@ -115,6 +120,7 @@ defmodule Workflow.CodexProviderTest do
   end
 
   defmodule SchemaWorkflow do
+    @moduledoc false
     use Workflow
 
     workflow "codex_schema" do
@@ -151,8 +157,7 @@ defmodule Workflow.CodexProviderTest do
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
 
-  defp tmp(suffix),
-    do: Path.join(System.tmp_dir!(), "codex_#{suffix}_#{System.unique_integer([:positive])}")
+  defp tmp(suffix), do: Path.join(System.tmp_dir!(), "codex_#{suffix}_#{System.unique_integer([:positive])}")
 
   # Select the codex backend as a port swap, pointed at the hermetic stub in `mode`.
   defp codex(%{elixir: elixir, stub: stub}, mode, extra \\ []),
@@ -193,7 +198,7 @@ defmodule Workflow.CodexProviderTest do
               "--dangerously-bypass-approvals-and-sandbox",
               "--skip-git-repo-check"
             ]} =
-             Workflow.Provider.Codex.default_command()
+             Codex.default_command()
 
     assert Path.basename(path) == "codex"
     assert File.exists?(path)
@@ -205,7 +210,7 @@ defmodule Workflow.CodexProviderTest do
 
     # Selection resolves a name to a {module, opts} port — nothing else.
     assert {Workflow.Provider.Mock, []} = Provider.select(:mock, [])
-    assert {Workflow.Provider.Codex, command: _} = codex(ctx, "echo")
+    assert {Codex, command: _} = codex(ctx, "echo")
 
     assert {:ok, ^mock_id} =
              Run.run(EchoWorkflow, run_id: mock_id, provider: Provider.select(:mock, []))
@@ -249,15 +254,15 @@ defmodule Workflow.CodexProviderTest do
   test "containment timeout is an expected provider failure with stable detail", ctx do
     id = run_id()
     key = %Workflow.IdempotencyKey{run_id: id, node_path: [0], iteration: 0}
-    {Workflow.Provider.Codex, opts} = codex(ctx, "timeout")
+    {Codex, opts} = codex(ctx, "timeout")
     opts = Keyword.put(opts, :timeout, 100)
     detail = %{"message" => "codex turn timed out"}
 
     assert {:error, {:provider_failure, :timeout, ^detail, nil, []}} =
-             Workflow.Provider.Codex.run_agent("say hello", nil, key, opts)
+             Codex.run_agent("say hello", nil, key, opts)
 
     assert {:error, {:provider_failure, [0], :timeout, ^detail}} =
-             Run.run(EchoWorkflow, run_id: id, provider: {Workflow.Provider.Codex, opts})
+             Run.run(EchoWorkflow, run_id: id, provider: {Codex, opts})
 
     assert settled_types(id) == [:run_started, :agent_failed]
 
@@ -351,7 +356,7 @@ defmodule Workflow.CodexProviderTest do
     key = %Workflow.IdempotencyKey{run_id: "schema", node_path: [0], iteration: 0}
 
     assert {:ok, written, %Provider.Usage{}, _activity} =
-             Workflow.Provider.Codex.run_agent(
+             Codex.run_agent(
                "show schema",
                schema,
                key,

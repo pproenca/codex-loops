@@ -3,7 +3,9 @@ defmodule Workflow.MCP.AnubisServer.ToolHelpers do
 
   alias Anubis.Server.Frame
   alias Anubis.Server.Response
-  alias Workflow.MCP.{Lifecycle, ProjectionEnvelope, SchedulerClient}
+  alias Workflow.MCP.Lifecycle
+  alias Workflow.MCP.ProjectionEnvelope
+  alias Workflow.MCP.SchedulerClient
 
   @api_version "codex-loops.mcp.v1"
   @lifecycle_assign :workflow_mcp_lifecycle
@@ -36,9 +38,7 @@ defmodule Workflow.MCP.AnubisServer.ToolHelpers do
 
   @spec stop_stored_lifecycle() :: :ok
   def stop_stored_lifecycle do
-    stored_lifecycle_state()
-    |> Lifecycle.stop_owned()
-
+    Lifecycle.stop_owned(stored_lifecycle_state())
     clear_lifecycle_state()
 
     :ok
@@ -47,10 +47,10 @@ defmodule Workflow.MCP.AnubisServer.ToolHelpers do
   @spec scheduler_tool(Frame.t(), (-> SchedulerClient.scheduler_result())) ::
           {:reply, Response.t(), Frame.t()}
   def scheduler_tool(%Frame{} = frame, scheduler_fun) when is_function(scheduler_fun, 0) do
-    with {:ok, frame} <- ensure_ready(frame) do
-      scheduler_fun.()
-      |> scheduler_response(frame)
-    else
+    case ensure_ready(frame) do
+      {:ok, frame} ->
+        scheduler_response(scheduler_fun.(), frame)
+
       {:error, response, frame} ->
         {:reply, response, frame}
     end
@@ -58,12 +58,11 @@ defmodule Workflow.MCP.AnubisServer.ToolHelpers do
 
   @spec scheduler_projection_tool(Frame.t(), (-> SchedulerClient.scheduler_result())) ::
           {:reply, Response.t(), Frame.t()}
-  def scheduler_projection_tool(%Frame{} = frame, scheduler_fun)
-      when is_function(scheduler_fun, 0) do
-    with {:ok, frame} <- ensure_ready(frame) do
-      scheduler_fun.()
-      |> scheduler_projection_response(frame)
-    else
+  def scheduler_projection_tool(%Frame{} = frame, scheduler_fun) when is_function(scheduler_fun, 0) do
+    case ensure_ready(frame) do
+      {:ok, frame} ->
+        scheduler_projection_response(scheduler_fun.(), frame)
+
       {:error, response, frame} ->
         {:reply, response, frame}
     end
@@ -71,18 +70,19 @@ defmodule Workflow.MCP.AnubisServer.ToolHelpers do
 
   @spec open_ui_tool(Frame.t(), String.t()) :: {:reply, Response.t(), Frame.t()}
   def open_ui_tool(%Frame{} = frame, run_id) when is_binary(run_id) do
-    with {:ok, frame} <- ensure_ready(frame) do
-      case SchedulerClient.get_run(run_id) do
-        {:ok, %{"data" => %{} = projection}} ->
-          {:reply, tool_response(open_ui_envelope(projection), false), frame}
+    case ensure_ready(frame) do
+      {:ok, frame} ->
+        case SchedulerClient.get_run(run_id) do
+          {:ok, %{"data" => %{} = projection}} ->
+            {:reply, tool_response(open_ui_envelope(projection), false), frame}
 
-        {:ok, envelope} ->
-          {:reply, tool_response(unexpected_response_envelope(200, envelope), true), frame}
+          {:ok, envelope} ->
+            {:reply, tool_response(unexpected_response_envelope(200, envelope), true), frame}
 
-        other ->
-          scheduler_response(other, frame)
-      end
-    else
+          other ->
+            scheduler_response(other, frame)
+        end
+
       {:error, response, frame} ->
         {:reply, response, frame}
     end

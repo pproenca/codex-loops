@@ -10,7 +10,10 @@ defmodule Workflow.CompilerPropertyTest do
   use ExUnitProperties
 
   alias Workflow.Compiler
-  alias Workflow.Node.{Phase, Log, Agent, Return}
+  alias Workflow.Node.Agent
+  alias Workflow.Node.Log
+  alias Workflow.Node.Phase
+  alias Workflow.Node.Return
 
   @deterministic_nodes [Phase, Log, Agent, Return]
 
@@ -50,13 +53,11 @@ defmodule Workflow.CompilerPropertyTest do
   defp contains_function?(term) when is_function(term), do: true
   defp contains_function?(%_{} = s), do: s |> Map.from_struct() |> contains_function?()
 
-  defp contains_function?(m) when is_map(m),
-    do: m |> Map.values() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(m) when is_map(m), do: m |> Map.values() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(l) when is_list(l), do: Enum.any?(l, &contains_function?/1)
 
-  defp contains_function?(t) when is_tuple(t),
-    do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
+  defp contains_function?(t) when is_tuple(t), do: t |> Tuple.to_list() |> Enum.any?(&contains_function?/1)
 
   defp contains_function?(_), do: false
 end

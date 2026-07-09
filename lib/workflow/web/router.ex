@@ -5,9 +5,9 @@ defmodule Workflow.Web.Router do
   """
   use Phoenix.Router
 
-  import Plug.Conn
   import Phoenix.Controller
   import Phoenix.LiveView.Router
+  import Plug.Conn
 
   pipeline :browser do
     plug(:accepts, ["html"])

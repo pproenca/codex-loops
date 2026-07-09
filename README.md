@@ -79,6 +79,12 @@ workflow_status run_id=run_audit_live
 make setup        # install Hex/Rebar and Elixir deps
 make format-check # check mix formatting without rewriting files
 make quality      # fast pre-handoff gate: format, compile, spec lint, tests
+make audit-check  # scan dependency advisories and retired Hex packages
+make credo-check  # run maintainability linting
+make security-check # run Sobelow against the Phoenix API/UI surface
+make dialyzer-check # optional Dialyzer analysis; may build PLTs
+make browser-e2e-setup # install Playwright's Node package and Chromium
+make browser-e2e # run tagged PhoenixTest Playwright browser tests
 make build        # compile with warnings as errors
 make test         # run the Elixir scheduler/API/UI test suite
 make release      # build the self-contained scheduler Mix release
@@ -91,6 +97,12 @@ make proof-live   # alias for proof-mcp-live; spends one real Codex provider tur
 
 Use `make proof`, `make proof-mcp`, and `make proof-live` for packaged product
 readiness. They remain separate from the fast `make quality` loop.
+
+The quality stack is `mix format` plus Styler, Credo, Sobelow, Hex/MixAudit,
+and the existing ExUnit suite. Dialyzer is available through
+`make dialyzer-check` as an explicit opt-in gate. Browser E2E uses PhoenixTest
+with PhoenixTest Playwright and remains separate from the fast local loop.
+Install its Node/browser dependencies with `make browser-e2e-setup`.
 
 The repository includes `.tool-versions` for `mise`/`asdf` users.
 

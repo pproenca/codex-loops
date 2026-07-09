@@ -8,22 +8,31 @@ defmodule Workflow.FanoutRunTest do
   """
   use ExUnit.Case, async: true
 
-  @receive_timeout 1_000
-
-  alias Workflow.{Run, Journal, Status, Idempotency, Event, IdempotencyKey}
+  alias Workflow.Event
+  alias Workflow.Idempotency
+  alias Workflow.IdempotencyKey
+  alias Workflow.Journal
   alias Workflow.Node.BudgetSlices
   alias Workflow.Provider.Usage
-  alias Workflow.Test.{EchoProvider, GateProvider, ExplodingProvider, ScriptedProvider}
+  alias Workflow.Run
+  alias Workflow.Status
+  alias Workflow.Test.EchoProvider
+  alias Workflow.Test.ExplodingProvider
+  alias Workflow.Test.GateProvider
+  alias Workflow.Test.ScriptedProvider
+
+  @receive_timeout 1_000
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp echo, do: {EchoProvider, sink: self()}
   defp gate(opts \\ []), do: {GateProvider, Keyword.merge([sink: self()], opts)}
-  defp types(id), do: Journal.fold(id) |> Enum.map(& &1.type)
+  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
 
-  defp event(id, type), do: Journal.fold(id) |> Enum.find(&(&1.type == type))
+  defp event(id, type), do: id |> Journal.fold() |> Enum.find(&(&1.type == type))
 
   defp committed_addresses(id) do
-    Journal.fold(id)
+    id
+    |> Journal.fold()
     |> Enum.filter(&(&1.type == :agent_committed))
     |> Enum.map(& &1.payload.address)
   end
@@ -60,6 +69,7 @@ defmodule Workflow.FanoutRunTest do
   # --- parallel: barrier fan-out ---
 
   defmodule Par do
+    @moduledoc false
     use Workflow
 
     workflow "par" do
@@ -69,6 +79,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule Capped do
+    @moduledoc false
     use Workflow
 
     workflow "capped" do
@@ -119,7 +130,7 @@ defmodule Workflow.FanoutRunTest do
     assert length(Enum.uniq(pids)) == 3
 
     # The barrier has not been crossed: the run is still running, no completion event.
-    refute Enum.any?(types(id), &(&1 == :parallel_completed))
+    refute :parallel_completed in types(id)
 
     # Release every branch; the barrier joins and the run finishes.
     for p <- pids, do: send(p, :proceed)
@@ -184,6 +195,7 @@ defmodule Workflow.FanoutRunTest do
   # --- pipeline: per-item lanes ---
 
   defmodule Pipe do
+    @moduledoc false
     use Workflow
 
     workflow "pipe" do
@@ -252,6 +264,7 @@ defmodule Workflow.FanoutRunTest do
   # --- failure propagation through a fan-out ---
 
   defmodule ParFail do
+    @moduledoc false
     use Workflow
 
     # Every branch is schema-backed with no retries; EchoProvider's fixed
@@ -288,6 +301,7 @@ defmodule Workflow.FanoutRunTest do
   # --- fanout: fixed-width repeated agent lane ---
 
   defmodule GenericFanout do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout" do
@@ -301,6 +315,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule GenericFanoutZeroComplete do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout-zero-complete" do
@@ -313,6 +328,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule GenericFanoutZeroFail do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout-zero-fail" do
@@ -325,6 +341,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule GenericFanoutThenGate do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout-then-gate" do
@@ -338,6 +355,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule GenericFanoutBudgetMax do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout-budget-max" do
@@ -350,6 +368,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule GenericFanoutPathCountEmit do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout-path-count-emit" do
@@ -364,6 +383,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule GenericFanoutPredicateGate do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout-predicate-gate" do
@@ -382,6 +402,7 @@ defmodule Workflow.FanoutRunTest do
   end
 
   defmodule GenericFanoutBudgetThenGate do
+    @moduledoc false
     use Workflow
 
     workflow "generic-fanout-budget-then-gate" do

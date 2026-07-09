@@ -5,7 +5,10 @@ defmodule Workflow.Web.SchedulerAPITest do
   import Phoenix.ConnTest
   import Plug.Conn, only: [put_req_header: 3]
 
-  alias Workflow.{Journal, Run, Script}
+  alias Workflow.Journal
+  alias Workflow.Provider.Mock
+  alias Workflow.Run
+  alias Workflow.Script
   alias Workflow.Test.GateProvider
 
   @endpoint Workflow.Web.Endpoint
@@ -334,8 +337,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   end
 
   defp json_conn do
-    build_conn()
-    |> put_req_header("accept", "application/json")
+    put_req_header(build_conn(), "accept", "application/json")
   end
 
   defp post_json(conn, path, body) do
@@ -344,8 +346,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     |> post(path, Jason.encode!(body))
   end
 
-  defp run_id(prefix),
-    do: "#{prefix}_#{System.unique_integer([:positive])}"
+  defp run_id(prefix), do: "#{prefix}_#{System.unique_integer([:positive])}"
 
   defp await_lease_released(run_id, tries \\ 200) do
     cond do
@@ -370,8 +371,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
   defp wait_for_api_projection(id, attempts \\ 50)
 
-  defp wait_for_api_projection(id, 0),
-    do: flunk("expected GET /api/runs/#{id} to return a completed projection")
+  defp wait_for_api_projection(id, 0), do: flunk("expected GET /api/runs/#{id} to return a completed projection")
 
   defp wait_for_api_projection(id, attempts) do
     conn = get(json_conn(), "/api/runs/#{id}")
@@ -392,8 +392,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
   defp wait_for_api_state(id, state, attempts \\ 50)
 
-  defp wait_for_api_state(id, state, 0),
-    do: flunk("expected GET /api/runs/#{id} to return a #{state} projection")
+  defp wait_for_api_state(id, state, 0), do: flunk("expected GET /api/runs/#{id} to return a #{state} projection")
 
   defp wait_for_api_state(id, state, attempts) do
     conn = get(json_conn(), "/api/runs/#{id}")
@@ -414,8 +413,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
   defp wait_for_api_events(id, attempts \\ 50)
 
-  defp wait_for_api_events(id, 0),
-    do: flunk("expected GET /api/runs/#{id}/events to return completed run events")
+  defp wait_for_api_events(id, 0), do: flunk("expected GET /api/runs/#{id}/events to return completed run events")
 
   defp wait_for_api_events(id, attempts) do
     conn = get(json_conn(), "/api/runs/#{id}/events")
@@ -466,14 +464,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     path = demo_workflow()
     id = run_id("scheduler_api_explicit")
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{
-        script_path: path,
-        run_id: id,
-        provider: "mock",
-        budget: 0
-      })
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "mock", budget: 0})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -491,13 +482,7 @@ defmodule Workflow.Web.SchedulerAPITest do
       path = demo_workflow()
       id = run_id("scheduler_api_codex")
 
-      conn =
-        json_conn()
-        |> post_json("/api/runs", %{
-          script_path: path,
-          run_id: id,
-          provider: "codex"
-        })
+      conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "codex"})
 
       assert %{
                "api_version" => "scheduler.v1",
@@ -525,9 +510,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     path = demo_workflow()
     id = run_id("scheduler_api_projection")
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "mock"})
 
     assert %{"data" => %{"run_id" => ^id}} = json_response(conn, 200)
 
@@ -581,9 +564,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
     id = run_id("scheduler_api_loop_exhausted")
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "mock"})
 
     assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
 
@@ -614,9 +595,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     path = demo_workflow()
     completed_id = run_id("scheduler_api_lifecycle_completed")
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: completed_id, provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: completed_id, provider: "mock"})
 
     assert %{"data" => %{"run_id" => ^completed_id}} = json_response(conn, 200)
 
@@ -774,9 +753,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     path = demo_workflow()
     id = run_id("scheduler_api_post_events")
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "mock"})
 
     assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
 
@@ -798,9 +775,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     path = demo_workflow()
     id = run_id("scheduler_api_resume_completed")
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: id, provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "mock"})
 
     assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
 
@@ -809,9 +784,7 @@ defmodule Workflow.Web.SchedulerAPITest do
       |> wait_for_api_events()
       |> get_in(["data", "events"])
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{})
+    conn = post_json(json_conn(), "/api/runs/#{id}/resume", %{})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -830,7 +803,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert Enum.map(after_events, & &1["type"]) == Enum.map(before, & &1["type"])
     assert length(after_events) == length(before)
 
-    projection = get(json_conn(), "/api/runs/#{id}") |> json_response(200) |> Map.fetch!("data")
+    projection = json_conn() |> get("/api/runs/#{id}") |> json_response(200) |> Map.fetch!("data")
     assert projection["state"] == "completed"
     assert projection["eventCount"] == length(after_events)
     assert projection["eventCount"] == length(Journal.fold(id))
@@ -840,9 +813,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/runs/:id/resume returns typed errors for unknown and invalid run ids" do
     unknown = run_id("scheduler_api_resume_unknown")
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{unknown}/resume", %{})
+    conn = post_json(json_conn(), "/api/runs/#{unknown}/resume", %{})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -853,9 +824,7 @@ defmodule Workflow.Web.SchedulerAPITest do
              }
            } = json_response(conn, 404)
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/bad$id/resume", %{})
+    conn = post_json(json_conn(), "/api/runs/bad$id/resume", %{})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -875,11 +844,9 @@ defmodule Workflow.Web.SchedulerAPITest do
     id = run_id("scheduler_api_resume_missing_recovered")
     {:ok, tree} = Script.load_tree(path)
 
-    assert {:ok, ^id} = Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+    assert {:ok, ^id} = Run.run(tree, run_id: id, provider: {Mock, []})
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{})
+    conn = post_json(json_conn(), "/api/runs/#{id}/resume", %{})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -896,9 +863,7 @@ defmodule Workflow.Web.SchedulerAPITest do
         "agent_loops_missing_resume_#{System.unique_integer([:positive])}.exs"
       )
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{script_path: missing})
+    conn = post_json(json_conn(), "/api/runs/#{id}/resume", %{script_path: missing})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -919,11 +884,9 @@ defmodule Workflow.Web.SchedulerAPITest do
     id = run_id("scheduler_api_resume_validation")
     {:ok, tree} = Script.load_tree(path)
 
-    assert {:ok, ^id} = Run.run(tree, run_id: id, provider: {Workflow.Provider.Mock, []})
+    assert {:ok, ^id} = Run.run(tree, run_id: id, provider: {Mock, []})
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{script_path: bad_workflow(), provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs/#{id}/resume", %{script_path: bad_workflow(), provider: "mock"})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -939,9 +902,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
     assert reason =~ "unknown combinator `frobnicate`"
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{script_path: path, provider: "bogus"})
+    conn = post_json(json_conn(), "/api/runs/#{id}/resume", %{script_path: path, provider: "bogus"})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -969,9 +930,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert_receive {:agent_called, "ship it"}
     assert_receive {:at_agent, ^writer}
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{})
+    conn = post_json(json_conn(), "/api/runs/#{id}/resume", %{})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1008,9 +967,7 @@ defmodule Workflow.Web.SchedulerAPITest do
 
     kill_and_await(id, writer)
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs/#{id}/resume", %{})
+    conn = post_json(json_conn(), "/api/runs/#{id}/resume", %{})
 
     assert %{"data" => %{"run_id" => ^id, "state" => "accepted"}} = json_response(conn, 200)
 
@@ -1035,9 +992,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/runs rejects run ids that would break returned UI/API links" do
     path = demo_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/runs", %{script_path: path, run_id: "foo/bar", provider: "mock"})
+    conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: "foo/bar", provider: "mock"})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1051,15 +1006,13 @@ defmodule Workflow.Web.SchedulerAPITest do
              }
            } = json_response(conn, 400)
 
-    refute "foo/bar" in Workflow.Journal.run_ids()
+    refute "foo/bar" in Journal.run_ids()
   end
 
   test "POST /api/workflows/validate validates a workflow script" do
     path = demo_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1075,9 +1028,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate validates a same-file schema-backed workflow script" do
     path = schema_backed_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1097,9 +1048,7 @@ defmodule Workflow.Web.SchedulerAPITest do
         "agent_loops_missing_#{System.unique_integer([:positive])}.exs"
       )
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1118,9 +1067,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error for malformed workflow DSL" do
     path = bad_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1141,9 +1088,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error for syntax errors" do
     path = syntax_error_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1164,9 +1109,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error for invalid source encoding" do
     path = invalid_encoding_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1189,9 +1132,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     parent = self()
 
     capture_io(:stderr, fn ->
-      conn =
-        json_conn()
-        |> post_json("/api/workflows/validate", %{script_path: path})
+      conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
       send(parent, {:conn, conn})
     end)
@@ -1217,9 +1158,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error for top-level exceptions" do
     path = top_level_raise_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1240,9 +1179,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error for outer top-level script forms" do
     path = outer_top_level_raise_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1263,9 +1200,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error when use Workflow is missing" do
     path = no_use_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1286,9 +1221,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error when workflow appears before use Workflow" do
     path = workflow_before_use_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1309,9 +1242,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate returns a typed error for dynamic module headers" do
     path = dynamic_module_header_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1332,9 +1263,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate rejects schema definitions after workflow modules" do
     path = schema_after_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1357,9 +1286,7 @@ defmodule Workflow.Web.SchedulerAPITest do
     assert Code.ensure_loaded?(Workflow.Scheduler)
     assert function_exported?(Workflow.Scheduler, :validate_workflow, 1)
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1383,9 +1310,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate rejects hand-written workflow reflection" do
     path = fake_workflow_reflection()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1406,9 +1331,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate rejects forged workflow markers" do
     path = forged_workflow_marker()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",
@@ -1429,9 +1352,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   test "POST /api/workflows/validate rejects self-registered workflow reflection" do
     path = self_registered_fake_workflow()
 
-    conn =
-      json_conn()
-      |> post_json("/api/workflows/validate", %{script_path: path})
+    conn = post_json(json_conn(), "/api/workflows/validate", %{script_path: path})
 
     assert %{
              "api_version" => "scheduler.v1",

@@ -7,38 +7,36 @@ defmodule Workflow.Script do
   and runs the same `Workflow.Compiler.parse/2` gate used by the macro.
   """
 
-  alias Workflow.{Compiler, Script.Error}
+  alias Workflow.Compiler
   alias Workflow.Compiler.Finding
   alias Workflow.Schema.Compiler, as: SchemaCompiler
+  alias Workflow.Script.Error
 
   @spec load_tree(String.t()) :: {:ok, Workflow.Tree.t()} | {:error, Error.t()}
   def load_tree(path) when is_binary(path) do
     with {:ok, source} <- read(path),
          {:ok, ast} <- quoted(path, source),
-         {:ok, name, block, line, schema_bindings} <- workflow_form(path, ast),
-         {:ok, tree} <- parse_workflow(path, name, block, line, schema_bindings) do
-      {:ok, tree}
+         {:ok, name, block, line, schema_bindings} <- workflow_form(path, ast) do
+      parse_workflow(path, name, block, line, schema_bindings)
     end
   end
 
   defp read(path) do
-    cond do
-      not File.regular?(path) ->
-        {:error, Error.new(:script_not_found, path, "workflow script not found: #{path}")}
+    if File.regular?(path) do
+      case File.read(path) do
+        {:ok, source} ->
+          {:ok, source}
 
-      true ->
-        case File.read(path) do
-          {:ok, source} ->
-            {:ok, source}
-
-          {:error, reason} ->
-            {:error,
-             Error.new(
-               :compile,
-               path,
-               "cannot read workflow script: #{:file.format_error(reason)}"
-             )}
-        end
+        {:error, reason} ->
+          {:error,
+           Error.new(
+             :compile,
+             path,
+             "cannot read workflow script: #{:file.format_error(reason)}"
+           )}
+      end
+    else
+      {:error, Error.new(:script_not_found, path, "workflow script not found: #{path}")}
     end
   end
 
@@ -78,8 +76,7 @@ defmodule Workflow.Script do
     end
   end
 
-  defp top_level_forms([], schema_forms, workflow_module),
-    do: {:ok, Enum.reverse(schema_forms), workflow_module}
+  defp top_level_forms([], schema_forms, workflow_module), do: {:ok, Enum.reverse(schema_forms), workflow_module}
 
   defp top_level_forms([form | rest], schema_forms, workflow_module) do
     cond do
@@ -87,8 +84,7 @@ defmodule Workflow.Script do
         top_level_forms(rest, [form | schema_forms], workflow_module)
 
       schema_import?(form) or schema_form?(form) ->
-        {:error,
-         "cannot compile module: schema definitions must appear before the workflow module"}
+        {:error, "cannot compile module: schema definitions must appear before the workflow module"}
 
       match?({:defmodule, _, _}, form) and is_nil(workflow_module) ->
         top_level_forms(rest, schema_forms, form)
@@ -117,8 +113,7 @@ defmodule Workflow.Script do
         {:ok, forms}
 
       true ->
-        {:error,
-         Error.new(:compile, path, "cannot compile module: workflow module must `use Workflow`")}
+        {:error, Error.new(:compile, path, "cannot compile module: workflow module must `use Workflow`")}
     end
   end
 
@@ -201,8 +196,7 @@ defmodule Workflow.Script do
 
   defp extract_workflow(path, forms), do: extract_workflow(path, forms, false, nil)
 
-  defp extract_workflow(_path, [], _workflow_imported?, {:workflow, name, block, line}),
-    do: {:ok, name, block, line}
+  defp extract_workflow(_path, [], _workflow_imported?, {:workflow, name, block, line}), do: {:ok, name, block, line}
 
   defp extract_workflow(path, [], _workflow_imported?, nil) do
     {:error,
@@ -251,8 +245,7 @@ defmodule Workflow.Script do
   end
 
   defp workflow_call(path, form) do
-    {:error,
-     Error.new(:workflow_dsl, path, "invalid workflow declaration: #{Macro.to_string(form)}")}
+    {:error, Error.new(:workflow_dsl, path, "invalid workflow declaration: #{Macro.to_string(form)}")}
   end
 
   defp parse_workflow(path, name, block, line, schema_bindings) do
@@ -273,8 +266,7 @@ defmodule Workflow.Script do
 
   defp top_level_error_message({:raise, _meta, [message]}) when is_binary(message), do: message
 
-  defp top_level_error_message(_form),
-    do: "cannot compile module: unsupported top-level workflow script form"
+  defp top_level_error_message(_form), do: "cannot compile module: unsupported top-level workflow script form"
 
   defp statements({:__block__, _meta, forms}), do: forms
   defp statements(nil), do: []
@@ -297,8 +289,7 @@ defmodule Workflow.Script do
 
   defp app_module?(module), do: String.starts_with?(Atom.to_string(module), "Elixir.Workflow.")
 
-  defp inline_schema_bindings(block, schema_bindings) when map_size(schema_bindings) == 0,
-    do: block
+  defp inline_schema_bindings(block, schema_bindings) when map_size(schema_bindings) == 0, do: block
 
   defp inline_schema_bindings(block, schema_bindings) do
     Macro.prewalk(block, fn
@@ -326,13 +317,7 @@ defmodule Workflow.Script do
     end
   end
 
-  defp schema_import?(
-         {:import, _meta,
-          [
-            {:__aliases__, _alias_meta, [:Workflow, :Schema, :DSL]}
-          ]}
-       ),
-       do: true
+  defp schema_import?({:import, _meta, [{:__aliases__, _alias_meta, [:Workflow, :Schema, :DSL]}]}), do: true
 
   defp schema_import?(_form), do: false
 

@@ -3,12 +3,11 @@ defmodule Workflow.MCP.AnubisServer.WorkflowStatus do
 
   use Anubis.Server.Component, type: :tool, name: "workflow_status"
 
-  alias Workflow.MCP.{AnubisServer.ToolHelpers, SchedulerClient}
+  alias Workflow.MCP.AnubisServer.ToolHelpers
+  alias Workflow.MCP.SchedulerClient
 
   schema do
-    field(:run_id, {:required, {:string, {:min, 1}}},
-      description: "Run id returned by workflow_start."
-    )
+    field(:run_id, {:required, {:string, {:min, 1}}}, description: "Run id returned by workflow_start.")
   end
 
   @impl true

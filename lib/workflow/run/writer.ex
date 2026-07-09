@@ -32,50 +32,45 @@ defmodule Workflow.Run.Writer do
   """
   use GenServer, restart: :temporary
 
-  alias Workflow.{
-    Journal,
-    Event,
-    Idempotency,
-    IdempotencyKey,
-    Schema,
-    Status,
-    Ledger,
-    Accumulator,
-    BoundValue,
-    BoundList,
-    Predicate,
-    PubSub,
-    RenderText,
-    Template
-  }
-
-  alias Workflow.Refine.{Gate, ReviewerAdapter}
-  alias Workflow.Refine.Result, as: RefineResult
+  alias Workflow.Accumulator
+  alias Workflow.BoundList
+  alias Workflow.BoundValue
+  alias Workflow.Event
+  alias Workflow.Idempotency
+  alias Workflow.IdempotencyKey
+  alias Workflow.Journal
+  alias Workflow.Ledger
+  alias Workflow.Node.Agent
+  alias Workflow.Node.BudgetSlices
+  alias Workflow.Node.Collect
+  alias Workflow.Node.Emit
+  alias Workflow.Node.EmitResult
+  alias Workflow.Node.FanOut
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Node.Judge
+  alias Workflow.Node.Log
+  alias Workflow.Node.Loop
+  alias Workflow.Node.Parallel
+  alias Workflow.Node.PathCount
+  alias Workflow.Node.Phase
+  alias Workflow.Node.Pipeline
+  alias Workflow.Node.Refine
+  alias Workflow.Node.Return
+  alias Workflow.Node.Synthesize
+  alias Workflow.Node.Until
+  alias Workflow.Node.UntilDry
+  alias Workflow.Node.Verify
+  alias Workflow.Node.WhileBudget
+  alias Workflow.Predicate
   alias Workflow.Provider.Usage
-
-  alias Workflow.Node.{
-    Phase,
-    Log,
-    Agent,
-    Emit,
-    EmitResult,
-    Return,
-    Parallel,
-    Pipeline,
-    Collect,
-    Loop,
-    Until,
-    WhileBudget,
-    UntilDry,
-    Verify,
-    Refine,
-    Judge,
-    Synthesize,
-    GenericFanout,
-    FanOut,
-    BudgetSlices,
-    PathCount
-  }
+  alias Workflow.PubSub
+  alias Workflow.Refine.Gate
+  alias Workflow.Refine.Result, as: RefineResult
+  alias Workflow.Refine.ReviewerAdapter
+  alias Workflow.RenderText
+  alias Workflow.Schema
+  alias Workflow.Status
+  alias Workflow.Template
 
   @refine_artifact_schema %{
     "type" => "object",
@@ -194,17 +189,13 @@ defmodule Workflow.Run.Writer do
   defp failed_run_result(%{address: address, reason: {:provider_failure, kind, detail}}),
     do: {:error, {:provider_failure, address, kind, detail}}
 
-  defp failed_run_result(%{reason: {:run_crashed, detail}}),
-    do: {:error, {:run_crashed, detail}}
+  defp failed_run_result(%{reason: {:run_crashed, detail}}), do: {:error, {:run_crashed, detail}}
 
-  defp failed_run_result(failure),
-    do: {:error, {:malformed_output, failure.address, failure.reason}}
+  defp failed_run_result(failure), do: {:error, {:malformed_output, failure.address, failure.reason}}
 
-  defp failed_turn_result(%Agent{address: address}, reason),
-    do: failed_turn_result(address, reason)
+  defp failed_turn_result(%Agent{address: address}, reason), do: failed_turn_result(address, reason)
 
-  defp failed_turn_result(address, {:provider_failure, kind, detail}),
-    do: {:provider_failure, address, kind, detail}
+  defp failed_turn_result(address, {:provider_failure, kind, detail}), do: {:provider_failure, address, kind, detail}
 
   defp failed_turn_result(address, reason), do: {:malformed_output, address, reason}
 
@@ -250,8 +241,7 @@ defmodule Workflow.Run.Writer do
   defp run_node(%Log{} = node, run_id, _provider, prior, ctx),
     do: {:cont, %{ctx | seq: commit_marker(run_id, ctx.seq, prior, Event.log_emitted(node))}}
 
-  defp run_node(%Return{} = node, _run_id, _provider, _prior, ctx),
-    do: {:cont, %{ctx | return: node.value}}
+  defp run_node(%Return{} = node, _run_id, _provider, _prior, ctx), do: {:cont, %{ctx | return: node.value}}
 
   defp run_node(%Emit{} = node, run_id, _provider, _prior, ctx) do
     rendered =
@@ -474,7 +464,7 @@ defmodule Workflow.Run.Writer do
   # order. Top-level fanouts carry marker iteration nil; loop-body fanouts use the
   # current loop iteration so their width/result binding is loop-local.
   defp run_node(%GenericFanout{} = node, run_id, provider, prior, ctx) do
-    fanout_iteration = if ctx.loop_address, do: ctx.iteration, else: nil
+    fanout_iteration = if ctx.loop_address, do: ctx.iteration
     lane_iteration = ctx.iteration
     {width, seq} = decide_fanout_width(node, run_id, prior, ctx.seq, fanout_iteration)
 
@@ -569,8 +559,7 @@ defmodule Workflow.Run.Writer do
   defp refine_input_from_descriptor(%{kind: :producer} = descriptor),
     do: {:producer, agent_from_descriptor(descriptor, @refine_artifact_schema)}
 
-  defp refine_input_from_descriptor(%{kind: :binding, name: name, ref: ref}),
-    do: {:binding, name, ref}
+  defp refine_input_from_descriptor(%{kind: :binding, name: name, ref: ref}), do: {:binding, name, ref}
 
   defp reviewer_from_descriptor(%{index: index, name: name} = descriptor) do
     adapter = Map.get(descriptor, :adapter, ReviewerAdapter.default())
@@ -636,13 +625,7 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp run_refine_producer(
-         %Refine{input: {:binding, name, ref}} = node,
-         run_id,
-         _provider,
-         _prior,
-         ctx
-       ) do
+  defp run_refine_producer(%Refine{input: {:binding, name, ref}} = node, run_id, _provider, _prior, ctx) do
     case bound_artifact(run_id, ref) do
       {:ok, artifact} ->
         {:ok, ctx.seq, artifact}
@@ -657,9 +640,8 @@ defmodule Workflow.Run.Writer do
   defp bound_artifact(_run_id, {:map, _address}), do: {:error, :unsupported_map_binding}
 
   defp bound_artifact(run_id, ref) do
-    with {:ok, value} <- BoundValue.of(run_id, ref) do
-      normalize_bound_artifact(value)
-    else
+    case BoundValue.of(run_id, ref) do
+      {:ok, value} -> normalize_bound_artifact(value)
       {:error, {:unbound, _ref}} -> {:error, :unbound_binding}
       {:error, _reason} -> {:error, :artifact_value_unsupported}
     end
@@ -669,16 +651,13 @@ defmodule Workflow.Run.Writer do
     if String.valid?(value), do: {:ok, value}, else: {:error, :artifact_invalid_utf8}
   end
 
-  defp normalize_bound_artifact(%{"artifact" => artifact} = value)
-       when map_size(value) == 1 and is_binary(artifact) do
+  defp normalize_bound_artifact(%{"artifact" => artifact} = value) when map_size(value) == 1 and is_binary(artifact) do
     if String.valid?(artifact), do: {:ok, artifact}, else: {:error, :artifact_invalid_utf8}
   end
 
-  defp normalize_bound_artifact(%{"artifact" => value}) when not is_binary(value),
-    do: {:error, :artifact_not_binary}
+  defp normalize_bound_artifact(%{"artifact" => value}) when not is_binary(value), do: {:error, :artifact_not_binary}
 
-  defp normalize_bound_artifact(value) when is_map(value),
-    do: {:error, :artifact_object_unexpected_shape}
+  defp normalize_bound_artifact(value) when is_map(value), do: {:error, :artifact_object_unexpected_shape}
 
   defp normalize_bound_artifact(_value), do: {:error, :artifact_value_unsupported}
 
@@ -706,12 +685,9 @@ defmodule Workflow.Run.Writer do
 
     outcomes =
       run_refine_reviewers_concurrently(node, node.reviewers, cap, timeout, round, fn %{
-                                                                                        agent:
-                                                                                          agent,
-                                                                                        adapter:
-                                                                                          adapter,
-                                                                                        prompt:
-                                                                                          base_prompt
+                                                                                        agent: agent,
+                                                                                        adapter: adapter,
+                                                                                        prompt: base_prompt
                                                                                       } =
                                                                                         reviewer ->
         agent = %{agent | prompt: reviewer_prompt(base_prompt, round, artifact)}
@@ -727,12 +703,10 @@ defmodule Workflow.Run.Writer do
         )
       end)
 
-    case commit_reviewer_lanes(outcomes, run_id, prior, seq) do
-      {:ok, seq, settlements} ->
-        decision = refine_decision(node, round, artifact, settlements)
-        seq = commit(run_id, seq, Event.refine_round_decision(node, round, decision))
-        {:ok, seq, decision}
-    end
+    {:ok, seq, settlements} = commit_reviewer_lanes(outcomes, run_id, prior, seq)
+    decision = refine_decision(node, round, artifact, settlements)
+    seq = commit(run_id, seq, Event.refine_round_decision(node, round, decision))
+    {:ok, seq, decision}
   end
 
   defp run_refine_loop(%Refine{} = node, round, artifact, run_id, provider, prior, seq) do
@@ -886,10 +860,8 @@ defmodule Workflow.Run.Writer do
         {:ok, seq, projection}
 
       {:ok, gate} ->
-        with {:ok, seq, true} <-
-               evaluate_gate(node, :cold_read, gate.predicate, projection, run_id, seq) do
-          run_or_replay_cold_read(node, gate.reviewer, projection, run_id, provider, seq)
-        else
+        case evaluate_gate(node, :cold_read, gate.predicate, projection, run_id, seq) do
+          {:ok, seq, true} -> run_or_replay_cold_read(node, gate.reviewer, projection, run_id, provider, seq)
           {:ok, seq, false} -> {:ok, seq, projection}
         end
     end
@@ -901,10 +873,8 @@ defmodule Workflow.Run.Writer do
         {:ok, seq, projection}
 
       {:ok, gate} ->
-        with {:ok, seq, true} <-
-               evaluate_gate(node, :repair, gate.predicate, projection, run_id, seq) do
-          run_or_replay_repair(node, gate.agent, projection, run_id, provider, seq)
-        else
+        case evaluate_gate(node, :repair, gate.predicate, projection, run_id, seq) do
+          {:ok, seq, true} -> run_or_replay_repair(node, gate.agent, projection, run_id, provider, seq)
           {:ok, seq, false} -> {:ok, seq, projection}
         end
     end
@@ -953,14 +923,7 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp run_or_replay_cold_read(
-         %Refine{} = node,
-         %{agent: %Agent{} = agent} = reviewer,
-         projection,
-         run_id,
-         provider,
-         seq
-       ) do
+  defp run_or_replay_cold_read(%Refine{} = node, %{agent: %Agent{} = agent} = reviewer, projection, run_id, provider, seq) do
     agent = %{agent | prompt: cold_read_prompt(agent.prompt, projection, run_id, node.address)}
     events = Journal.fold(run_id)
 
@@ -987,8 +950,8 @@ defmodule Workflow.Run.Writer do
         {:ok, seq, cold_read_failed_projection(projection, failure)}
 
       {:resume, attempt} ->
-        run_cold_read_role_attempt(
-          node,
+        node
+        |> run_cold_read_role_attempt(
           reviewer,
           agent,
           run_id,
@@ -1001,14 +964,7 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp run_or_replay_repair(
-         %Refine{} = node,
-         %Agent{} = agent,
-         projection,
-         run_id,
-         provider,
-         seq
-       ) do
+  defp run_or_replay_repair(%Refine{} = node, %Agent{} = agent, projection, run_id, provider, seq) do
     agent = %{agent | prompt: repair_prompt(agent.prompt, projection, run_id, node.address)}
     events = Journal.fold(run_id)
 
@@ -1035,8 +991,8 @@ defmodule Workflow.Run.Writer do
         {:ok, seq, append_role_failure(projection, failure)}
 
       {:resume, attempt} ->
-        commit_gate_role_attempt(
-          node,
+        node
+        |> commit_gate_role_attempt(
           :repair,
           %{name: nil, index: nil, agent: agent},
           agent,
@@ -1470,8 +1426,7 @@ defmodule Workflow.Run.Writer do
             reviewer_index: index,
             id: "__codex_loops_no_blocking_finding__",
             issue: "Reviewer did not approve but returned no blocking finding.",
-            fix:
-              "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
+            fix: "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
           }
         ]
 
@@ -1503,8 +1458,7 @@ defmodule Workflow.Run.Writer do
   defp gate_role_malformed_reason(:repair, reason), do: {:repair_failed, reason}
   defp gate_role_malformed_reason(_role, reason), do: {:malformed_output, reason}
 
-  defp gate_role_provider_reason(:repair, kind, detail),
-    do: {:repair_failed, {:provider_failure, kind, detail}}
+  defp gate_role_provider_reason(:repair, kind, detail), do: {:repair_failed, {:provider_failure, kind, detail}}
 
   defp gate_role_provider_reason(_role, kind, detail), do: {:provider_failure, kind, detail}
 
@@ -1533,22 +1487,11 @@ defmodule Workflow.Run.Writer do
     )
   end
 
-  defp cold_read_open_findings(%{state: :completed, open_findings: open_findings}),
-    do: open_findings
+  defp cold_read_open_findings(%{state: :completed, open_findings: open_findings}), do: open_findings
 
   defp cold_read_open_findings(_cold_read), do: []
 
-  defp run_refine_reviser(
-         %Refine{} = node,
-         round,
-         artifact,
-         open_findings,
-         role_failures,
-         run_id,
-         provider,
-         prior,
-         seq
-       ) do
+  defp run_refine_reviser(%Refine{} = node, round, artifact, open_findings, role_failures, run_id, provider, prior, seq) do
     reviser = %{
       node.reviser
       | prompt: reviser_prompt(node.reviser.prompt, round, artifact, open_findings, role_failures)
@@ -1622,8 +1565,7 @@ defmodule Workflow.Run.Writer do
                   reviewer_index: index,
                   id: "__codex_loops_no_blocking_finding__",
                   issue: "Reviewer did not approve but returned no blocking finding.",
-                  fix:
-                    "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
+                  fix: "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
                 }
               ]
 
@@ -1652,8 +1594,7 @@ defmodule Workflow.Run.Writer do
   end
 
   defp role_failures(settlements) do
-    settlements
-    |> Enum.flat_map(fn
+    Enum.flat_map(settlements, fn
       {:failed, failure} -> [failure]
       {:completed, _review} -> []
     end)
@@ -1797,12 +1738,7 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp commit_refine_non_converged(
-         run_id,
-         seq,
-         prior,
-         %Event{payload: %{address: address}} = event
-       ) do
+  defp commit_refine_non_converged(run_id, seq, prior, %Event{payload: %{address: address}} = event) do
     if Enum.any?(prior, &(&1.type == :refine_non_converged and &1.payload.address == address)) do
       seq
     else
@@ -1814,10 +1750,7 @@ defmodule Workflow.Run.Writer do
          run_id,
          seq,
          prior,
-         %Event{
-           payload: %{address: address, role: role, round: round, role_address: role_address}
-         } =
-           event
+         %Event{payload: %{address: address, role: role, round: round, role_address: role_address}} = event
        ) do
     if Enum.any?(
          prior,
@@ -1865,7 +1798,8 @@ defmodule Workflow.Run.Writer do
 
   # A candidate's total is the sum of its per-criterion scores.
   defp score_lane(lane, run_id, provider, prior, iteration) do
-    Enum.reduce_while(lane, {:ok, [], 0}, fn agent, {:ok, events, total} ->
+    lane
+    |> Enum.reduce_while({:ok, [], 0}, fn agent, {:ok, events, total} ->
       case build_agent(agent, run_id, provider, prior, iteration) do
         {:ok, evs, result} -> {:cont, {:ok, events ++ evs, total + Map.get(result, "score", 0)}}
         {:failed, evs, reason} -> {:halt, {:failed, events ++ evs, reason}}
@@ -1916,12 +1850,7 @@ defmodule Workflow.Run.Writer do
   end
 
   defp synthesis_prompt(%Synthesize{inputs: inputs, prompt: prompt}),
-    do:
-      RenderText.render!([], [
-        {:text, prompt},
-        {:text, "\n\nInputs: "},
-        {:literal, inputs}
-      ])
+    do: RenderText.render!([], [{:text, prompt}, {:text, "\n\nInputs: "}, {:literal, inputs}])
 
   # --- Generic fanout width (a journaled runtime decision) ---
 
@@ -2310,32 +2239,19 @@ defmodule Workflow.Run.Writer do
 
   defp resolve_binding_ref(events, ref, iteration \\ nil)
 
-  defp resolve_binding_ref(events, {:node, _address} = ref, _iteration),
-    do: BoundValue.fold(events, ref)
+  defp resolve_binding_ref(events, {:node, _address} = ref, _iteration), do: BoundValue.fold(events, ref)
 
-  defp resolve_binding_ref(events, {:refine, _address} = ref, _iteration),
-    do: BoundValue.fold(events, ref)
+  defp resolve_binding_ref(events, {:refine, _address} = ref, _iteration), do: BoundValue.fold(events, ref)
 
-  defp resolve_binding_ref(events, {:map, _address} = ref, _iteration),
-    do: BoundList.fold(events, ref)
+  defp resolve_binding_ref(events, {:map, _address} = ref, _iteration), do: BoundList.fold(events, ref)
 
-  defp resolve_binding_ref(events, {:fanout, _address, :global} = ref, _iteration),
-    do: BoundList.fold(events, ref)
+  defp resolve_binding_ref(events, {:fanout, _address, :global} = ref, _iteration), do: BoundList.fold(events, ref)
 
-  defp resolve_binding_ref(
-         events,
-         {:fanout, _address, {:loop_local, _loop_address}} = ref,
-         iteration
-       )
-       when is_integer(iteration),
-       do: BoundList.fold(events, ref, iteration)
+  defp resolve_binding_ref(events, {:fanout, _address, {:loop_local, _loop_address}} = ref, iteration)
+       when is_integer(iteration), do: BoundList.fold(events, ref, iteration)
 
-  defp resolve_binding_ref(
-         _events,
-         {:fanout, _address, {:loop_local, _loop_address}} = ref,
-         _iteration
-       ),
-       do: {:error, {:unbound, ref}}
+  defp resolve_binding_ref(_events, {:fanout, _address, {:loop_local, _loop_address}} = ref, _iteration),
+    do: {:error, {:unbound, ref}}
 
   defp path_resolve(value, ""), do: {:present, value}
 
@@ -2401,9 +2317,7 @@ defmodule Workflow.Run.Writer do
     added_by_round =
       run_id
       |> Journal.fold()
-      |> Enum.filter(
-        &(&1.type == :accumulate and List.starts_with?(&1.payload.address, loop_address))
-      )
+      |> Enum.filter(&(&1.type == :accumulate and List.starts_with?(&1.payload.address, loop_address)))
       |> Enum.group_by(& &1.payload.iteration, &length(&1.payload.added))
       |> Map.new(fn {round, counts} -> {round, Enum.sum(counts)} end)
 
@@ -2427,16 +2341,9 @@ defmodule Workflow.Run.Writer do
     |> Enum.map(fn {:ok, result} -> result end)
   end
 
-  defp run_refine_reviewers_concurrently(
-         %Refine{} = refine,
-         reviewers,
-         cap,
-         timeout,
-         iteration,
-         fun
-       ) do
-    Task.Supervisor.async_stream_nolink(
-      Workflow.TaskSupervisor,
+  defp run_refine_reviewers_concurrently(%Refine{} = refine, reviewers, cap, timeout, iteration, fun) do
+    Workflow.TaskSupervisor
+    |> Task.Supervisor.async_stream_nolink(
       reviewers,
       fn reviewer -> safe_refine_reviewer(reviewer, iteration, fun) end,
       max_concurrency: cap,
@@ -2450,17 +2357,13 @@ defmodule Workflow.Run.Writer do
         result
 
       {{:exit, :timeout}, reviewer} ->
-        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_timeout, timeout},
-          detail: timeout
-        )
+        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_timeout, timeout}, detail: timeout)
 
       {{:exit, {%_{} = exception, stacktrace}}, _reviewer} when is_list(stacktrace) ->
         reraise exception, stacktrace
 
       {{:exit, reason}, reviewer} ->
-        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_crashed, reason},
-          detail: reason
-        )
+        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_crashed, reason}, detail: reason)
     end)
   end
 
@@ -2468,13 +2371,7 @@ defmodule Workflow.Run.Writer do
     fun.(reviewer)
   end
 
-  defp failed_refine_reviewer(
-         %Refine{} = refine,
-         %{agent: %Agent{}} = reviewer,
-         iteration,
-         reason,
-         opts
-       ) do
+  defp failed_refine_reviewer(%Refine{} = refine, %{agent: %Agent{}} = reviewer, iteration, reason, opts) do
     {:role_failed, [], reviewer_role_failure(refine, reviewer, iteration, 1, reason, opts)}
   end
 
@@ -2650,8 +2547,7 @@ defmodule Workflow.Run.Writer do
         {:failed, [], failed_turn_result(node, reason)}
 
       {:exhausted, attempts, reason} ->
-        {:failed, [Event.agent_failed(node, iteration, attempts, reason)],
-         failed_turn_result(node, reason)}
+        {:failed, [Event.agent_failed(node, iteration, attempts, reason)], failed_turn_result(node, reason)}
 
       {:resume, next} ->
         build_attempt(materialize_agent(node, run_id), run_id, provider, iteration, next, [])
@@ -2681,9 +2577,7 @@ defmodule Workflow.Run.Writer do
 
           {:failed, reason} ->
             {:role_failed, [],
-             reviewer_role_failure(refine, reviewer, iteration, 1, {:malformed_output, reason},
-               detail: reason
-             )}
+             reviewer_role_failure(refine, reviewer, iteration, 1, {:malformed_output, reason}, detail: reason)}
 
           {:exhausted, attempts, reason} ->
             {:role_failed, [],
@@ -2900,13 +2794,11 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp normalize_artifact(%{"artifact" => artifact} = output)
-       when map_size(output) == 1 and is_binary(artifact) do
+  defp normalize_artifact(%{"artifact" => artifact} = output) when map_size(output) == 1 and is_binary(artifact) do
     if String.valid?(artifact), do: {:ok, artifact}, else: {:error, :artifact_invalid_utf8}
   end
 
-  defp normalize_artifact(%{"artifact" => value}) when not is_binary(value),
-    do: {:error, :artifact_not_binary}
+  defp normalize_artifact(%{"artifact" => value}) when not is_binary(value), do: {:error, :artifact_not_binary}
 
   defp normalize_artifact(_output), do: {:error, :artifact_object_unexpected_shape}
 
@@ -2974,15 +2866,9 @@ defmodule Workflow.Run.Writer do
   end
 
   defp key(run_id, address, iteration, attempt),
-    do: %IdempotencyKey{
-      run_id: run_id,
-      node_path: address,
-      iteration: iteration,
-      attempt: attempt
-    }
+    do: %IdempotencyKey{run_id: run_id, node_path: address, iteration: iteration, attempt: attempt}
 
-  defp commit_all(run_id, seq, events),
-    do: Enum.reduce(events, seq, fn event, seq -> commit(run_id, seq, event) end)
+  defp commit_all(run_id, seq, events), do: Enum.reduce(events, seq, fn event, seq -> commit(run_id, seq, event) end)
 
   defp activity_tracker(run_id, %Agent{} = node, iteration, attempt) do
     counter = :counters.new(1, [])
@@ -2999,7 +2885,7 @@ defmodule Workflow.Run.Writer do
     end
 
     finalize = fn activity ->
-      streamed = :ets.tab2list(table) |> Enum.sort_by(fn {index, _entry} -> index end)
+      streamed = table |> :ets.tab2list() |> Enum.sort_by(fn {index, _entry} -> index end)
       index_final_activity(List.wrap(activity), streamed)
     end
 
@@ -3018,7 +2904,7 @@ defmodule Workflow.Run.Writer do
     end
 
     finalize = fn activity ->
-      streamed = :ets.tab2list(table) |> Enum.sort_by(fn {index, _entry} -> index end)
+      streamed = table |> :ets.tab2list() |> Enum.sort_by(fn {index, _entry} -> index end)
 
       case List.wrap(activity) do
         [] -> Enum.map(streamed, fn {index, entry} -> put_activity_index(entry, index) end)
@@ -3031,9 +2917,7 @@ defmodule Workflow.Run.Writer do
 
   defp index_final_activity(activity, streamed) do
     {indexed, _used, _next} =
-      Enum.reduce(activity, {[], MapSet.new(), next_activity_index(streamed)}, fn entry,
-                                                                                  {acc, used,
-                                                                                   next} ->
+      Enum.reduce(activity, {[], MapSet.new(), next_activity_index(streamed)}, fn entry, {acc, used, next} ->
         case matching_streamed_index(entry, streamed, used) do
           nil ->
             {[Map.put_new(entry, :activity_index, next) | acc], used, next + 1}
@@ -3055,38 +2939,31 @@ defmodule Workflow.Run.Writer do
     end)
   end
 
-  defp put_activity_index(entry, index) when is_map(entry),
-    do: Map.put_new(entry, :activity_index, index)
+  defp put_activity_index(entry, index) when is_map(entry), do: Map.put_new(entry, :activity_index, index)
 
   defp put_activity_index(entry, _index), do: entry
 
   defp call_provider({module, opts}, prompt, schema, key, activity_sink),
-    do:
-      normalize_provider_result(
-        module.run_agent(prompt, schema, key, Keyword.put(opts, :activity_sink, activity_sink))
-      )
+    do: normalize_provider_result(module.run_agent(prompt, schema, key, Keyword.put(opts, :activity_sink, activity_sink)))
 
-  defp normalize_provider_result({:ok, result, usage}),
-    do: {:ok, result, normalize_usage!(usage, :success), []}
+  defp normalize_provider_result({:ok, result, usage}), do: {:ok, result, normalize_usage!(usage, :success), []}
 
   defp normalize_provider_result({:ok, result, usage, activity}),
     do: {:ok, result, normalize_usage!(usage, :success), normalize_activity!(activity)}
 
   defp normalize_provider_result({:error, {:provider_failure, kind, detail, usage, activity}}) do
-    unless kind in @provider_failure_kinds do
+    if kind not in @provider_failure_kinds do
       raise ArgumentError, "invalid provider failure kind: #{inspect(kind)}"
     end
 
-    unless provider_failure_detail?(detail) do
+    if !provider_failure_detail?(detail) do
       raise ArgumentError, "invalid provider failure detail: #{inspect(detail)}"
     end
 
-    {:provider_failure, kind, detail, normalize_usage!(usage, :provider_failure),
-     normalize_activity!(activity)}
+    {:provider_failure, kind, detail, normalize_usage!(usage, :provider_failure), normalize_activity!(activity)}
   end
 
-  defp normalize_provider_result(other),
-    do: raise(ArgumentError, "malformed provider result: #{inspect(other)}")
+  defp normalize_provider_result(other), do: raise(ArgumentError, "malformed provider result: #{inspect(other)}")
 
   defp normalize_usage!(nil, :success), do: %Usage{}
   defp normalize_usage!(nil, :provider_failure), do: nil
@@ -3099,10 +2976,7 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp normalize_usage!(
-         %{"input_tokens" => input, "output_tokens" => output, "total_tokens" => total},
-         _context
-       )
+  defp normalize_usage!(%{"input_tokens" => input, "output_tokens" => output, "total_tokens" => total}, _context)
        when is_integer(input) and is_integer(output) and is_integer(total) do
     normalized = %Usage{
       input_tokens: input,
@@ -3113,8 +2987,7 @@ defmodule Workflow.Run.Writer do
     normalize_usage!(normalized, :map)
   end
 
-  defp normalize_usage!(other, _context),
-    do: raise(ArgumentError, "invalid provider usage: #{inspect(other)}")
+  defp normalize_usage!(other, _context), do: raise(ArgumentError, "invalid provider usage: #{inspect(other)}")
 
   defp normalize_activity!(activity) when is_list(activity) do
     if Enum.all?(activity, &is_map/1) do
@@ -3124,22 +2997,16 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp normalize_activity!(other),
-    do: raise(ArgumentError, "invalid provider activity: #{inspect(other)}")
+  defp normalize_activity!(other), do: raise(ArgumentError, "invalid provider activity: #{inspect(other)}")
 
-  defp non_negative_usage?(%Usage{
-         input_tokens: input,
-         output_tokens: output,
-         total_tokens: total
-       }) do
+  defp non_negative_usage?(%Usage{input_tokens: input, output_tokens: output, total_tokens: total}) do
     Enum.all?([input, output, total], &(is_integer(&1) and &1 >= 0))
   end
 
   defp provider_failure_detail?(value) when is_nil(value) or is_boolean(value), do: true
   defp provider_failure_detail?(value) when is_integer(value) or is_binary(value), do: true
 
-  defp provider_failure_detail?(value) when is_list(value),
-    do: Enum.all?(value, &provider_failure_detail?/1)
+  defp provider_failure_detail?(value) when is_list(value), do: Enum.all?(value, &provider_failure_detail?/1)
 
   defp provider_failure_detail?(value) when is_map(value) do
     Enum.all?(value, fn {key, nested} ->

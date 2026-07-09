@@ -3,22 +3,20 @@ defmodule Workflow.MCP.AnubisServer.WorkflowResume do
 
   use Anubis.Server.Component, type: :tool, name: "workflow_resume"
 
-  alias Workflow.MCP.{AnubisServer.ToolHelpers, SchedulerClient}
+  alias Workflow.MCP.AnubisServer.ToolHelpers
+  alias Workflow.MCP.SchedulerClient
 
   @allowed_keys [:script_path, :script, :provider]
 
   schema do
     field(:run_id, {:required, {:string, {:min, 1}}}, description: "Existing run id to resume.")
 
-    field(:script_path, :string,
-      description: "Optional workflow .exs path to use instead of the journaled script path."
-    )
+    field(:script_path, :string, description: "Optional workflow .exs path to use instead of the journaled script path.")
 
     field(:script, :string, description: "Optional scheduler-supported alias for script_path.")
 
     field(:provider, {:enum, ["mock", "codex"]},
-      description:
-        "Optional scheduler provider. Defaults to mock; codex spends a real Codex turn."
+      description: "Optional scheduler provider. Defaults to mock; codex spends a real Codex turn."
     )
   end
 

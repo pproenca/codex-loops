@@ -7,7 +7,8 @@ defmodule Workflow.BoundList do
   prompts without changing the render algorithm.
   """
 
-  alias Workflow.{Journal, Event}
+  alias Workflow.Event
+  alias Workflow.Journal
 
   @type result :: {:ok, [term()]} | {:error, {:unbound, Workflow.Node.binding_ref()}}
 
@@ -39,16 +40,14 @@ defmodule Workflow.BoundList do
 
   def fold(events, {:fanout, address, :global} = ref), do: fold_fanout(events, address, nil, ref)
 
-  def fold(_events, {:fanout, _address, {:loop_local, _loop_address}} = ref),
-    do: {:error, {:unbound, ref}}
+  def fold(_events, {:fanout, _address, {:loop_local, _loop_address}} = ref), do: {:error, {:unbound, ref}}
 
   def fold(_events, {:node, _address} = ref), do: {:error, {:unbound, ref}}
   def fold(_events, {:refine, _address} = ref), do: {:error, {:unbound, ref}}
 
   @spec fold([Event.t()], Workflow.Node.binding_ref(), non_neg_integer()) :: result()
   def fold(events, {:fanout, address, {:loop_local, _loop_address}} = ref, iteration)
-      when is_integer(iteration) and iteration >= 0,
-      do: fold_fanout(events, address, iteration, ref)
+      when is_integer(iteration) and iteration >= 0, do: fold_fanout(events, address, iteration, ref)
 
   def fold(events, ref, _iteration), do: fold(events, ref)
 

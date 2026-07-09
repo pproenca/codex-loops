@@ -173,14 +173,12 @@ defmodule Workflow.Scheduler.RunProjection do
     }
   end
 
-  defp known?(%Status{event_count: event_count}, events, running?),
-    do: running? or events != [] or event_count > 0
+  defp known?(%Status{event_count: event_count}, events, running?), do: running? or events != [] or event_count > 0
 
   defp recoverable?(%Status{state: :running}, events, true), do: journaled_script_path?(events)
   defp recoverable?(_status, _events, _known?), do: false
 
-  defp incomplete_without_script?(%Status{state: :running}, events),
-    do: not journaled_script_path?(events)
+  defp incomplete_without_script?(%Status{state: :running}, events), do: not journaled_script_path?(events)
 
   defp incomplete_without_script?(_status, _events), do: false
 
@@ -386,12 +384,7 @@ defmodule Workflow.Scheduler.RunProjection do
   defp raw_ref_map(nil), do: nil
 
   defp raw_ref_map(ref) do
-    %{
-      "runId" => ref.run_id,
-      "seq" => ref.seq,
-      "type" => ref.type
-    }
-    |> put_present("address", Map.get(ref, :address))
+    put_present(%{"runId" => ref.run_id, "seq" => ref.seq, "type" => ref.type}, "address", Map.get(ref, :address))
   end
 
   defp usage_map(%Usage{} = usage) do
@@ -432,29 +425,19 @@ defmodule Workflow.Scheduler.RunProjection do
   end
 
   defp reason_json({:provider_failure, kind, detail}),
-    do: %{
-      "code" => "provider_failure",
-      "kind" => atom_string(kind),
-      "detail" => json_value(detail)
-    }
+    do: %{"code" => "provider_failure", "kind" => atom_string(kind), "detail" => json_value(detail)}
 
-  defp reason_json({:malformed_output, detail}),
-    do: %{"code" => "malformed_output", "detail" => inspect(detail)}
+  defp reason_json({:malformed_output, detail}), do: %{"code" => "malformed_output", "detail" => inspect(detail)}
 
-  defp reason_json({:reviewer_timeout, timeout}),
-    do: %{"code" => "reviewer_timeout", "timeoutMs" => timeout}
+  defp reason_json({:reviewer_timeout, timeout}), do: %{"code" => "reviewer_timeout", "timeoutMs" => timeout}
 
-  defp reason_json({:cold_read_timeout, timeout}),
-    do: %{"code" => "cold_read_timeout", "timeoutMs" => timeout}
+  defp reason_json({:cold_read_timeout, timeout}), do: %{"code" => "cold_read_timeout", "timeoutMs" => timeout}
 
-  defp reason_json({:reviewer_crashed, detail}),
-    do: %{"code" => "reviewer_crashed", "detail" => inspect(detail)}
+  defp reason_json({:reviewer_crashed, detail}), do: %{"code" => "reviewer_crashed", "detail" => inspect(detail)}
 
-  defp reason_json({:cold_read_crashed, detail}),
-    do: %{"code" => "cold_read_crashed", "detail" => inspect(detail)}
+  defp reason_json({:cold_read_crashed, detail}), do: %{"code" => "cold_read_crashed", "detail" => inspect(detail)}
 
-  defp reason_json({:repair_failed, detail}),
-    do: %{"code" => "repair_failed", "detail" => inspect(detail)}
+  defp reason_json({:repair_failed, detail}), do: %{"code" => "repair_failed", "detail" => inspect(detail)}
 
   defp reason_json(reason) when is_atom(reason), do: %{"code" => Atom.to_string(reason)}
   defp reason_json(reason), do: %{"code" => "unknown", "detail" => inspect(reason)}

@@ -4,7 +4,7 @@
 
 ```sh
 make setup
-make test
+make quality
 make release
 make proof
 ```
@@ -12,8 +12,10 @@ make proof
 `make setup` installs Hex/Rebar and fetches Elixir dependencies.
 `.tool-versions` pins the known-good local toolchain for `mise`/`asdf`.
 
-`make test` runs the scheduler/API/UI Elixir test suite. `make release` produces
-the distributable local scheduler artifact under `_build/prod/rel/agent_loops/`.
+`make quality` is the fast pre-handoff gate: it checks formatting, compiles with
+warnings as errors, runs the spec lint, and runs the scheduler/API/UI Elixir test
+suite. `make release` produces the distributable local scheduler artifact under
+`_build/prod/rel/agent_loops/`.
 
 For a repeatable local dogfood run, use:
 
@@ -24,6 +26,17 @@ make dogfood
 It proves the packaged scheduler/MCP path, reinstalls `codex-loops@codex-loops`
 from the current checkout, verifies Codex sees the plugin, and prints the prompt
 to paste into a fresh thread for the actual agent-driven workflow run.
+
+## Fast Quality Gate
+
+```sh
+make quality
+```
+
+Run this before handing off ordinary code changes. It is intentionally local and
+fast: `mix format --check-formatted`, compile with warnings as errors, the spec
+lint, and the scheduler/API/UI test suite. It does not build releases, package
+the MCP executable, reinstall the plugin, or spend live Codex provider turns.
 
 ## Release Proof
 

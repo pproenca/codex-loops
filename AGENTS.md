@@ -23,6 +23,7 @@ SQLite journal.
 
 ```sh
 make setup
+make quality
 make build
 make test
 make release

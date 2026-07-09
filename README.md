@@ -13,10 +13,15 @@ the old `agent-loops` CLI surface.
 
 ```sh
 make setup
-make test
+make quality
 make release
 make proof
 ```
+
+`make quality` is the fast pre-handoff gate. It checks formatting, compiles
+with warnings as errors, runs the spec lint, and runs the Elixir
+scheduler/API/UI test suite. It does not build release artifacts or run MCP
+product proofs.
 
 After `make release`, verify the distributable scheduler release with:
 
@@ -71,16 +76,21 @@ workflow_status run_id=run_audit_live
 ## Development Commands
 
 ```sh
-make setup       # install Hex/Rebar and Elixir deps
-make build       # compile with warnings as errors
-make test        # run the Elixir scheduler/API/UI test suite
-make release     # build the self-contained scheduler Mix release
-make release-mcp # build the Burrito codex-loops-mcp executable
-make proof       # build release and prove scheduler API/UI readiness
-make proof-mcp   # prove copied plugin MCP lifecycle with mock scheduler-owned run
-make dogfood     # prove MCP, reinstall the local plugin, and print the fresh-thread prompt
-make proof-live  # alias for proof-mcp-live; spends one real Codex provider turn through MCP
+make setup        # install Hex/Rebar and Elixir deps
+make format-check # check mix formatting without rewriting files
+make quality      # fast pre-handoff gate: format, compile, spec lint, tests
+make build        # compile with warnings as errors
+make test         # run the Elixir scheduler/API/UI test suite
+make release      # build the self-contained scheduler Mix release
+make release-mcp  # build the Burrito codex-loops-mcp executable
+make proof        # build release and prove scheduler API/UI readiness
+make proof-mcp    # prove copied plugin MCP lifecycle with mock scheduler-owned run
+make dogfood      # prove MCP, reinstall the local plugin, and print the fresh-thread prompt
+make proof-live   # alias for proof-mcp-live; spends one real Codex provider turn through MCP
 ```
+
+Use `make proof`, `make proof-mcp`, and `make proof-live` for packaged product
+readiness. They remain separate from the fast `make quality` loop.
 
 The repository includes `.tool-versions` for `mise`/`asdf` users.
 

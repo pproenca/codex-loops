@@ -1,4 +1,4 @@
-.PHONY: setup test spec-lint build release release-mcp check-burrito-tools proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: setup format-check quality test spec-lint build release release-mcp check-burrito-tools proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -30,6 +30,14 @@ setup:
 	mix local.hex --if-missing --force
 	mix local.rebar --if-missing --force
 	mix deps.get
+
+format-check:
+	mix format --check-formatted
+
+quality:
+	$(MAKE) format-check
+	$(MAKE) build
+	$(MAKE) test
 
 test: spec-lint
 	mix test

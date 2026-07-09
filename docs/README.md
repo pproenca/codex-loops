@@ -20,13 +20,17 @@ The distributable scheduler artifact is the `agent_loops` Mix release. The old
 
 ```sh
 make setup
-make test
+make quality
 make release
 make proof
 make proof-mcp
 make proof-mcp-live
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
+
+`make quality` is the fast local gate for formatting, compile, spec lint, and
+the scheduler/API/UI test suite. The proof commands remain the packaged product
+readiness checks.
 
 ## Supported Scope
 

@@ -10,10 +10,7 @@ defmodule ProofMCPValidate do
     repo_root = Path.expand("..", __DIR__)
     port = System.get_env("CODEX_LOOPS_MCP_PROOF_PORT") || reserve_port()
 
-    temp_root =
-      Path.join(System.tmp_dir!(), "codex-loops-mcp-proof-#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(temp_root)
+    temp_root = make_temp_root("codex-loops-mcp-proof")
 
     source_plugin_root = Path.join(repo_root, "plugins/codex-loops")
     installed_plugin_root = Path.join(temp_root, "installed-plugin/codex-loops")
@@ -48,7 +45,7 @@ defmodule ProofMCPValidate do
       File.write!(running_workflow_path, running_workflow_source())
       File.write!(invalid_workflow_path, invalid_workflow_source())
 
-      with_mcp_client(entrypoint, repo_root, mcp_env(port, journal_path), fn client ->
+      with_mcp_client(temp_root, entrypoint, repo_root, mcp_env(port, journal_path), fn client ->
         {initialize, client} =
           request!(client, 1, "initialize", %{
             "protocolVersion" => "2024-11-05",
@@ -193,17 +190,15 @@ defmodule ProofMCPValidate do
     ]
   end
 
-  defp with_mcp_client(entrypoint, repo_root, env, fun) do
-    fifo_path =
-      Path.join(System.tmp_dir!(), "codex-loops-mcp-stdin-#{System.unique_integer([:positive])}")
-
+  defp with_mcp_client(temp_root, entrypoint, repo_root, env, fun) do
+    fifo_path = Path.join(temp_root, "mcp-stdin")
     {_output, 0} = System.cmd("mkfifo", [fifo_path])
 
     port =
       Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
         :exit_status,
-        {:args, ["-c", "exec \"$1\" --stdio < \"$2\"", "codex-loops-mcp", entrypoint, fifo_path]},
+        {:args, ["-c", ~s(exec "$1" --stdio < "$2"), "codex-loops-mcp", entrypoint, fifo_path]},
         {:cd, repo_root},
         {:env, env}
       ])
@@ -221,6 +216,19 @@ defmodule ProofMCPValidate do
       close_client(client)
       File.rm(fifo_path)
     end
+  end
+
+  defp make_temp_root(prefix) do
+    path =
+      Path.join(
+        System.tmp_dir!(),
+        "#{prefix}-#{System.system_time(:nanosecond)}-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir!(path)
+    path
+  rescue
+    _error in File.Error -> make_temp_root(prefix)
   end
 
   defp request!(client, id, method, params) do
@@ -414,8 +422,7 @@ defmodule ProofMCPValidate do
 
   defp running_workflow_source do
     agents =
-      1..750
-      |> Enum.map_join("\n", fn index ->
+      Enum.map_join(1..750, "\n", fn index ->
         ~s|        agent "keep lease #{index}"|
       end)
 
@@ -445,8 +452,7 @@ defmodule ProofMCPValidate do
 
   defp assert_initialize!(%{"result" => %{"serverInfo" => %{"name" => "codex-loops"}}}), do: :ok
 
-  defp assert_initialize!(message),
-    do: raise("initialize response was not valid: #{inspect(message)}")
+  defp assert_initialize!(message), do: raise("initialize response was not valid: #{inspect(message)}")
 
   defp assert_tools_list!(%{"result" => %{"tools" => tools}}) when is_list(tools) do
     names = Enum.map(tools, & &1["name"])
@@ -477,8 +483,7 @@ defmodule ProofMCPValidate do
     )
   end
 
-  defp assert_tools_list!(message),
-    do: raise("tools/list response was not valid: #{inspect(message)}")
+  defp assert_tools_list!(message), do: raise("tools/list response was not valid: #{inspect(message)}")
 
   defp assert_successful_validation!(response, workflow_path) do
     payload = successful_tool_payload!(response, "workflow_validate")

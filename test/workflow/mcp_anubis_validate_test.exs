@@ -36,6 +36,7 @@ defmodule Workflow.MCPAnubisValidateTest do
       |> responses_by_id()
 
     assert responses[1]["result"]["serverInfo"]["name"] == "codex-loops"
+    assert responses[1]["result"]["serverInfo"]["version"] == Workflow.PackageVersion.version()
     assert responses[1]["result"]["capabilities"]["tools"] == %{}
 
     tools_by_name = Map.new(responses[2]["result"]["tools"], &{&1["name"], &1})
@@ -76,6 +77,15 @@ defmodule Workflow.MCPAnubisValidateTest do
     {_input, output} = StringIO.contents(io)
     assert output =~ "Usage: codex-loops-mcp --stdio"
     assert output =~ "-h        Show this help."
+  end
+
+  test "Anubis stdio entrypoint reports the package version" do
+    {:ok, io} = StringIO.open("")
+
+    assert :ok = AnubisStdio.main(["--version"], output_device: io)
+
+    {_input, output} = StringIO.contents(io)
+    assert output == "codex-loops-mcp #{Workflow.PackageVersion.version()}\n"
   end
 
   test "Anubis stdio entrypoint rejects invalid arguments without halting when requested" do
@@ -608,7 +618,7 @@ defmodule Workflow.MCPAnubisValidateTest do
   defp health_envelope do
     %{
       "api_version" => "scheduler.v1",
-      "data" => %{"status" => "ok"}
+      "data" => %{"status" => "ok", "version" => Workflow.PackageVersion.version()}
     }
   end
 

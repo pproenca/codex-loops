@@ -454,6 +454,7 @@ defmodule Workflow.Web.SchedulerAPITest do
              "api_version" => "scheduler.v1",
              "data" => %{
                "status" => "ok",
+               "version" => version,
                "checks" => %{
                  "otp_app" => "available",
                  "journal" => "available",
@@ -462,6 +463,8 @@ defmodule Workflow.Web.SchedulerAPITest do
                }
              }
            } = json_response(conn, 200)
+
+    assert version == Workflow.PackageVersion.version()
   end
 
   test "POST /api/runs starts a mock-provider run and returns an accepted response" do

@@ -1,4 +1,4 @@
-.PHONY: setup format-check quality credo-check security-check audit-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint build release release-mcp check-burrito-tools proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: setup format-check quality credo-check security-check audit-check package-version-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint build release release-mcp check-burrito-tools proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -52,6 +52,10 @@ audit-check:
 	mix deps.audit
 	mix hex.audit
 
+package-version-check:
+	mix run --no-start scripts/sync-package-version.exs --check
+	mix run --no-start scripts/check-package-version.exs --check
+
 dialyzer-check:
 	mix dialyzer
 
@@ -68,14 +72,15 @@ test: spec-lint
 spec-lint:
 	scripts/check-spec.sh SPEC.md
 
-build:
+build: package-version-check
 	mix compile --warnings-as-errors
 
-release:
+release: package-version-check
 	MIX_ENV=prod mix deps.get --only prod
 	rm -rf "_build/prod/rel/$(RELEASE_NAME)" "$(APP_BUILD_DIR)"
 	MIX_ENV=prod mix release $(RELEASE_NAME) --overwrite
 	test -x "$(RELEASE_CTL)"
+	test -x "_build/prod/rel/$(RELEASE_NAME)/bin/codex-loops"
 	mkdir -p "$(PLUGIN_SCHEDULER_DIR)"
 	rm -rf "$(PLUGIN_SCHEDULER_DIR)/bin" "$(PLUGIN_SCHEDULER_DIR)"/erts-* "$(PLUGIN_SCHEDULER_DIR)/lib" "$(PLUGIN_SCHEDULER_DIR)/releases"
 	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(PLUGIN_SCHEDULER_DIR)/"
@@ -87,7 +92,7 @@ check-burrito-tools:
 	@test -n "$(ZIG)" || { echo "Burrito MCP build requires zig 0.15.2; install with 'brew install zig@0.15' or set ZIG=/path/to/zig."; exit 1; }
 	@test "$$($(ZIG) version)" = "0.15.2" || { echo "Burrito MCP build requires zig 0.15.2, found $$($(ZIG) version) at $(ZIG)."; exit 1; }
 
-release-mcp: check-burrito-tools
+release-mcp: package-version-check check-burrito-tools
 	MIX_ENV=prod mix deps.get --only prod
 	rm -rf "_build/prod/rel/$(MCP_RELEASE_NAME)" "$(MCP_BURRITO_BIN)" "$(MCP_DIST_BIN)" "$(APP_BUILD_DIR)" $(BURRITO_ZIG_ARTIFACTS)
 	mkdir -p "$(BURRITO_DEP_DIR)/.zig-cache/c"

@@ -403,6 +403,7 @@ defmodule Workflow.SchedulerTest do
     assert {:ok, health} = Scheduler.health()
 
     assert health.status == :ok
+    assert health.version == Workflow.PackageVersion.version()
 
     assert health.checks == %{
              otp_app: :available,

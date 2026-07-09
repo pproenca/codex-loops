@@ -3,9 +3,17 @@ set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 release_ctl="$repo_root/_build/prod/rel/agent_loops/bin/agent_loops"
+release_cli="$repo_root/_build/prod/rel/agent_loops/bin/codex-loops"
+package_version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
 
 if [ ! -x "$release_ctl" ]; then
   echo "release control script not found: $release_ctl" >&2
+  echo "run: make release" >&2
+  exit 2
+fi
+
+if [ ! -x "$release_cli" ]; then
+  echo "release CLI not found: $release_cli" >&2
   echo "run: make release" >&2
   exit 2
 fi
@@ -105,6 +113,11 @@ echo "run_id=$run_id"
 echo "url=$base_url"
 echo "release_node=$release_node"
 
+if [ "$("$release_cli" --version)" != "codex-loops $package_version" ]; then
+  echo "release CLI --version did not report $package_version" >&2
+  exit 1
+fi
+
 if curl -fsS "$base_url/api/health" >/dev/null 2>&1; then
   echo "proof port already serves /api/health: $base_url" >&2
   echo "set CODEX_LOOPS_PROOF_PORT to an unused local port" >&2
@@ -147,6 +160,7 @@ fi
 
 assert_contains "$health" '"api_version":"scheduler.v1"' "health response is scheduler API"
 assert_contains "$health" '"status":"ok"' "scheduler health is ok"
+assert_contains "$health" "\"version\":\"$package_version\"" "scheduler health reports package version"
 
 echo "-- validate workflow through API"
 validate="$tmpdir/validate.json"

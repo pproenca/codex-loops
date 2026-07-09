@@ -11,6 +11,7 @@ defmodule Workflow.MCP.AnubisStdio do
   alias Workflow.MCP.AnubisServer
   alias Workflow.MCP.AnubisServer.ToolHelpers
   alias Workflow.MCP.BurritoEnvironment
+  alias Workflow.PackageVersion
 
   @spec main([String.t()]) :: :ok | {:error, term()} | no_return()
   def main(args \\ BurritoEnvironment.argv()) do
@@ -28,6 +29,12 @@ defmodule Workflow.MCP.AnubisStdio do
 
       ["--stdio"] ->
         run(opts)
+
+      ["--version"] ->
+        IO.puts(
+          Keyword.get(opts, :output_device, :stdio),
+          "codex-loops-mcp #{PackageVersion.version()}"
+        )
 
       [help_arg] when help_arg in ["--help", "-h"] ->
         IO.puts(
@@ -130,6 +137,7 @@ defmodule Workflow.MCP.AnubisStdio do
 
     Options:
       --stdio   Start the MCP stdio server.
+      --version Show the Codex Loops package version.
       --help    Show this help.
       -h        Show this help.
     """)

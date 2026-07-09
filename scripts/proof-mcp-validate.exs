@@ -19,6 +19,7 @@ defmodule ProofMCPValidate do
 
     entrypoint = Path.join(installed_plugin_root, "mcp/codex-loops-mcp")
     packaged_scheduler = Path.join(installed_plugin_root, "scheduler/bin/agent_loops")
+    package_version = package_version(repo_root)
 
     assert!(
       executable_file?(entrypoint),
@@ -29,6 +30,8 @@ defmodule ProofMCPValidate do
       executable_file?(packaged_scheduler),
       "copied plugin package should include scheduler release"
     )
+
+    assert_mcp_version!(entrypoint, package_version)
 
     workflow_path = Path.join(temp_root, "workflow.exs")
     running_workflow_path = Path.join(temp_root, "running-workflow.exs")
@@ -53,7 +56,7 @@ defmodule ProofMCPValidate do
             "clientInfo" => %{"name" => "proof-mcp-validate", "version" => "0.0.0"}
           })
 
-        assert_initialize!(initialize)
+        assert_initialize!(initialize, package_version)
         client = notify!(client, "notifications/initialized", %{})
 
         {tools, client} = request!(client, 2, "tools/list", %{})
@@ -450,9 +453,29 @@ defmodule ProofMCPValidate do
     """
   end
 
-  defp assert_initialize!(%{"result" => %{"serverInfo" => %{"name" => "codex-loops"}}}), do: :ok
+  defp assert_initialize!(%{"result" => %{"serverInfo" => %{"name" => "codex-loops", "version" => version}}}, version),
+    do: :ok
 
-  defp assert_initialize!(message), do: raise("initialize response was not valid: #{inspect(message)}")
+  defp assert_initialize!(message, _version), do: raise("initialize response was not valid: #{inspect(message)}")
+
+  defp assert_mcp_version!(entrypoint, version) do
+    expected = "codex-loops-mcp #{version}\n"
+
+    case System.cmd(entrypoint, ["--version"], stderr_to_stdout: true) do
+      {^expected, 0} ->
+        :ok
+
+      {output, status} ->
+        raise("MCP --version failed with #{status}: #{inspect(output)}")
+    end
+  end
+
+  defp package_version(repo_root) do
+    repo_root
+    |> Path.join("VERSION")
+    |> File.read!()
+    |> String.trim()
+  end
 
   defp assert_tools_list!(%{"result" => %{"tools" => tools}}) when is_list(tools) do
     names = Enum.map(tools, & &1["name"])

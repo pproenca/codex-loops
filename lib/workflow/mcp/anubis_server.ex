@@ -6,9 +6,10 @@ defmodule Workflow.MCP.AnubisServer do
   HTTP client helpers so the MCP surface stays outside scheduler internals.
   """
 
+  @package_version Workflow.PackageVersion.version()
   use Anubis.Server,
     name: "codex-loops",
-    version: "0.1.0",
+    version: @package_version,
     capabilities: [:tools]
 
   alias Workflow.MCP.AnubisServer.ToolHelpers

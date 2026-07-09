@@ -1,10 +1,12 @@
 defmodule CodexLoops.MixProject do
   use Mix.Project
 
+  @version "VERSION" |> Path.expand(__DIR__) |> File.read!() |> String.trim()
+
   def project do
     [
       app: :codex_loops,
-      version: "0.1.0",
+      version: @version,
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       elixirc_options: [warnings_as_errors: true],

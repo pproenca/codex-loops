@@ -8,6 +8,7 @@ defmodule Workflow.Scheduler do
   """
 
   alias Workflow.Journal
+  alias Workflow.PackageVersion
   alias Workflow.Provider
   alias Workflow.Run
   alias Workflow.Scheduler.Error
@@ -32,7 +33,7 @@ defmodule Workflow.Scheduler do
     }
 
     if Enum.all?(checks, fn {_dependency, status} -> status == :available end) do
-      {:ok, %Health{status: :ok, checks: checks}}
+      {:ok, %Health{status: :ok, version: PackageVersion.version(), checks: checks}}
     else
       {:error, Error.unavailable(checks)}
     end

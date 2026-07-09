@@ -1,0 +1,50 @@
+#!/bin/sh
+set -eu
+
+version="${CODEX_LOOPS_PACKAGE_VERSION:-}"
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+release_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+
+if [ -z "$version" ] && [ -f "$release_root/releases/start_erl.data" ]; then
+  version=$(awk '{print $2}' "$release_root/releases/start_erl.data")
+fi
+
+if [ -z "$version" ]; then
+  probe="$script_dir"
+  while [ "$probe" != "/" ]; do
+    if [ -f "$probe/VERSION" ]; then
+      version=$(tr -d '[:space:]' < "$probe/VERSION")
+      break
+    fi
+
+    probe=$(CDPATH= cd -- "$probe/.." && pwd)
+  done
+fi
+
+if [ -z "$version" ]; then
+  echo "codex-loops: could not determine package version" >&2
+  exit 1
+fi
+
+case "${1:-}" in
+  --version)
+    printf 'codex-loops %s\n' "$version"
+    ;;
+  --help|-h|"")
+    cat <<EOF
+Usage: codex-loops --version
+
+Options:
+  --version   Show the Codex Loops package version.
+  --help      Show this help.
+  -h          Show this help.
+EOF
+    ;;
+  *)
+    echo "Invalid arguments." >&2
+    echo >&2
+    echo "Usage: codex-loops --version" >&2
+    exit 2
+    ;;
+esac

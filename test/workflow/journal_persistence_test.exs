@@ -129,6 +129,37 @@ defmodule Workflow.JournalPersistenceTest do
     assert Journal.latest_run_id() == run_id
   end
 
+  test "events containing workflow-authored atoms survive a fresh BEAM restart" do
+    run_id = "run_fresh_beam_#{System.unique_integer([:positive])}"
+    value = String.to_atom("workflow_value_#{System.unique_integer([:positive])}")
+    event = Event.run_completed(value)
+
+    assert :ok = Journal.register_run(run_id)
+    assert :ok = Journal.append(run_id, 0, %{event | run_id: run_id, seq: 0})
+
+    journal_path = :sys.get_state(Journal).path
+
+    child = """
+    [%Workflow.Event{payload: %{value: value}}] = Workflow.Journal.fold(#{inspect(run_id)})
+    IO.write(inspect(value))
+    """
+
+    mix = System.find_executable("mix") || flunk("mix executable not found")
+
+    {output, status} =
+      System.cmd(mix, ["run", "-e", child],
+        cd: File.cwd!(),
+        env: [
+          {"MIX_ENV", "test"},
+          {"CODEX_LOOPS_JOURNAL_PATH", journal_path}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert status == 0, output
+    assert String.ends_with?(output, inspect(value))
+  end
+
   test "register_run is idempotent and preserves original creation order" do
     first = "run_order_first_#{System.unique_integer([:positive])}"
     second = "run_order_second_#{System.unique_integer([:positive])}"

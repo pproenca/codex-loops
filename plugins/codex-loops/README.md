@@ -121,11 +121,13 @@ make proof-live
 `make proof-mcp` builds the external runtime, copies this source-only plugin to a
 temporary installed root, then exercises MCP initialize, tools/list, lifecycle
 startup, validation, mock start, status polling, event inspection, resume,
-typed scheduler errors, and open-ui.
+typed scheduler errors, open-ui, and the packaged core/dataflow/refine
+conformance workflows through the Codex JSONL provider port.
 `make proof-mcp-live` validates through MCP, starts or reuses the packaged
 scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
 through `workflow_start`, polls `workflow_status`, and asserts nonzero token
-usage in the scheduler projection. It spends one real Codex provider turn.
+usage plus streamed `agent_activity` journaled before agent settlement. It spends
+one real Codex provider turn.
 `make proof-live` is an alias for `make proof-mcp-live`.
 
 ## License

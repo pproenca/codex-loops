@@ -471,11 +471,6 @@ defmodule Workflow.Web.RunLiveTest do
 
   defp list_item_count(rendered), do: ~r/<li(?:\s|>)/ |> Regex.scan(rendered) |> length()
 
-  defp inline_style(rendered) do
-    [_, style] = Regex.run(~r/<style>(?<style>.*?)<\/style>/s, rendered)
-    style
-  end
-
   defp css_rule(css, selector) do
     selector = Regex.escape(selector)
     [_, body] = Regex.run(~r/(?:^|\n)\s*#{selector}\s*\{(?<body>.*?)\}/s, css)
@@ -686,9 +681,19 @@ defmodule Workflow.Web.RunLiveTest do
       |> get("/runs/#{id}")
       |> html_response(200)
 
-    css = inline_style(html)
+    assert html =~ ~s(href="/assets/codex-loops/run.css?v=3")
+
+    css =
+      conn()
+      |> get("/assets/codex-loops/run.css")
+      |> response(200)
 
     assert css =~ ~s(.status-dot)
+    assert css =~ ~s(color-scheme: dark)
+
+    assert css_rule(css, "[data-testid=\"inspector\"]") =~
+             "grid-template-columns: minmax(280px, 360px) minmax(0, 1fr)"
+
     assert html =~ ~s(<span class="status-dot")
     assert html =~ ~s(Status: Completed)
 
@@ -833,6 +838,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert html =~ ~s(<meta name="csrf-token")
     assert html =~ ~s(src="/assets/phoenix/phoenix.js")
     assert html =~ ~s(src="/assets/phoenix_live_view/phoenix_live_view.js")
+    assert html =~ ~s(href="/assets/codex-loops/run.css?v=3")
     assert html =~ ~s(new LiveView.LiveSocket("/live", Phoenix.Socket)
   end
 

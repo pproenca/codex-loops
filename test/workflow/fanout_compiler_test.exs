@@ -164,6 +164,49 @@ defmodule Workflow.FanoutCompilerTest do
   end
 
   describe "fanout (generic repeated lane)" do
+    test "compiles explicit heterogeneous lanes with stable lane and stage addresses" do
+      {:ok, tree} =
+        parse("""
+        fanout width: 2 do
+          lanes([
+            [agent("research")],
+            [agent("draft"), agent("review")]
+          ])
+        end
+        return :ok
+        """)
+
+      assert [
+               %GenericFanout{
+                 address: [0],
+                 width: 2,
+                 repeated: false,
+                 lanes: [
+                   [%Agent{address: [0, 0, 0], prompt: "research"}],
+                   [
+                     %Agent{address: [0, 1, 0], prompt: "draft"},
+                     %Agent{address: [0, 1, 1], prompt: "review"}
+                   ]
+                 ]
+               },
+               %Return{}
+             ] = tree.nodes
+
+      refute contains_function?(tree)
+    end
+
+    test "explicit lanes require a matching literal width" do
+      assert {:error, %Finding{} = finding} =
+               parse("""
+               fanout width: 3 do
+                 lanes([[agent("a")], [agent("b")]])
+               end
+               return :ok
+               """)
+
+      assert finding.message =~ "must equal the explicit lane count"
+    end
+
     test "compiles an integer width into a repeated non-empty agent lane" do
       {:ok, tree} =
         parse("""

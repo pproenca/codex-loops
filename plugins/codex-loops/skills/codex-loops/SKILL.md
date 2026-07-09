@@ -107,15 +107,17 @@ Useful DSL forms:
   and `synthesize`.
 - Compatibility/sugar surfaces: `while_budget`, `until_dry`, and `fan_out`.
 - Deferred and unavailable: `gather` and `map`.
-- Unavailable user-authored surface: explicit heterogeneous `lanes([...])`.
+- Explicit heterogeneous fanout lanes:
+  `fanout width: 2 do lanes([[agent("a")], [agent("b"), agent("c")]]) end`.
 
 Prefer the generic core for new dynamic workflows. Use `loop max_iterations:`
 with either a header `until:` predicate or one body-local `until(predicate)`,
 but not both. Body-local `until` stops at that body point, cannot contain
 `dry(...)`, and can inspect an earlier loop-local `fanout bind:`.
 
-Use `fanout` for a repeated non-empty lane of `agent` turns. Supported widths
-are integer, `budget_slices(per: n, max: m)`, and
+Use `fanout` for a repeated non-empty lane of `agent` turns or an explicit
+non-empty `lanes([...])` list. Explicit lanes require a literal integer width
+equal to the lane count. Repeated-lane widths are integer, `budget_slices(per: n, max: m)`, and
 `path_count(:binding, "/json/pointer", max: m)`. Optional controls are `bind:`,
 `max_concurrency:`, and `on_zero: :complete | :fail`. A `fanout bind:` produces
 an ordered result list for later templates and predicates; lane prompts do not
@@ -202,5 +204,6 @@ journal inspect, resume, scheduler typed errors, and open-ui.
 `make proof-mcp-live` validates through MCP, starts or reuses the packaged
 scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
 through `workflow_start`, polls `workflow_status`, and asserts nonzero token
-usage from the scheduler projection. It spends one real Codex provider turn.
+usage plus streamed activity journaled before agent settlement. It spends one real
+Codex provider turn.
 `make proof-live` aliases `make proof-mcp-live`.

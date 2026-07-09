@@ -545,7 +545,8 @@ defmodule Workflow.Compiler do
   end
 
   # `fanout width: N[, max_concurrency: M][, on_zero: :complete | :fail] do <body> end`
-  # — first generic-core slice: a fixed integer width repeating one agent lane.
+  # accepts either one repeated agent lane or `lanes([[agent(...)], ...])` with a
+  # literal width matching the explicit lane count.
   defp node({:fanout, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:width, :max_concurrency, :bind, :on_zero], form, env),
@@ -553,16 +554,16 @@ defmodule Workflow.Compiler do
          {:ok, cap} <- fanout_concurrency(opts, form, env),
          {:ok, bind} <- fanout_bind(opts, form, env, binding_env),
          {:ok, on_zero} <- fanout_on_zero(opts, form, env),
-         {:ok, lane} <- fanout_body(block, address, form, env, binding_env) do
+         {:ok, lanes, repeated} <- fanout_body(block, width, address, form, env, binding_env) do
       {:ok,
        %GenericFanout{
          address: address,
          width: width,
-         lanes: [lane],
+         lanes: lanes,
          bind: bind,
          max_concurrency: cap,
          on_zero: on_zero,
-         repeated: true
+         repeated: repeated
        }}
     end
   end
@@ -2072,7 +2073,18 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp fanout_body(block, address, form, env, binding_env) do
+  defp fanout_body({:lanes, _meta, [lanes]}, width, address, form, env, binding_env) when is_list(lanes) do
+    with :ok <- explicit_fanout_width(width, length(lanes), form, env),
+         {:ok, lanes} <- explicit_fanout_lanes(lanes, address, form, env, binding_env) do
+      {:ok, lanes, false}
+    end
+  end
+
+  defp fanout_body({:lanes, _meta, _args}, _width, _address, form, env, _binding_env) do
+    {:error, Finding.at(env, form, "`lanes` requires a non-empty literal list of non-empty agent lanes")}
+  end
+
+  defp fanout_body(block, _width, address, form, env, binding_env) do
     case agent_lane(statements(block), address, env, binding_env, "fanout") do
       {:ok, []} ->
         {:error,
@@ -2081,10 +2093,74 @@ defmodule Workflow.Compiler do
          )}
 
       {:ok, agents} ->
-        {:ok, agents}
+        {:ok, [agents], true}
 
       {:error, _} = err ->
         err
+    end
+  end
+
+  defp explicit_fanout_width(width, lane_count, _form, _env)
+       when is_integer(width) and width == lane_count and lane_count > 0, do: :ok
+
+  defp explicit_fanout_width(_width, 0, form, env) do
+    {:error, Finding.at(env, form, "`lanes` requires at least one explicit lane")}
+  end
+
+  defp explicit_fanout_width(_width, _lane_count, form, env) do
+    {:error,
+     Finding.at(env, form, "`fanout width:` must equal the explicit lane count",
+       hint: "explicit lanes require a literal integer width"
+     )}
+  end
+
+  defp explicit_fanout_lanes(lanes, address, form, env, binding_env) do
+    lanes
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn
+      {[], _lane_index}, _acc ->
+        {:halt, {:error, Finding.at(env, form, "explicit fanout lanes must not be empty")}}
+
+      {lane, lane_index}, {:ok, acc} when is_list(lane) ->
+        case explicit_fanout_lane(lane, address, lane_index, env, binding_env) do
+          {:ok, agents} -> {:cont, {:ok, [agents | acc]}}
+          {:error, _finding} = error -> {:halt, error}
+        end
+
+      {_lane, _lane_index}, _acc ->
+        {:halt, {:error, Finding.at(env, form, "`lanes` entries must be non-empty literal lists of agents")}}
+    end)
+    |> case do
+      {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
+      {:error, _finding} = error -> error
+    end
+  end
+
+  defp explicit_fanout_lane(lane, address, lane_index, env, binding_env) do
+    lane
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {stmt, stage_index}, {:ok, acc} ->
+      case node(stmt, address ++ [lane_index, stage_index], env, binding_env) do
+        {:ok, %Agent{prompt: %Template{}}} ->
+          {:halt, {:error, nested_template_prompt_finding(env, stmt, "fanout lanes")}}
+
+        {:ok, %Agent{} = agent} ->
+          {:cont, {:ok, [agent | acc]}}
+
+        {:ok, _other} ->
+          {:halt,
+           {:error,
+            Finding.at(env, stmt, "`fanout` lane steps must be `agent` turns",
+              hint: "each lane step is one agent call, e.g. agent(\"...\")"
+            )}}
+
+        {:error, _finding} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
+      {:error, _finding} = error -> error
     end
   end
 

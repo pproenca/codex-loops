@@ -132,6 +132,7 @@ defmodule ProofMCPLive do
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
       {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
       {~c"CODEX_LOOPS_CODEX_BIN", String.to_charlist(codex_path)},
+      {~c"CODEX_LOOPS_CODEX_MODEL", ~c"gpt-5.5"},
       {~c"CODEX_LOOPS_PARENT_PATH", String.to_charlist(System.get_env("PATH") || "")},
       {~c"PATH", String.to_charlist(System.get_env("PATH") || "")}
     ]
@@ -488,6 +489,22 @@ defmodule ProofMCPLive do
     assert!(data["runId"] == run_id, "workflow_inspect should preserve run id")
 
     event_types = Enum.map(get_in(data, ["rawRefs", "journal"]), & &1["type"])
+
+    activity_positions =
+      event_types
+      |> Enum.with_index()
+      |> Enum.filter(fn {type, _index} -> type == "agent_activity" end)
+      |> Enum.map(&elem(&1, 1))
+
+    committed_position = Enum.find_index(event_types, &(&1 == "agent_committed"))
+
+    assert!(activity_positions != [], "live proof should persist streamed Codex activity")
+
+    assert!(
+      is_integer(committed_position) and Enum.all?(activity_positions, &(&1 < committed_position)),
+      "streamed Codex activity should be journaled before agent settlement"
+    )
+
     assert!("agent_committed" in event_types, "live proof should commit an agent result")
     assert!("run_completed" in event_types, "live proof should complete")
   end

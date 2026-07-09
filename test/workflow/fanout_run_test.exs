@@ -415,6 +415,35 @@ defmodule Workflow.FanoutRunTest do
     end
   end
 
+  defmodule GenericFanoutExplicitLanes do
+    @moduledoc false
+    use Workflow
+
+    workflow "generic-fanout-explicit-lanes" do
+      fanout width: 2 do
+        lanes([
+          [agent("research")],
+          [agent("draft"), agent("review")]
+        ])
+      end
+
+      return(:ok)
+    end
+  end
+
+  test "fanout runs explicit heterogeneous lanes and commits stable addresses in lane order" do
+    id = run_id()
+    assert {:ok, ^id} = Run.run(GenericFanoutExplicitLanes, run_id: id, provider: echo())
+
+    assert_received {:agent_called, "research"}
+    assert_received {:agent_called, "draft"}
+    assert_received {:agent_called, "review"}
+    refute_received {:agent_called, _}
+
+    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [0, 1, 1]]
+    assert Status.of(id).state == :completed
+  end
+
   test "fanout runs a fixed-width repeated lane and commits lane events in input order" do
     id = run_id()
     assert {:ok, ^id} = Run.run(GenericFanout, run_id: id, provider: echo())

@@ -1915,6 +1915,11 @@ defmodule Workflow.Run.Writer do
     for i <- 0..(width - 1)//1, do: rebase_body(lane, node.address ++ [i])
   end
 
+  defp materialize_fanout_branches(%GenericFanout{repeated: false, lanes: lanes}, width) do
+    true = length(lanes) == width
+    lanes
+  end
+
   # --- Budget-scaled fan-out width (a journaled runtime decision) ---
 
   # Decide the width once and journal it; a resume replays the journaled width rather

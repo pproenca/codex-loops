@@ -29,6 +29,12 @@ defmodule Workflow.Web.Endpoint do
     only: ~w(phoenix_live_view.js)
   )
 
+  plug(Plug.Static,
+    at: "/assets/codex-loops",
+    from: {:codex_loops, "priv/static"},
+    only: ~w(run.css)
+  )
+
   plug(Plug.Session, @session_options)
   plug(Workflow.Web.Router)
 end

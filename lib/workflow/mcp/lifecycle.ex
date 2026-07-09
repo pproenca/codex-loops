@@ -190,6 +190,7 @@ defmodule Workflow.MCP.Lifecycle do
       ]
       |> maybe_put_env("CODEX_LOOPS_JOURNAL_PATH")
       |> maybe_put_env("CODEX_LOOPS_CODEX_BIN")
+      |> maybe_put_env("CODEX_LOOPS_CODEX_MODEL")
       |> put_path_env()
 
     port =

@@ -127,6 +127,7 @@ User-facing and proof-facing variables:
 | `CODEX_LOOPS_SCHEDULER_REQUEST_TIMEOUT_MS` | MCP client | Existing HTTP timeout control. |
 | `CODEX_LOOPS_JOURNAL_PATH` | scheduler | Existing journal path override. |
 | `CODEX_LOOPS_CODEX_BIN` | scheduler provider | Existing Codex CLI override for live provider turns. |
+| `CODEX_LOOPS_CODEX_MODEL` | scheduler provider | Optional model override for live provider turns. |
 | `CODEX_LOOPS_PARENT_PATH` | MCP lifecycle | Existing original PATH passed through to the scheduler/provider environment. |
 
 Internal and development variables:

@@ -121,17 +121,20 @@ Useful forms:
   and `synthesize`.
 - Compatibility/sugar surfaces: `while_budget`, `until_dry`, and `fan_out`.
 - Deferred and unavailable: `gather` and `map`.
-- Unavailable user-authored surface: explicit heterogeneous `lanes([...])`.
+- Explicit heterogeneous fanout lanes:
+  `fanout width: 2 do lanes([[agent("a")], [agent("b"), agent("c")]]) end`.
 
 The plugin authoring surface includes the implemented generic core from root
-`SPEC.md`: bounded `loop`, repeated-lane `fanout`, and the closed predicate
+`SPEC.md`: bounded `loop`, repeated or explicit-lane `fanout`, and the closed predicate
 vocabulary. `loop max_iterations:` requires a positive integer and supports a
 header `until:` predicate or one body-local `until(predicate)`, but not both.
 Body-local `until` cannot contain `dry(...)`, stops the loop at that body point,
 and may use an earlier loop-local `fanout bind:`.
 
-Generic `fanout` repeats one non-empty lane of `agent` turns. Its `width:` is an
-integer, `budget_slices(per: n, max: m)`, or
+Generic `fanout` repeats one non-empty lane of `agent` turns or accepts a
+non-empty explicit `lanes([...])` list. Explicit lanes require a literal integer
+width equal to the lane count. A repeated lane's `width:` is an integer,
+`budget_slices(per: n, max: m)`, or
 `path_count(:binding, "/json/pointer", max: m)`. It supports optional `bind:`,
 `max_concurrency:`, and `on_zero: :complete | :fail`. A `fanout bind:` produces
 the ordered lane result list for later templates and predicates; it does not

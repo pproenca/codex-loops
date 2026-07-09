@@ -429,9 +429,9 @@ end
 
 defmodule Workflow.Node.GenericFanout do
   @moduledoc """
-  Generic core fanout over inert agent lanes. This first runtime slice supports a
-  fixed integer width with one repeated lane: the compiler stores that lane once
-  and the writer rebases it to `parent ++ [branch, stage]` for each branch.
+  Generic core fanout over inert agent lanes. A repeated fanout stores one lane and
+  rebases it to `parent ++ [branch, stage]`; an explicit fanout stores each
+  heterogeneous lane at its final stable address.
 
   The struct is named `GenericFanout` to coexist with the legacy `%FanOut{}` node
   on case-insensitive filesystems; the DSL and journal surface remain `fanout` and

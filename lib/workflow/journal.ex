@@ -21,11 +21,20 @@ defmodule Workflow.Journal do
   of its own. Provider activity is persisted by
   `Workflow.Run.ActivityPersistenceSubscriber`, keeping realtime output off the
   writer's critical path.
+
+  The ETF blob is an internal, user-owned persistence format, not an import format.
+  Workflow-authored literal atoms must be recreated after an OS restart, so decoding
+  cannot use OTP's `:safe` option (which rejects atoms not already interned in the
+  fresh VM). Decoding is therefore bounded and validates that the value is an event
+  containing data only; callers must not point `CODEX_LOOPS_JOURNAL_PATH` at an
+  untrusted database.
   """
   use GenServer
 
   alias Exqlite.Sqlite3
   alias Workflow.Event
+
+  @max_event_blob_bytes 64 * 1024 * 1024
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
@@ -118,12 +127,11 @@ defmodule Workflow.Journal do
     {:reply, {:ok, event}, state}
   end
 
-  # sobelow_skip ["Misc.BinToTerm"]
   def handle_call({:fold, run_id}, _from, %{db: db} = state) do
     events =
       db
       |> query("SELECT event_blob FROM events WHERE run_id = ? ORDER BY seq ASC", [run_id])
-      |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob, [:safe]) end)
+      |> Enum.map(fn [blob] -> decode_event(blob) end)
 
     {:reply, events, state}
   end
@@ -200,7 +208,6 @@ defmodule Workflow.Journal do
     ])
   end
 
-  # sobelow_skip ["Misc.BinToTerm"]
   defp idempotent_activity_event(db, run_id, %Event{
          type: :agent_activity,
          payload: %{address: address, iteration: iteration, attempt: attempt, activity_index: index}
@@ -211,7 +218,7 @@ defmodule Workflow.Journal do
       run_id,
       "agent_activity"
     ])
-    |> Enum.map(fn [blob] -> :erlang.binary_to_term(blob, [:safe]) end)
+    |> Enum.map(fn [blob] -> decode_event(blob) end)
     |> Enum.find(fn %Event{payload: payload} ->
       payload.address == address and payload.iteration == iteration and
         payload.attempt == attempt and Map.get(payload, :activity_index) == index
@@ -219,6 +226,35 @@ defmodule Workflow.Journal do
   end
 
   defp idempotent_activity_event(_db, _run_id, _event), do: nil
+
+  # sobelow_skip ["Misc.BinToTerm"]
+  defp decode_event(blob) when is_binary(blob) and byte_size(blob) <= @max_event_blob_bytes do
+    case :erlang.binary_to_term(blob) do
+      %Event{} = event ->
+        if data_only?(event) do
+          event
+        else
+          raise ArgumentError, "journal event contains a runtime-only term"
+        end
+
+      _other ->
+        raise ArgumentError, "journal blob is not a Workflow.Event"
+    end
+  end
+
+  defp decode_event(blob) when is_binary(blob) do
+    raise ArgumentError, "journal event exceeds #{@max_event_blob_bytes} bytes"
+  end
+
+  defp data_only?(term) when is_function(term) or is_pid(term) or is_port(term) or is_reference(term), do: false
+  defp data_only?(%_{} = struct), do: struct |> Map.from_struct() |> data_only?()
+
+  defp data_only?(term) when is_map(term),
+    do: Enum.all?(term, fn {key, value} -> data_only?(key) and data_only?(value) end)
+
+  defp data_only?(term) when is_list(term), do: Enum.all?(term, &data_only?/1)
+  defp data_only?(term) when is_tuple(term), do: term |> Tuple.to_list() |> Enum.all?(&data_only?/1)
+  defp data_only?(_term), do: true
 
   defp last_seq(db, run_id) do
     case query(db, "SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1", [run_id]) do

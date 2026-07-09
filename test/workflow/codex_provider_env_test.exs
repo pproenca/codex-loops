@@ -8,6 +8,7 @@ defmodule Workflow.CodexProviderEnvTest do
   alias Workflow.Status
 
   @codex_bin_env "CODEX_LOOPS_CODEX_BIN"
+  @codex_model_env "CODEX_LOOPS_CODEX_MODEL"
 
   defmodule EchoWorkflow do
     @moduledoc false
@@ -22,10 +23,12 @@ defmodule Workflow.CodexProviderEnvTest do
   setup do
     previous_path = System.get_env("PATH")
     previous_codex_bin = System.get_env(@codex_bin_env)
+    previous_codex_model = System.get_env(@codex_model_env)
 
     on_exit(fn ->
       restore_env("PATH", previous_path)
       restore_env(@codex_bin_env, previous_codex_bin)
+      restore_env(@codex_model_env, previous_codex_model)
     end)
 
     :ok
@@ -41,6 +44,22 @@ defmodule Workflow.CodexProviderEnvTest do
               "--json",
               "--dangerously-bypass-approvals-and-sandbox",
               "--skip-git-repo-check"
+            ]} = Codex.default_command()
+  end
+
+  test "CODEX_LOOPS_CODEX_MODEL overrides an incompatible user-configured model" do
+    bin = executable_stub("codex-model")
+    System.put_env(@codex_bin_env, bin)
+    System.put_env(@codex_model_env, "gpt-5.5")
+
+    assert {^bin,
+            [
+              "exec",
+              "--json",
+              "--dangerously-bypass-approvals-and-sandbox",
+              "--skip-git-repo-check",
+              "--model",
+              "gpt-5.5"
             ]} = Codex.default_command()
   end
 

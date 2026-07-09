@@ -5,6 +5,25 @@ defmodule ProofMCPValidate do
   @poll_attempts 100
   @poll_interval_ms 100
   @rpc_timeout_ms 15_000
+  @conformance_workflows [
+    %{
+      file: "conformance_core.exs",
+      name: "conformance-core",
+      events:
+        ~w(parallel_started pipeline_started verify_started judge_started loop_decision accumulate fanout_started fan_out_started run_completed)
+    },
+    %{
+      file: "conformance_dataflow.exs",
+      name: "conformance-dataflow",
+      events: ~w(agent_activity fanout_started fanout_completed run_completed)
+    },
+    %{
+      file: "conformance_refine.exs",
+      name: "conformance-refine",
+      events:
+        ~w(refine_started refine_round_started refine_round_decision refine_gate_evaluated refine_completed run_completed)
+    }
+  ]
 
   def run do
     repo_root = Path.expand("..", __DIR__)
@@ -20,6 +39,7 @@ defmodule ProofMCPValidate do
     entrypoint = Path.join(installed_plugin_root, "mcp/codex-loops-mcp")
     runtime_root = Path.join(repo_root, "_build/homebrew/libexec")
     packaged_scheduler = Path.join(runtime_root, "scheduler/bin/agent_loops")
+    codex_stub = Path.join(repo_root, "scripts/support/codex-conformance-stub.py")
     package_version = package_version(repo_root)
 
     assert!(
@@ -31,6 +51,8 @@ defmodule ProofMCPValidate do
       executable_file?(packaged_scheduler),
       "staged Homebrew runtime should include scheduler release"
     )
+
+    assert!(executable_file?(codex_stub), "Codex conformance stub should be executable")
 
     assert_missing_runtime!(entrypoint, temp_root)
     assert_version_mismatch!(entrypoint, temp_root, package_version)
@@ -51,119 +73,127 @@ defmodule ProofMCPValidate do
       File.write!(running_workflow_path, running_workflow_source())
       File.write!(invalid_workflow_path, invalid_workflow_source())
 
-      with_mcp_client(temp_root, entrypoint, repo_root, mcp_env(port, journal_path, runtime_root), fn client ->
-        {initialize, client} =
-          request!(client, 1, "initialize", %{
-            "protocolVersion" => "2024-11-05",
-            "capabilities" => %{},
-            "clientInfo" => %{"name" => "proof-mcp-validate", "version" => "0.0.0"}
-          })
+      with_mcp_client(
+        temp_root,
+        entrypoint,
+        repo_root,
+        mcp_env(port, journal_path, runtime_root, codex_stub),
+        fn client ->
+          {initialize, client} =
+            request!(client, 1, "initialize", %{
+              "protocolVersion" => "2024-11-05",
+              "capabilities" => %{},
+              "clientInfo" => %{"name" => "proof-mcp-validate", "version" => "0.0.0"}
+            })
 
-        assert_initialize!(initialize, package_version)
-        client = notify!(client, "notifications/initialized", %{})
+          assert_initialize!(initialize, package_version)
+          client = notify!(client, "notifications/initialized", %{})
 
-        {tools, client} = request!(client, 2, "tools/list", %{})
-        assert_tools_list!(tools)
+          {tools, client} = request!(client, 2, "tools/list", %{})
+          assert_tools_list!(tools)
 
-        {validation, client} =
-          call_tool!(client, 3, "workflow_validate", %{"script_path" => workflow_path})
+          {validation, client} =
+            call_tool!(client, 3, "workflow_validate", %{"script_path" => workflow_path})
 
-        assert_successful_validation!(validation, workflow_path)
+          assert_successful_validation!(validation, workflow_path)
 
-        {missing_validation, client} =
-          call_tool!(client, 4, "workflow_validate", %{"script_path" => missing_path})
+          {missing_validation, client} =
+            call_tool!(client, 4, "workflow_validate", %{"script_path" => missing_path})
 
-        assert_missing_script_validation!(missing_validation, missing_path)
+          assert_missing_script_validation!(missing_validation, missing_path)
 
-        {running_start, client} =
-          call_tool!(client, 5, "workflow_start", %{
-            "script_path" => running_workflow_path,
-            "run_id" => running_run_id,
-            "provider" => "mock",
-            "budget" => 0
-          })
+          {running_start, client} =
+            call_tool!(client, 5, "workflow_start", %{
+              "script_path" => running_workflow_path,
+              "run_id" => running_run_id,
+              "provider" => "mock",
+              "budget" => 0
+            })
 
-        assert_started_run!(running_start, running_run_id)
+          assert_started_run!(running_start, running_run_id)
 
-        {already_running, client} =
-          call_tool!(client, 6, "workflow_resume", %{
-            "run_id" => running_run_id,
-            "provider" => "mock"
-          })
+          {already_running, client} =
+            call_tool!(client, 6, "workflow_resume", %{
+              "run_id" => running_run_id,
+              "provider" => "mock"
+            })
 
-        assert_already_running_resume!(already_running, running_run_id)
-        {client, _running_status_payload} = poll_terminal_status!(client, running_run_id, 7)
+          assert_already_running_resume!(already_running, running_run_id)
+          {client, _running_status_payload} = poll_terminal_status!(client, running_run_id, 7)
 
-        {start, client} =
-          call_tool!(client, 150, "workflow_start", %{
-            "script_path" => workflow_path,
-            "run_id" => run_id,
-            "provider" => "mock",
-            "budget" => 0
-          })
+          {start, client} =
+            call_tool!(client, 150, "workflow_start", %{
+              "script_path" => workflow_path,
+              "run_id" => run_id,
+              "provider" => "mock",
+              "budget" => 0
+            })
 
-        assert_started_run!(start, run_id)
+          assert_started_run!(start, run_id)
 
-        {client, status_payload} = poll_completed_status!(client, run_id, 151)
-        assert_completed_status!(status_payload, run_id)
+          {client, status_payload} = poll_completed_status!(client, run_id, 151)
+          assert_completed_status!(status_payload, run_id)
 
-        {inspect, client} = call_tool!(client, 250, "workflow_inspect", %{"run_id" => run_id})
-        assert_inspected_events!(inspect, run_id)
+          {inspect, client} = call_tool!(client, 250, "workflow_inspect", %{"run_id" => run_id})
+          assert_inspected_events!(inspect, run_id)
 
-        {resume, client} =
-          call_tool!(client, 251, "workflow_resume", %{
-            "run_id" => run_id,
-            "provider" => "mock"
-          })
+          {resume, client} =
+            call_tool!(client, 251, "workflow_resume", %{
+              "run_id" => run_id,
+              "provider" => "mock"
+            })
 
-        assert_resumed_run!(resume, run_id)
+          assert_resumed_run!(resume, run_id)
 
-        {client, resumed_status_payload} = poll_completed_status!(client, run_id, 252)
-        assert_completed_status!(resumed_status_payload, run_id)
+          {client, resumed_status_payload} = poll_completed_status!(client, run_id, 252)
+          assert_completed_status!(resumed_status_payload, run_id)
 
-        {inspect_after_resume, client} =
-          call_tool!(client, 350, "workflow_inspect", %{"run_id" => run_id})
+          {inspect_after_resume, client} =
+            call_tool!(client, 350, "workflow_inspect", %{"run_id" => run_id})
 
-        assert_inspected_events!(inspect_after_resume, run_id)
+          assert_inspected_events!(inspect_after_resume, run_id)
 
-        {unknown_inspect, client} =
-          call_tool!(client, 351, "workflow_inspect", %{"run_id" => unknown_run_id})
+          {unknown_inspect, client} =
+            call_tool!(client, 351, "workflow_inspect", %{"run_id" => unknown_run_id})
 
-        assert_unknown_run_error!(unknown_inspect, "workflow_inspect", unknown_run_id)
+          assert_unknown_run_error!(unknown_inspect, "workflow_inspect", unknown_run_id)
 
-        {unknown_resume, client} =
-          call_tool!(client, 352, "workflow_resume", %{
-            "run_id" => unknown_run_id,
-            "provider" => "mock"
-          })
+          {unknown_resume, client} =
+            call_tool!(client, 352, "workflow_resume", %{
+              "run_id" => unknown_run_id,
+              "provider" => "mock"
+            })
 
-        assert_unknown_run_error!(unknown_resume, "workflow_resume", unknown_run_id)
+          assert_unknown_run_error!(unknown_resume, "workflow_resume", unknown_run_id)
 
-        {missing_resume, client} =
-          call_tool!(client, 353, "workflow_resume", %{
-            "run_id" => run_id,
-            "script_path" => missing_path,
-            "provider" => "mock"
-          })
+          {missing_resume, client} =
+            call_tool!(client, 353, "workflow_resume", %{
+              "run_id" => run_id,
+              "script_path" => missing_path,
+              "provider" => "mock"
+            })
 
-        assert_missing_script_resume!(missing_resume, missing_path)
+          assert_missing_script_resume!(missing_resume, missing_path)
 
-        {validation_resume, client} =
-          call_tool!(client, 354, "workflow_resume", %{
-            "run_id" => run_id,
-            "script_path" => invalid_workflow_path,
-            "provider" => "mock"
-          })
+          {validation_resume, client} =
+            call_tool!(client, 354, "workflow_resume", %{
+              "run_id" => run_id,
+              "script_path" => invalid_workflow_path,
+              "provider" => "mock"
+            })
 
-        assert_validation_failure_resume!(validation_resume)
+          assert_validation_failure_resume!(validation_resume)
 
-        {open_ui, client} = call_tool!(client, 450, "workflow_open_ui", %{"run_id" => run_id})
-        assert_open_ui!(open_ui, run_id, scheduler_url)
+          {open_ui, client} = call_tool!(client, 450, "workflow_open_ui", %{"run_id" => run_id})
+          assert_open_ui!(open_ui, run_id, scheduler_url)
 
-        client
-        |> close_input!()
-        |> await_port_exit!()
-      end)
+          client = prove_conformance_workflows!(client, repo_root)
+
+          client
+          |> close_input!()
+          |> await_port_exit!()
+        end
+      )
 
       assert_scheduler_stopped!(scheduler_url)
       IO.puts("MCP validate/start/status/inspect/resume/open-ui proof passed on #{scheduler_url}")
@@ -186,15 +216,49 @@ defmodule ProofMCPValidate do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path, runtime_root) do
+  defp mcp_env(port, journal_path, runtime_root, codex_stub) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
       {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
       {~c"CODEX_LOOPS_RUNTIME_ROOT", String.to_charlist(runtime_root)},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
-      {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)}
+      {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
+      {~c"CODEX_LOOPS_CODEX_BIN", String.to_charlist(codex_stub)}
     ]
+  end
+
+  defp prove_conformance_workflows!(client, repo_root) do
+    @conformance_workflows
+    |> Enum.with_index()
+    |> Enum.reduce(client, fn {workflow, index}, client ->
+      request_base = 500 + index * 300
+      path = Path.join([repo_root, ".codex", "workflows", workflow.file])
+      run_id = "mcp:#{workflow.name}_#{System.unique_integer([:positive])}"
+
+      {validation, client} =
+        call_tool!(client, request_base, "workflow_validate", %{"script_path" => path})
+
+      assert_successful_validation!(validation, path, workflow.name)
+
+      {start, client} =
+        call_tool!(client, request_base + 1, "workflow_start", %{
+          "script_path" => path,
+          "run_id" => run_id,
+          "provider" => "codex",
+          "budget" => 10_000
+        })
+
+      assert_started_run!(start, run_id)
+      {client, status} = poll_completed_status!(client, run_id, request_base + 2)
+      assert_conformance_status!(status, run_id, workflow.name)
+
+      {inspection, client} =
+        call_tool!(client, request_base + 200, "workflow_inspect", %{"run_id" => run_id})
+
+      assert_conformance_events!(inspection, run_id, workflow.events)
+      client
+    end)
   end
 
   defp with_mcp_client(temp_root, entrypoint, repo_root, env, fun) do
@@ -571,7 +635,7 @@ defmodule ProofMCPValidate do
 
   defp assert_tools_list!(message), do: raise("tools/list response was not valid: #{inspect(message)}")
 
-  defp assert_successful_validation!(response, workflow_path) do
+  defp assert_successful_validation!(response, workflow_path, workflow_name \\ "mcp-lifecycle-proof") do
     payload = successful_tool_payload!(response, "workflow_validate")
 
     assert!(
@@ -582,11 +646,34 @@ defmodule ProofMCPValidate do
     assert!(payload["data"]["valid"] == true, "valid workflow should be valid")
 
     assert!(
-      payload["data"]["workflow_name"] == "mcp-lifecycle-proof",
+      payload["data"]["workflow_name"] == workflow_name,
       "workflow name should be preserved"
     )
 
     assert!(payload["data"]["script"]["path"] == workflow_path, "script path should be preserved")
+  end
+
+  defp assert_conformance_status!(payload, run_id, workflow_name) do
+    data = payload["data"]
+
+    assert!(payload["api_version"] == "scheduler.v1", "conformance status should use scheduler envelope")
+    assert!(data["runId"] == run_id, "conformance status should preserve run id")
+    assert!(data["treeName"] == workflow_name, "conformance workflow name should be projected")
+    assert!(data["state"] == "completed", "conformance workflow should complete")
+    assert!(data["failure"] == nil, "conformance workflow should not fail")
+    assert!(data["usage"]["totalTokens"] > 0, "conformance workflow should traverse the Codex provider port")
+  end
+
+  defp assert_conformance_events!(response, run_id, expected_types) do
+    payload = successful_tool_payload!(response, "workflow_inspect")
+    data = payload["data"]
+    event_types = Enum.map(get_in(data, ["rawRefs", "journal"]), & &1["type"])
+
+    assert!(data["runId"] == run_id, "conformance inspect should preserve run id")
+
+    for type <- expected_types do
+      assert!(type in event_types, "conformance journal should include #{type}")
+    end
   end
 
   defp assert_missing_script_validation!(response, missing_path) do

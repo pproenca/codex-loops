@@ -24,8 +24,13 @@ require_tracked() {
 require_file plugins/codex-loops/.codex-plugin/plugin.json
 require_file plugins/codex-loops/.mcp.json
 require_file plugins/codex-loops/THIRD_PARTY_NOTICES.md
+require_file plugins/codex-loops/scheduler/releases/0.1.0/runtime.exs
 require_executable plugins/codex-loops/mcp/codex-loops-mcp
 require_executable plugins/codex-loops/scheduler/bin/agent_loops
+
+if ! grep -Fq 'host = System.get_env("CODEX_LOOPS_HOST", "127.0.0.1")' plugins/codex-loops/scheduler/releases/0.1.0/runtime.exs; then
+  fail "bundled scheduler runtime must default CODEX_LOOPS_HOST to 127.0.0.1"
+fi
 
 if head -c 2 plugins/codex-loops/mcp/codex-loops-mcp | grep -q '#!'; then
   fail "MCP entrypoint is still a shell wrapper; run make release-mcp to install the Burrito executable"
@@ -60,6 +65,7 @@ release_files="$(find plugins/codex-loops/scheduler/releases -type f | wc -l | t
 require_tracked plugins/codex-loops/.codex-plugin/plugin.json
 require_tracked plugins/codex-loops/.mcp.json
 require_tracked plugins/codex-loops/THIRD_PARTY_NOTICES.md
+require_tracked plugins/codex-loops/scheduler/releases/0.1.0/runtime.exs
 require_tracked plugins/codex-loops/mcp/codex-loops-mcp
 require_tracked plugins/codex-loops/scheduler/bin/agent_loops
 

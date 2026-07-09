@@ -9,17 +9,20 @@ defmodule ProofMCPValidate do
     %{
       file: "conformance_core.exs",
       name: "conformance-core",
+      result: :ok,
       events:
         ~w(parallel_started pipeline_started verify_started judge_started loop_decision accumulate fanout_started fan_out_started run_completed)
     },
     %{
       file: "conformance_dataflow.exs",
       name: "conformance-dataflow",
+      result: :dataflow,
       events: ~w(agent_activity fanout_started fanout_completed run_completed)
     },
     %{
       file: "conformance_refine.exs",
       name: "conformance-refine",
+      result: :refine,
       events:
         ~w(refine_started refine_round_started refine_round_decision refine_gate_evaluated refine_completed run_completed)
     }
@@ -251,7 +254,7 @@ defmodule ProofMCPValidate do
 
       assert_started_run!(start, run_id)
       {client, status} = poll_completed_status!(client, run_id, request_base + 2)
-      assert_conformance_status!(status, run_id, workflow.name)
+      assert_conformance_status!(status, run_id, workflow.name, workflow.result)
 
       {inspection, client} =
         call_tool!(client, request_base + 200, "workflow_inspect", %{"run_id" => run_id})
@@ -653,7 +656,7 @@ defmodule ProofMCPValidate do
     assert!(payload["data"]["script"]["path"] == workflow_path, "script path should be preserved")
   end
 
-  defp assert_conformance_status!(payload, run_id, workflow_name) do
+  defp assert_conformance_status!(payload, run_id, workflow_name, result_shape) do
     data = payload["data"]
 
     assert!(payload["api_version"] == "scheduler.v1", "conformance status should use scheduler envelope")
@@ -662,6 +665,22 @@ defmodule ProofMCPValidate do
     assert!(data["state"] == "completed", "conformance workflow should complete")
     assert!(data["failure"] == nil, "conformance workflow should not fail")
     assert!(data["usage"]["totalTokens"] > 0, "conformance workflow should traverse the Codex provider port")
+    assert_conformance_result!(data["result"], result_shape)
+  end
+
+  defp assert_conformance_result!("ok", :ok), do: :ok
+
+  defp assert_conformance_result!(result, :dataflow) when is_binary(result) do
+    assert!(
+      result == "Rows=2 Work=2 First=conformance-ok Summary=CONFORMANCE-OK",
+      "dataflow conformance should preserve bindings and terminal rendering"
+    )
+  end
+
+  defp assert_conformance_result!(%{"artifact" => "CONFORMANCE-OK", "converged" => true}, :refine), do: :ok
+
+  defp assert_conformance_result!(result, shape) do
+    raise("unexpected #{shape} conformance result: #{inspect(result)}")
   end
 
   defp assert_conformance_events!(response, run_id, expected_types) do

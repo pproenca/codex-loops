@@ -2137,31 +2137,13 @@ defmodule Workflow.Compiler do
   end
 
   defp explicit_fanout_lane(lane, address, lane_index, env, binding_env) do
-    lane
-    |> Enum.with_index()
-    |> Enum.reduce_while({:ok, []}, fn {stmt, stage_index}, {:ok, acc} ->
-      case node(stmt, address ++ [lane_index, stage_index], env, binding_env) do
-        {:ok, %Agent{prompt: %Template{}}} ->
-          {:halt, {:error, nested_template_prompt_finding(env, stmt, "fanout lanes")}}
-
-        {:ok, %Agent{} = agent} ->
-          {:cont, {:ok, [agent | acc]}}
-
-        {:ok, _other} ->
-          {:halt,
-           {:error,
-            Finding.at(env, stmt, "`fanout` lane steps must be `agent` turns",
-              hint: "each lane step is one agent call, e.g. agent(\"...\")"
-            )}}
-
-        {:error, _finding} = error ->
-          {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, parsed} -> {:ok, Enum.reverse(parsed)}
-      {:error, _finding} = error -> error
-    end
+    parse_agent_lane(
+      lane,
+      fn stage_index -> address ++ [lane_index, stage_index] end,
+      env,
+      binding_env,
+      "fanout lane"
+    )
   end
 
   # `width:` accepts only `budget_slices(per: N)` — the runtime-owned width helper —
@@ -2215,9 +2197,14 @@ defmodule Workflow.Compiler do
   # Reuses `node/3`, so a closure/external call still raises via the forbidden-form
   # catalog and any malformed agent surfaces its own located finding.
   defp agent_lane(stmts, address, env, binding_env, combinator) do
+    parse_agent_lane(stmts, fn _stage_index -> address end, env, binding_env, combinator)
+  end
+
+  defp parse_agent_lane(stmts, address_for, env, binding_env, combinator) do
     stmts
-    |> Enum.reduce_while({:ok, []}, fn stmt, {:ok, acc} ->
-      case node(stmt, address, env, binding_env) do
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {stmt, stage_index}, {:ok, acc} ->
+      case node(stmt, address_for.(stage_index), env, binding_env) do
         {:ok, %Agent{prompt: %Template{}}} ->
           {:halt, {:error, nested_template_prompt_finding(env, stmt, "#{combinator} body")}}
 

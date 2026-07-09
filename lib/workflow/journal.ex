@@ -25,9 +25,9 @@ defmodule Workflow.Journal do
   The ETF blob is an internal, user-owned persistence format, not an import format.
   Workflow-authored literal atoms must be recreated after an OS restart, so decoding
   cannot use OTP's `:safe` option (which rejects atoms not already interned in the
-  fresh VM). Decoding is therefore bounded and validates that the value is an event
-  containing data only; callers must not point `CODEX_LOOPS_JOURNAL_PATH` at an
-  untrusted database.
+  fresh VM). The reader rejects oversized blobs before decoding and runtime-only
+  terms after decoding, but ETF allocation and atom creation happen first; callers
+  must not point `CODEX_LOOPS_JOURNAL_PATH` at an untrusted database.
   """
   use GenServer
 

@@ -7,6 +7,129 @@ defmodule Workflow.CLITest do
   @version PackageVersion.version()
   @marketplace_source "pproenca/codex-loops"
 
+  describe "run" do
+    @tag :tmp_dir
+    test "validates and starts a live workflow with generated defaults, then opens its UI", %{tmp_dir: tmp_dir} do
+      script = Path.join(tmp_dir, "answer.exs")
+      File.write!(script, "workflow fixture")
+
+      responses = [
+        %{
+          "api_version" => "scheduler.v1",
+          "data" => %{"status" => "ok", "version" => @version}
+        },
+        %{
+          "api_version" => "scheduler.v1",
+          "data" => %{
+            "valid" => true,
+            "workflow_name" => "answer",
+            "script" => %{"path" => script}
+          }
+        },
+        %{
+          "api_version" => "scheduler.v1",
+          "data" => %{"run_id" => "answer-test-run", "state" => "accepted"}
+        }
+      ]
+
+      server_url = serve_http(responses)
+      parent = self()
+
+      assert {:ok, result} =
+               CLI.run(["run", script, "--open", "--server", server_url],
+                 run_id: fn _script -> "answer-test-run" end,
+                 open_url: fn url ->
+                   send(parent, {:opened, url})
+                   :ok
+                 end
+               )
+
+      assert result.command == :run
+      assert result.provider == "codex"
+      assert result.run_id == "answer-test-run"
+      assert result.ui_url == server_url <> "/runs/answer-test-run"
+      assert result.opened == true
+      assert_received {:opened, url}
+      assert url == result.ui_url
+
+      assert_receive {:http_request, health_request}
+      assert health_request =~ "GET /api/health "
+
+      assert_receive {:http_request, validate_request}
+      assert validate_request =~ "POST /api/workflows/validate "
+      assert validate_request =~ Jason.encode!(%{"script_path" => script})
+
+      assert_receive {:http_request, start_request}
+      assert start_request =~ "POST /api/runs "
+      assert start_request =~ ~s("provider":"codex")
+      assert start_request =~ ~s("run_id":"answer-test-run")
+      assert start_request =~ Jason.encode!(script)
+    end
+  end
+
+  describe "serve" do
+    @tag :tmp_dir
+    test "starts the packaged scheduler as a managed local daemon with defaults", %{tmp_dir: tmp_dir} do
+      parent = self()
+      scheduler_bin = Path.join(tmp_dir, "agent_loops")
+      File.write!(scheduler_bin, "#!/bin/sh\nexit 0\n")
+      File.chmod!(scheduler_bin, 0o755)
+      {:ok, health} = Agent.start_link(fn -> [:down, :ok] end)
+
+      command = fn executable, args, opts ->
+        send(parent, {:scheduler_command, executable, args, opts})
+        {"", 0}
+      end
+
+      assert {:ok, result} =
+               CLI.run(["serve"],
+                 scheduler_bin: scheduler_bin,
+                 command: command,
+                 health: fn -> Agent.get_and_update(health, fn [next | rest] -> {next, rest} end) end,
+                 announce: fn _server -> :ok end
+               )
+
+      assert result.command == :serve
+      assert result.state == :running
+      assert result.server_url == "http://127.0.0.1:47125"
+
+      assert_received {:scheduler_command, ^scheduler_bin, ["daemon"], command_opts}
+      assert {"CODEX_LOOPS_SERVER", "1"} in command_opts[:env]
+      assert {"CODEX_LOOPS_HOST", "127.0.0.1"} in command_opts[:env]
+      assert {"CODEX_LOOPS_PORT", "47125"} in command_opts[:env]
+      assert {"PORT", "47125"} in command_opts[:env]
+      assert {"RELEASE_DISTRIBUTION", "sname"} in command_opts[:env]
+      assert {"RELEASE_NODE", "codex_loops"} in command_opts[:env]
+    end
+
+    @tag :tmp_dir
+    test "stop shuts down the managed local scheduler", %{tmp_dir: tmp_dir} do
+      parent = self()
+      scheduler_bin = Path.join(tmp_dir, "agent_loops")
+      File.write!(scheduler_bin, "#!/bin/sh\nexit 0\n")
+      File.chmod!(scheduler_bin, 0o755)
+      {:ok, health} = Agent.start_link(fn -> [:ok, :down] end)
+
+      command = fn executable, args, opts ->
+        send(parent, {:scheduler_command, executable, args, opts})
+        {"", 0}
+      end
+
+      assert {:ok, result} =
+               CLI.run(["stop"],
+                 scheduler_bin: scheduler_bin,
+                 command: command,
+                 health: fn -> Agent.get_and_update(health, fn [next | rest] -> {next, rest} end) end
+               )
+
+      assert result.command == :stop
+      assert result.state == :stopped
+      assert_received {:scheduler_command, ^scheduler_bin, ["stop"], command_opts}
+      assert {"RELEASE_DISTRIBUTION", "sname"} in command_opts[:env]
+      assert {"RELEASE_NODE", "codex_loops"} in command_opts[:env]
+    end
+  end
+
   test "install --check succeeds when runtime, marketplace, and plugin match" do
     runtime_root = runtime_fixture()
 
@@ -235,5 +358,69 @@ defmodule Workflow.CLITest do
     File.chmod!(mcp, 0o755)
     on_exit(fn -> File.rm_rf(root) end)
     root
+  end
+
+  defp serve_http(responses) do
+    parent = self()
+
+    {:ok, listen_socket} =
+      :gen_tcp.listen(0, [
+        :binary,
+        packet: :raw,
+        active: false,
+        reuseaddr: true,
+        ip: {127, 0, 0, 1}
+      ])
+
+    {:ok, port} = :inet.port(listen_socket)
+
+    spawn_link(fn ->
+      Enum.each(responses, fn response ->
+        {:ok, socket} = :gen_tcp.accept(listen_socket, 1_000)
+        request = receive_http_request(socket, "")
+        send(parent, {:http_request, request})
+
+        body = Jason.encode!(response)
+
+        :ok =
+          :gen_tcp.send(socket, [
+            "HTTP/1.1 200 OK\r\n",
+            "content-type: application/json\r\n",
+            "content-length: ",
+            Integer.to_string(byte_size(body)),
+            "\r\nconnection: close\r\n\r\n",
+            body
+          ])
+
+        :gen_tcp.close(socket)
+      end)
+
+      :gen_tcp.close(listen_socket)
+    end)
+
+    "http://127.0.0.1:#{port}"
+  end
+
+  defp receive_http_request(socket, acc) do
+    if complete_http_request?(acc) do
+      acc
+    else
+      {:ok, data} = :gen_tcp.recv(socket, 0, 1_000)
+      receive_http_request(socket, acc <> data)
+    end
+  end
+
+  defp complete_http_request?(request) do
+    case String.split(request, "\r\n\r\n", parts: 2) do
+      [headers, body] -> byte_size(body) >= content_length(headers)
+      [_headers] -> false
+    end
+  end
+
+  defp content_length(headers) do
+    case Regex.run(~r/content-length:\s*(\d+)/i, headers, capture: :all_but_first) do
+      [raw] -> String.to_integer(raw)
+      nil -> 0
+    end
   end
 end

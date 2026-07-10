@@ -42,10 +42,37 @@ After `make release`, verify the distributable scheduler release with:
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
+## Run From The CLI
+
+The normal manual path has no required configuration:
+
+```sh
+codex-loops serve
+codex-loops run .codex/workflows/codex_answer.exs --open
+```
+
+`serve` starts the local scheduler at `http://127.0.0.1:47125` using the
+default journal at `~/.codex/workflows/runs_1.sqlite`. `run` validates the
+script, generates a run ID, uses the live Codex provider, prints the LiveView
+URL, and opens it when `--open` is present. Stop the managed scheduler with:
+
+```sh
+codex-loops stop
+```
+
+Customize only when needed:
+
+```sh
+codex-loops serve --port 48100 --journal /tmp/loops.sqlite --model gpt-5.5
+codex-loops run workflow.exs --provider mock --run-id dry-run --server http://127.0.0.1:48100
+```
+
 `make proof` is the production readiness path: it starts the packaged scheduler
 on an isolated local port and journal, checks health, validates a workflow
 through the API, starts a mock run through the API, reads the polling status
 snapshot and journal summaries through the API, and fetches the LiveView run UI.
+It also starts a second run through the packaged `codex-loops run` command and
+checks that command's reported LiveView URL.
 
 For the Codex-facing product path against a source-only plugin and an external
 Homebrew-style runtime:

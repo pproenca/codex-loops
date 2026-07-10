@@ -3,6 +3,8 @@ defmodule Workflow.CLI do
 
   import Bitwise, only: [band: 2]
 
+  alias Workflow.CLI.RunCommand
+  alias Workflow.CLI.ServeCommand
   alias Workflow.PackageVersion
 
   @marketplace "codex-loops"
@@ -47,7 +49,13 @@ defmodule Workflow.CLI do
 
   @doc "Runs the installer contract without halting the VM."
   @spec run([String.t()], keyword()) :: result()
-  def run(args, opts \\ []) when is_list(args) and is_list(opts) do
+  def run(args, opts \\ [])
+
+  def run(["run" | args], opts), do: RunCommand.run(args, opts)
+  def run(["serve" | args], opts), do: ServeCommand.run(args, opts)
+  def run(["stop" | args], opts), do: ServeCommand.stop(args, opts)
+
+  def run(args, opts) when is_list(args) and is_list(opts) do
     with {:ok, mode} <- parse(args),
          {:ok, runtime} <- runtime(opts),
          {:ok, codex} <- codex(opts),
@@ -469,6 +477,22 @@ defmodule Workflow.CLI do
 
   defp print_success(result, true), do: IO.puts(Jason.encode!(result))
 
+  defp print_success(%{command: :run} = result, false) do
+    opened = if result.opened, do: "\nOpened in your browser.", else: ""
+    warning = if result.warning, do: "\n#{result.warning}", else: ""
+
+    IO.puts("""
+    Run accepted: #{result.run_id}
+    Provider: #{result.provider}
+    UI: #{result.ui_url}#{opened}#{warning}
+    """)
+  end
+
+  defp print_success(%{command: :serve}, false), do: :ok
+
+  defp print_success(%{command: :stop, stopped: true}, false), do: IO.puts("Codex Loops stopped.")
+  defp print_success(%{command: :stop, stopped: false}, false), do: IO.puts("Codex Loops is not running.")
+
   defp print_success(result, false) do
     action = if result.changed, do: "installed", else: "ready"
 
@@ -507,16 +531,30 @@ defmodule Workflow.CLI do
   defp help do
     String.trim_trailing("""
     Usage: codex-loops install [--check | --dry-run] [--json] [--verbose]
+           codex-loops run WORKFLOW.exs [--open]
+           codex-loops serve
+           codex-loops stop
            codex-loops --version
 
     Commands:
       install      Install or verify the Codex Loops plugin.
+      run          Validate and start a workflow through the local scheduler.
+      serve        Start the managed local scheduler and web UI.
+      stop         Stop the managed local scheduler.
 
     Options:
       --check      Verify without changing Codex state.
       --dry-run    Show the changes without applying them.
       --json       Emit machine-readable output.
       --verbose    Include resolved paths and commands.
+      --open       Open the run's live UI after it starts.
+      --provider   Select codex (default) or mock.
+      --run-id     Override the generated run identifier.
+      --server     Override the local scheduler URL.
+      --host       Override the scheduler bind host.
+      --port       Override the scheduler port.
+      --journal    Override the SQLite journal path.
+      --model      Override the Codex model used by live runs.
       --version    Show the Codex Loops package version.
       --help       Show this help.
       -h           Show this help.

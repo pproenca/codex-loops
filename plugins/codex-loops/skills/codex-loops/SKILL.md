@@ -38,6 +38,18 @@ make release
 make proof-mcp
 ```
 
+For a user-driven manual run from the shell, prefer the progressive CLI over
+environment variables or raw HTTP calls:
+
+```bash
+codex-loops serve
+codex-loops run .codex/workflows/<name>.exs --open
+codex-loops stop
+```
+
+The defaults are the local scheduler, standard journal, generated run ID, and
+live Codex provider. Use CLI flags only when the user asks to customize them.
+
 ## Artifact Selection
 
 Before writing files, classify what the user means by "workflow":

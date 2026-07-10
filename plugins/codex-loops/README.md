@@ -22,6 +22,21 @@ codex plugin add codex-loops@codex-loops
 
 Start a new Codex thread after installing so the `codex-loops` skill is loaded.
 
+## Manual CLI Run
+
+Run a workflow and watch its LiveView without configuring environment
+variables or calling the HTTP API directly:
+
+```bash
+codex-loops serve
+codex-loops run .codex/workflows/codex_answer.exs --open
+codex-loops stop
+```
+
+The defaults are the local scheduler at `127.0.0.1:47125`, the standard user
+journal, a generated run ID, and the live `codex` provider. Optional flags
+provide custom ports, journals, models, providers, run IDs, and scheduler URLs.
+
 ## MCP Surface
 
 The source-only plugin includes a tracked stdio launcher at

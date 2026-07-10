@@ -86,7 +86,8 @@ packaged scheduler, checks `/api/health`, validates a workflow through
 `/api/workflows/validate`, starts a mock run through `/api/runs`, reads the
 polling status snapshot and journal summaries through `/api/runs/<id>` and
 `/api/runs/<id>/events`, and verifies the `/runs/<id>` LiveView route is
-reachable.
+reachable. It then launches another mock run through the packaged
+`codex-loops run` command and verifies that run's LiveView URL.
 
 `make package-homebrew-runtime` stages the formula input under
 `_build/homebrew/libexec` without modifying the source-only plugin.

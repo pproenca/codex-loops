@@ -146,6 +146,27 @@ proves the polling MCP path for live Codex completion; the realtime viewing
 surface remains the LiveView URL returned by `workflow_open_ui`.
 `make proof-live` aliases the same MCP proof.
 
+## Manual CLI Run
+
+For a normal interactive run, start the managed local scheduler and launch the
+workflow directly. No environment variables or raw HTTP calls are required:
+
+```sh
+codex-loops serve
+codex-loops run .codex/workflows/codex_answer.exs --open
+```
+
+The CLI defaults to `127.0.0.1:47125`, the standard user journal, a generated
+run ID, and the live `codex` provider. `run` validates before starting and
+prints the LiveView URL even without `--open`.
+
+```sh
+codex-loops stop
+```
+
+Configuration is progressively disclosed through `serve --host`, `--port`,
+`--journal`, and `--model`, or `run --provider`, `--run-id`, and `--server`.
+
 ## Manual MCP Smoke
 
 Build the external runtime first:

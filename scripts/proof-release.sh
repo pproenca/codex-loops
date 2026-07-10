@@ -209,4 +209,31 @@ curl_get "/runs/$run_id" "$ui"
 assert_contains "$ui" "data-run-id=\"$run_id\"" "run UI has target run id"
 assert_contains "$ui" "scheduler-release-proof" "run UI renders workflow projection"
 
+echo "-- run workflow through user CLI"
+cli_run_id="${run_id}_cli"
+cli_output="$tmpdir/cli-run.txt"
+"$release_cli" run "$workflow" \
+  --provider mock \
+  --run-id "$cli_run_id" \
+  --server "$base_url" >"$cli_output"
+assert_contains "$cli_output" "Run accepted: $cli_run_id" "CLI reports accepted run"
+assert_contains "$cli_output" "UI: $base_url/runs/$cli_run_id" "CLI reports LiveView URL"
+
+cli_status="$tmpdir/cli-status.json"
+for _ in $(seq 1 100); do
+  curl_get "/api/runs/$cli_run_id" "$cli_status"
+
+  if grep -q '"state":"completed"' "$cli_status"; then
+    break
+  fi
+
+  sleep 0.1
+done
+
+assert_contains "$cli_status" '"state":"completed"' "CLI-started run completed"
+
+cli_ui="$tmpdir/cli-run.html"
+curl_get "/runs/$cli_run_id" "$cli_ui"
+assert_contains "$cli_ui" "data-run-id=\"$cli_run_id\"" "CLI-started run UI is reachable"
+
 echo "-- proof complete"

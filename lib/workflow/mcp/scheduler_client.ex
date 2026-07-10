@@ -22,18 +22,18 @@ defmodule Workflow.MCP.SchedulerClient do
           | {:unexpected, non_neg_integer(), term()}
           | {:error, String.t()}
 
-  @spec config() :: config()
-  def config do
-    case System.get_env("CODEX_LOOPS_SCHEDULER_URL") do
+  @spec config(keyword()) :: config()
+  def config(opts \\ []) do
+    case Keyword.get(opts, :base_url) || System.get_env("CODEX_LOOPS_SCHEDULER_URL") do
       nil -> env_config()
       "" -> env_config()
       url -> url_config(url)
     end
   end
 
-  @spec health() :: {:ok, map()} | {:error, String.t()}
-  def health do
-    case request(:get, "/api/health") do
+  @spec health(keyword()) :: {:ok, map()} | {:error, String.t()}
+  def health(opts \\ []) do
+    case request(:get, "/api/health", nil, opts) do
       {:ok, 200,
        %{
          "api_version" => "scheduler.v1",
@@ -52,14 +52,14 @@ defmodule Workflow.MCP.SchedulerClient do
     end
   end
 
-  @spec validate_workflow(String.t()) :: scheduler_result()
-  def validate_workflow(script_path) when is_binary(script_path) do
-    scheduler_request(:post, "/api/workflows/validate", %{"script_path" => script_path})
+  @spec validate_workflow(String.t(), keyword()) :: scheduler_result()
+  def validate_workflow(script_path, opts \\ []) when is_binary(script_path) do
+    scheduler_request(:post, "/api/workflows/validate", %{"script_path" => script_path}, opts)
   end
 
-  @spec start_run(map()) :: scheduler_result()
-  def start_run(attrs) when is_map(attrs) do
-    scheduler_request(:post, "/api/runs", attrs)
+  @spec start_run(map(), keyword()) :: scheduler_result()
+  def start_run(attrs, opts \\ []) when is_map(attrs) do
+    scheduler_request(:post, "/api/runs", attrs, opts)
   end
 
   @spec get_run(String.t()) :: scheduler_result()
@@ -77,8 +77,8 @@ defmodule Workflow.MCP.SchedulerClient do
     scheduler_request(:post, "/api/runs/" <> path_segment(run_id) <> "/resume", attrs)
   end
 
-  defp scheduler_request(method, path, body \\ nil) do
-    case request(method, path, body) do
+  defp scheduler_request(method, path, body \\ nil, opts \\ []) do
+    case request(method, path, body, opts) do
       {:ok, status, %{"api_version" => "scheduler.v1", "data" => _data} = payload}
       when status in 200..299 ->
         {:ok, payload}
@@ -97,7 +97,13 @@ defmodule Workflow.MCP.SchedulerClient do
   @spec request(:get | :post, String.t(), map() | nil) ::
           {:ok, non_neg_integer(), term()} | {:error, String.t()}
   def request(method, path, body \\ nil) when method in [:get, :post] and is_binary(path) do
-    config = config()
+    request(method, path, body, [])
+  end
+
+  @spec request(:get | :post, String.t(), map() | nil, keyword()) ::
+          {:ok, non_neg_integer(), term()} | {:error, String.t()}
+  def request(method, path, body, opts) when method in [:get, :post] and is_binary(path) and is_list(opts) do
+    config = config(opts)
     url = config.base_url <> path
 
     with :ok <- ensure_http_started(config.protocol),

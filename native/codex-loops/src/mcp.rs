@@ -46,7 +46,7 @@ struct ValidateArgs {
 struct StartArgs {
     script_path: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    run_id: Option<String>,
+    run_id: Option<RunId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider: Option<Provider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -108,7 +108,6 @@ impl ToolCall {
         let invalid = match self {
             Self::Validate(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
             Self::Start(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
-            Self::Start(args) if args.run_id.as_deref() == Some("") => Some("run_id"),
             Self::Resume(args)
                 if args
                     .script_path

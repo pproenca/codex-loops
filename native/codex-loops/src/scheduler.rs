@@ -498,7 +498,7 @@ mod tests {
         );
         let error = SchedulerClient::new(&url)
             .unwrap()
-            .status("missing")
+            .status(&RunId::new("missing").unwrap())
             .await
             .unwrap_err();
         assert_eq!(error.status, 4);
@@ -511,7 +511,7 @@ mod tests {
         let url = one_response("502 Bad Gateway", "not json");
         let error = SchedulerClient::new(&url)
             .unwrap()
-            .status("run-1")
+            .status(&RunId::new("run-1").unwrap())
             .await
             .unwrap_err();
         assert_eq!(error.status, 6);

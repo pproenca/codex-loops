@@ -202,19 +202,20 @@ impl Bundle {
         })
     }
 
-    /// Prefer the installer-owned stable command only when it resolves back to
-    /// this exact immutable bundle. Source/dev bundles register their fixed
-    /// control-plane path directly.
+    /// Prefer the OS-reported lexical invocation path when it resolves back to
+    /// this exact immutable bundle. This preserves installer-owned stable links
+    /// (including Homebrew's `bin/codex-loops`) without PATH or prefix discovery.
     pub fn integration_command(&self) -> PathBuf {
-        let Some(home) = std::env::var_os("HOME") else {
-            return self.control_plane.clone();
-        };
-        let stable = PathBuf::from(home).join(".local/bin/codex-loops");
+        let invoked = std::env::current_exe().ok();
         match (
-            fs::canonicalize(&stable),
+            invoked
+                .as_deref()
+                .and_then(|path| fs::canonicalize(path).ok()),
             fs::canonicalize(&self.control_plane),
         ) {
-            (Ok(stable_target), Ok(bundle_target)) if stable_target == bundle_target => stable,
+            (Some(stable_target), Ok(bundle_target)) if stable_target == bundle_target => {
+                invoked.expect("matched invocation path exists")
+            }
             _other => self.control_plane.clone(),
         }
     }

@@ -11,8 +11,9 @@ workflows, fanout/multi-agent orchestration, ultracode-style work, workflow
 lifecycle inspection, an executable workflow script, or a reusable Codex skill
 that captures a workflow-shaped operating procedure.
 
-The product surface is the Codex plugin's native Rust MCP adapter plus the local
-Elixir/Phoenix scheduler. The native control plane manages OS-process lifecycle
+The product surface is an immutable runtime bundle whose native Rust control
+plane is registered directly as MCP, plus the local Elixir/Phoenix scheduler.
+The optional plugin contains only this skill. The native control plane manages OS-process lifecycle
 and calls the scheduler HTTP interface. Elixir owns OTP supervision, workflow
 workers, Phoenix PubSub/LiveView, and the SQLite journal. Run data is stored at
 `~/.codex/workflows/runs_1.sqlite` by default, or at `CODEX_LOOPS_JOURNAL_PATH`
@@ -208,7 +209,7 @@ make ci
 make release
 ```
 
-`make ci` proves the source-only plugin launcher, scheduler lifecycle,
+`make ci` proves the skill-only plugin package, directly registered MCP runtime, scheduler lifecycle,
 validation, mock execution, all documented workflow variants, polling status,
 journal inspection, resume, typed errors, realtime UI, and open-ui through the
 packaged runtime. It is credential-free and does not spend a real Codex turn.

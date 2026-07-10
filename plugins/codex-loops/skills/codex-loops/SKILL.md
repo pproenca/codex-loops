@@ -34,8 +34,9 @@ when set.
 If working from a repo clone, the packaged binary is built with:
 
 ```bash
+make build
+make ci
 make release
-make proof-mcp
 ```
 
 For a user-driven manual run from the shell, prefer the progressive CLI over
@@ -197,25 +198,17 @@ for progress messages and activity entries.
 Use `workflow_resume run_id=<id> provider=codex` when a run failed and should
 reuse completed journaled nodes.
 
-## Development Proofs
+## Development Gates
 
 For this repo:
 
 ```bash
-make setup
-make test
-make proof
-make proof-mcp
-make proof-mcp-live
-make proof-live
+make build
+make ci
+make release
 ```
 
-`make proof-mcp` builds one external OTP runtime and proves the source-only
-plugin launcher, MCP lifecycle handling, validation, mock start, polling status,
-journal inspect, resume, scheduler typed errors, and open-ui.
-`make proof-mcp-live` validates through MCP, starts or reuses the packaged
-scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
-through `workflow_start`, polls `workflow_status`, and asserts nonzero token
-usage plus streamed activity journaled before agent settlement. It spends one real
-Codex provider turn.
-`make proof-live` aliases `make proof-mcp-live`.
+`make ci` proves the source-only plugin launcher, scheduler lifecycle,
+validation, mock execution, all documented workflow variants, polling status,
+journal inspection, resume, typed errors, realtime UI, and open-ui through the
+packaged runtime. It is credential-free and does not spend a real Codex turn.

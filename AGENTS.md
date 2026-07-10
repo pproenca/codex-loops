@@ -22,17 +22,14 @@ SQLite journal.
 ## Commands
 
 ```sh
-make setup
-make quality
-make browser-e2e
-make dialyzer-check
 make build
-make test
+make ci
 make release
-make proof
-make proof-mcp
-make dogfood
 ```
+
+`make ci` is the complete deterministic gate: quality, full Elixir tests,
+Dialyzer, browser E2E, release/API/CLI proof, and packaged MCP conformance. Live
+Codex proofs remain manual because they require credentials and spend a turn.
 
 ## Runtime Model
 

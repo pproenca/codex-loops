@@ -12,8 +12,7 @@ The product repository builds the runtime; the separate
 
 ## Prepare
 
-1. Run `make quality`, `make proof`, `make proof-mcp`, and
-   `make verify-plugin-package`.
+1. Run `make ci`.
 2. Tag the exact product commit as `v<VERSION>` and publish its GitHub source
    archive.
 3. Calculate the source archive SHA-256.
@@ -56,7 +55,7 @@ After the bottle proof passes:
 
 1. Run `codex-loops install` in a disposable `CODEX_HOME` proof environment.
 2. Confirm an idempotent rerun and `codex-loops install --check` both succeed.
-3. Run `make dogfood` and complete the printed workflow steps from a new Codex
-   thread using the brewed runtime and release-pinned plugin.
+3. Complete an authenticated workflow from a new Codex thread using the brewed
+   runtime and release-pinned plugin.
 4. Record the product tag, tap commit, bottle SHA, runtime/plugin version, run
    id, and UI URL in the release notes.

@@ -81,22 +81,18 @@ local machine; put that deployment behind the host's normal access controls
 such as a trusted reverse proxy, tunnel, firewall, or private network boundary.
 `CODEX_LOOPS_PORT` defaults to `PORT`, then `4000`.
 
-`make proof` is the production readiness proof for this artifact: it starts the
-packaged scheduler, checks `/api/health`, validates a workflow through
+The release stage inside `make ci` starts the packaged scheduler, checks
+`/api/health`, validates a workflow through
 `/api/workflows/validate`, starts a mock run through `/api/runs`, reads the
 polling status snapshot and journal summaries through `/api/runs/<id>` and
 `/api/runs/<id>/events`, and verifies the `/runs/<id>` LiveView route is
 reachable. It then launches another mock run through the packaged
 `codex-loops run` command and verifies that run's LiveView URL.
 
-`make package-homebrew-runtime` stages the formula input under
-`_build/homebrew/libexec` without modifying the source-only plugin.
-`make proof-mcp` copies that source plugin into a temporary installed root and
-proves it against the external runtime: MCP starts/discovers the scheduler,
-validates a workflow, starts a mock run, reads polling status and inspection
-summaries, resumes, returns the UI URL, and shuts down its owned scheduler.
-`make proof-mcp-live` repeats the same path with `provider: "codex"` and asserts
-nonzero token usage from scheduler status.
+The MCP stage inside `make ci` also stages the formula layout without modifying
+the source-only plugin, copies the plugin into a temporary installed root, and
+proves lifecycle, validation, mock execution, conformance variants, status,
+inspection, resume, UI opening, and shutdown against that external runtime.
 
 ## Journal Model
 

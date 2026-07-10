@@ -74,9 +74,9 @@ is unreachable, it discovers a packaged release from:
 3. `CODEX_LOOPS_REPO_ROOT/_build/prod/rel/agent_loops/bin/agent_loops` in
    explicitly configured development environments
 
-`make package-homebrew-runtime` builds one production Mix release and stages the
-formula-owned `libexec` tree. It never copies generated artifacts into this
-plugin.
+The packaging stage inside `make ci` builds one production Mix release and
+stages the formula-owned `libexec` tree. It never copies generated artifacts
+into this plugin.
 
 When it owns the scheduler lifecycle, it starts the release with
 `CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
@@ -123,27 +123,15 @@ Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite` unless
 ## Development
 
 ```bash
-make setup
-make test
+make build
+make ci
 make release
-make package-homebrew-runtime
-make proof
-make proof-mcp
-make proof-mcp-live
-make proof-live
 ```
 
-`make proof-mcp` builds the external runtime, copies this source-only plugin to a
-temporary installed root, then exercises MCP initialize, tools/list, lifecycle
-startup, validation, mock start, status polling, event inspection, resume,
-typed scheduler errors, open-ui, and the packaged core/dataflow/refine
-conformance workflows through the Codex JSONL provider port.
-`make proof-mcp-live` validates through MCP, starts or reuses the packaged
-scheduler through MCP lifecycle handling, starts a live `provider: "codex"` run
-through `workflow_start`, polls `workflow_status`, and asserts nonzero token
-usage plus streamed `agent_activity` journaled before agent settlement. It spends
-one real Codex provider turn.
-`make proof-live` is an alias for `make proof-mcp-live`.
+`make ci` includes MCP initialize/tools, scheduler lifecycle, validation, mock
+execution, status, inspection, resume, typed errors, UI opening, and packaged
+core/dataflow/refine conformance through the Codex JSONL provider port. It is
+credential-free and does not spend a real Codex turn.
 
 ## License
 

@@ -25,22 +25,17 @@ is published, use the development path below.
 ## Development
 
 ```sh
-make setup
-make quality
+make build
+make ci
 make release
-make proof
 ```
 
-`make quality` is the fast pre-handoff gate. It checks formatting, compiles
-with warnings as errors, runs the spec lint, and runs the Elixir
-scheduler/API/UI test suite. It does not build release artifacts or run MCP
-product proofs.
-
-After `make release`, verify the distributable scheduler release with:
-
-```sh
-test -x _build/prod/rel/agent_loops/bin/agent_loops
-```
+`make build` installs missing build dependencies and compiles with warnings as
+errors. `make ci` is the complete deterministic gate: formatting, audits,
+Credo, Sobelow, the full Elixir suite, Dialyzer, browser LiveView E2E, plugin
+validation, packaged release/API/CLI proof, and packaged MCP conformance across
+the documented workflow variants. `make release` produces the distributable
+self-contained runtime.
 
 ## Run From The CLI
 
@@ -67,20 +62,10 @@ codex-loops serve --port 48100 --journal /tmp/loops.sqlite --model gpt-5.5
 codex-loops run workflow.exs --provider mock --run-id dry-run --server http://127.0.0.1:48100
 ```
 
-`make proof` is the production readiness path: it starts the packaged scheduler
-on an isolated local port and journal, checks health, validates a workflow
-through the API, starts a mock run through the API, reads the polling status
-snapshot and journal summaries through the API, and fetches the LiveView run UI.
-It also starts a second run through the packaged `codex-loops run` command and
-checks that command's reported LiveView URL.
-
-For the Codex-facing product path against a source-only plugin and an external
-Homebrew-style runtime:
-
-```sh
-make proof-mcp       # source plugin, external runtime, lifecycle, mock run, status, inspect, resume, open UI
-make proof-mcp-live  # same MCP path, one real Codex provider turn
-```
+The CI gate is credential-free and does not spend a Codex turn. Real-provider
+smokes are maintainer-run diagnostics; the same provider protocol and streaming
+path are covered deterministically in `make ci` with the schema-aware Codex
+subprocess fixture.
 
 ## Workflow Example
 
@@ -122,41 +107,17 @@ journal summaries and raw refs.
 ## Development Commands
 
 ```sh
-make setup        # install Hex/Rebar and Elixir deps
-make format-check # check mix formatting without rewriting files
-make quality      # fast pre-handoff gate: format, compile, spec lint, tests
-make audit-check  # scan dependency advisories and retired Hex packages
-make credo-check  # run maintainability linting
-make security-check # run Sobelow against the Phoenix API/UI surface
-make dialyzer-check # optional Dialyzer analysis; may build PLTs
-make browser-e2e-setup # install Playwright's Node package and Chromium
-make browser-e2e # run tagged PhoenixTest Playwright browser tests
-make build        # compile with warnings as errors
-make test         # run the Elixir scheduler/API/UI test suite
-make release      # build the self-contained scheduler Mix release
-make release-mcp  # compatibility alias: verify MCP in the single release
-make package-homebrew-runtime # stage the formula-owned libexec tree
-make proof        # build release and prove scheduler API/UI readiness
-make proof-mcp    # prove source-plugin MCP lifecycle against the staged runtime
-make dogfood      # prove MCP, reinstall the local plugin, and print the fresh-thread prompt
-make proof-live   # alias for proof-mcp-live; spends one real Codex provider turn through MCP
+make build    # compile from a clean checkout
+make ci       # run the entire deterministic validation stack end-to-end
+make release  # build the self-contained distributable runtime
 ```
 
-Use `make proof`, `make proof-mcp`, and `make proof-live` for packaged product
-readiness. They remain separate from the fast `make quality` loop.
+The narrower Make targets are implementation details used by `make ci`; normal
+contributors should not need to compose them manually.
 
-The quality stack is `mix format` plus Styler, Credo, Sobelow, Hex/MixAudit,
-and the existing ExUnit suite. Dialyzer is available through
-`make dialyzer-check` as an explicit opt-in gate. Browser E2E uses PhoenixTest
-with PhoenixTest Playwright and remains separate from the fast local loop.
-Install its Node/browser dependencies with `make browser-e2e-setup`.
-
-The repository includes `.tool-versions` for `mise`/`asdf` users.
-
-`make package-homebrew-runtime` builds one target-specific OTP release and
-stages `_build/homebrew/libexec/{scheduler,mcp,bin}` without changing the Codex
-plugin. `make release-mcp` remains usable, but now verifies the MCP command in
-that same release. No Zig or XZ toolchain is required.
+The repository includes `.tool-versions` for `mise`/`asdf` users. The release
+contains the scheduler, user CLI, and MCP command in one ERTS payload; no Zig or
+XZ toolchain is required.
 
 ## Runtime Data
 

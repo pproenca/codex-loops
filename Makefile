@@ -1,4 +1,4 @@
-.PHONY: setup format-check quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint build release release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: build ci release setup format-check quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -11,17 +11,17 @@ setup:
 	mix local.rebar --if-missing --force
 	mix deps.get
 
+# Public developer gate: compile the project from a clean checkout.
+build: setup package-version-check
+	mix compile --warnings-as-errors
+
+# Public CI gate: every deterministic, credential-free check and end-to-end proof.
+ci: setup quality dialyzer-check browser-e2e verify-plugin-package proof proof-mcp
+
 format-check:
 	mix format --check-formatted
 
-quality:
-	$(MAKE) format-check
-	$(MAKE) install-docs-check
-	$(MAKE) audit-check
-	$(MAKE) build
-	$(MAKE) credo-check
-	$(MAKE) security-check
-	$(MAKE) test
+quality: setup format-check install-docs-check audit-check build credo-check security-check test
 
 credo-check:
 	mix credo
@@ -56,10 +56,7 @@ test: spec-lint
 spec-lint:
 	scripts/check-spec.sh SPEC.md
 
-build: package-version-check
-	mix compile --warnings-as-errors
-
-release: package-version-check
+release: setup package-version-check
 	MIX_ENV=prod mix deps.get --only prod
 	rm -rf "_build/prod/rel/$(RELEASE_NAME)" "$(APP_BUILD_DIR)"
 	MIX_ENV=prod mix release $(RELEASE_NAME) --overwrite

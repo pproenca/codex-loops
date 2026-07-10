@@ -453,7 +453,7 @@ defmodule Workflow.CLITest do
 
     spawn_link(fn ->
       Enum.each(responses, fn response ->
-        {:ok, socket} = :gen_tcp.accept(listen_socket, 1_000)
+        {:ok, socket} = :gen_tcp.accept(listen_socket, 5_000)
         request = receive_http_request(socket, "")
         send(parent, {:http_request, request})
 
@@ -482,7 +482,7 @@ defmodule Workflow.CLITest do
     if complete_http_request?(acc) do
       acc
     else
-      {:ok, data} = :gen_tcp.recv(socket, 0, 1_000)
+      {:ok, data} = :gen_tcp.recv(socket, 0, 5_000)
       receive_http_request(socket, acc <> data)
     end
   end

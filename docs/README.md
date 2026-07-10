@@ -19,20 +19,15 @@ The distributable scheduler artifact is the `agent_loops` Mix release. The old
 ## Quick Start
 
 ```sh
-make setup
-make quality
+make build
+make ci
 make release
-make proof
-make proof-mcp
-make proof-mcp-live
-test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
-`make quality` is the fast local gate for Styler-backed formatting, dependency
-audits, compile, Credo, Sobelow, spec lint, and the scheduler/API/UI test suite.
-`make browser-e2e` runs the separate PhoenixTest Playwright browser suite, and
-`make dialyzer-check` runs optional Dialyzer analysis. The proof commands remain
-the packaged product readiness checks.
+`make build` compiles from a clean checkout. `make ci` owns the full
+credential-free validation graph, including static analysis, all Elixir tests,
+browser E2E, release/API/CLI proof, and packaged MCP workflow conformance.
+`make release` builds the distributable runtime.
 
 ## Supported Scope
 

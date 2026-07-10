@@ -104,6 +104,9 @@ defmodule Workflow.MCP.Lifecycle do
 
             scheduler ->
               if port_exited?(scheduler) do
+                scheduler = settle_scheduler_exit(scheduler)
+                acc = %{acc | owned_scheduler: scheduler}
+
                 {:halt,
                  {:error,
                   start_failed(%{
@@ -219,6 +222,8 @@ defmodule Workflow.MCP.Lifecycle do
     state = collect_port_messages(state)
 
     if port_exited?(state.owned_scheduler) do
+      state = update_in(state.owned_scheduler, &settle_scheduler_exit/1)
+
       {:error,
        start_failed(%{
          scheduler_url: config.base_url,
@@ -251,6 +256,22 @@ defmodule Workflow.MCP.Lifecycle do
         %{scheduler | exit_status: status}
     after
       0 -> scheduler
+    end
+  end
+
+  defp settle_scheduler_exit(scheduler) do
+    receive do
+      {port, {:data, data}} when port == scheduler.port ->
+        scheduler
+        |> append_logs(data)
+        |> settle_scheduler_exit()
+
+      {port, {:exit_status, status}} when port == scheduler.port ->
+        scheduler
+        |> Map.put(:exit_status, status)
+        |> settle_scheduler_exit()
+    after
+      100 -> scheduler
     end
   end
 

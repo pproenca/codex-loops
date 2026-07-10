@@ -69,154 +69,6 @@ pub(super) fn owner_lock_is_held_at(path: &Path) -> AppResult<bool> {
     }
 }
 
-pub(super) fn read_metadata(client: &SchedulerClient) -> AppResult<Option<RuntimeMetadata>> {
-    let path = metadata_path(client)?;
-    match fs::read(&path) {
-        Ok(bytes) => serde_json::from_slice(&bytes).map(Some).map_err(|error| {
-            AppError::new(
-                6,
-                "scheduler_metadata_invalid",
-                "Scheduler owner metadata is invalid.",
-            )
-            .details(json!({"path": path, "reason": error.to_string()}))
-        }),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(io_error("scheduler_metadata_invalid")(error)),
-    }
-}
-
-pub(super) fn validate_metadata(
-    client: &SchedulerClient,
-    metadata: &RuntimeMetadata,
-) -> AppResult<()> {
-    let expected_port = scheduler_port(client)?;
-    if metadata.supervisor_pid == 0
-        || metadata.port != expected_port
-        || verified_scheduler_root(metadata).is_err()
-    {
-        Err(AppError::new(
-            6,
-            "scheduler_metadata_invalid",
-            "Scheduler owner metadata does not match the configured endpoint.",
-        )
-        .details(json!({
-            "expected_port": expected_port,
-            "metadata_port": metadata.port,
-            "supervisor_pid": metadata.supervisor_pid,
-            "scheduler_root": metadata.scheduler_root
-        })))
-    } else {
-        Ok(())
-    }
-}
-
-fn verified_scheduler_root(metadata: &RuntimeMetadata) -> AppResult<PathBuf> {
-    let recorded = Path::new(&metadata.scheduler_root);
-    if !recorded.is_absolute() {
-        return Err(AppError::new(
-            6,
-            "scheduler_metadata_invalid",
-            "Scheduler metadata does not contain an absolute runtime identity.",
-        )
-        .details(json!({"scheduler_root": recorded})));
-    }
-    let root = recorded.canonicalize().map_err(|error| {
-        AppError::new(
-            6,
-            "scheduler_metadata_invalid",
-            "The recorded scheduler runtime no longer exists.",
-        )
-        .details(json!({"scheduler_root": recorded, "reason": error.to_string()}))
-    })?;
-    let launcher = root.join("bin/agent_loops");
-    let release = root.join("releases").join(&metadata.version);
-    if !launcher.is_file() || !release.is_dir() {
-        return Err(AppError::new(
-            6,
-            "scheduler_metadata_invalid",
-            "The recorded process does not identify a complete scheduler runtime.",
-        )
-        .details(json!({
-            "scheduler_root": root,
-            "version": metadata.version,
-            "launcher": launcher,
-            "release": release
-        })));
-    }
-    Ok(root)
-}
-
-#[cfg(unix)]
-pub(super) fn validate_scheduler_process(
-    metadata: &RuntimeMetadata,
-) -> AppResult<VerifiedSchedulerProcess> {
-    let pid = metadata.scheduler_pid.ok_or_else(|| {
-        AppError::new(
-            6,
-            "scheduler_owner_unknown",
-            "Scheduler metadata has no active child process.",
-        )
-    })?;
-    let root = verified_scheduler_root(metadata)?;
-    let output = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "command="])
-        .output()
-        .map_err(io_error("scheduler_process_check_failed"))?;
-    let command = String::from_utf8_lossy(&output.stdout);
-    let runtime_prefix = format!("{}/", root.display());
-    if output.status.success() && command.contains(&runtime_prefix) {
-        Ok(VerifiedSchedulerProcess { pid })
-    } else {
-        Err(AppError::new(
-            6,
-            "scheduler_owner_unknown",
-            "Refusing to force-stop a process that is not the packaged scheduler.",
-        )
-        .details(json!({"scheduler_pid": pid, "command": command.trim()})))
-    }
-}
-
-#[cfg(not(unix))]
-pub(super) fn validate_scheduler_process(
-    metadata: &RuntimeMetadata,
-) -> AppResult<VerifiedSchedulerProcess> {
-    Err(AppError::new(
-        6,
-        "force_stop_unsupported",
-        "Safe forced stop is not supported on this platform.",
-    )
-    .details(json!({"scheduler_pid": metadata.scheduler_pid})))
-}
-
-pub(super) fn scheduler_release_root() -> AppResult<PathBuf> {
-    Runtime::installed()?
-        .bundle
-        .scheduler_root()
-        .canonicalize()
-        .ok()
-        .ok_or_else(|| AppError::new(6, "runtime_invalid", "Scheduler release path is invalid."))
-}
-
-pub(super) fn write_metadata(
-    client: &SchedulerClient,
-    metadata: &RuntimeMetadata,
-) -> AppResult<()> {
-    let path = metadata_path(client)?;
-    let temp = path.with_extension("json.tmp");
-    let bytes = serde_json::to_vec(metadata)
-        .map_err(|error| AppError::new(6, "scheduler_metadata_invalid", error.to_string()))?;
-    fs::write(&temp, bytes).map_err(io_error("scheduler_metadata_invalid"))?;
-    fs::rename(&temp, &path).map_err(io_error("scheduler_metadata_invalid"))
-}
-
-pub(super) fn remove_stale_metadata(client: &SchedulerClient) -> AppResult<()> {
-    match fs::remove_file(metadata_path(client)?) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(io_error("scheduler_metadata_invalid")(error)),
-    }
-}
-
 pub(super) fn open_log(path: &Path) -> AppResult<File> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(io_error("scheduler_log_failed"))?;
@@ -226,4 +78,32 @@ pub(super) fn open_log(path: &Path) -> AppResult<File> {
         .append(true)
         .open(path)
         .map_err(io_error("scheduler_log_failed"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn runtime_metadata_is_outside_the_packaged_release() {
+        let client = SchedulerClient::new("http://127.0.0.1:49123").unwrap();
+        let path = runtime_dir(&client).unwrap();
+        assert!(path.ends_with(".codex/workflows/runtime/127.0.0.1-49123"));
+    }
+
+    #[test]
+    fn a_stale_metadata_file_is_not_treated_as_a_live_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let lock_path = root.path().join("owner.lock");
+        File::create(&lock_path).unwrap();
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        lock.try_lock_exclusive().unwrap();
+        assert!(owner_lock_is_held_at(&lock_path).unwrap());
+        FileExt::unlock(&lock).unwrap();
+        assert!(!owner_lock_is_held_at(&lock_path).unwrap());
+    }
 }

@@ -10,19 +10,40 @@ use anyhow::Context;
 use serde_json::{Value, json};
 
 use crate::{
-    error::{AppError, AppResult},
+    error::{CliError, CliResult, ErrorContext},
     install,
-    lifecycle::{self, StartOptions},
+    lifecycle::{self, StartOptions, StopMode},
     runtime::Runtime,
-    scheduler::{HealthState, RunId, SchedulerClient, local_url},
+    scheduler::{HealthState, ResumeRequest, RunId, SchedulerClient, StartRequest, local_url},
 };
+
+type AppError = CliError;
+type AppResult<T> = CliResult<T>;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OpenMode {
+    Skip,
+    Open,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ServeMode {
+    Background,
+    Foreground,
+}
+
+struct LocalTarget {
+    host: String,
+    port: u16,
+    client: SchedulerClient,
+}
 
 pub async fn run_workflow(
     script: PathBuf,
     provider: String,
     run_id: Option<String>,
     server: Option<String>,
-    open: bool,
+    open_mode: OpenMode,
 ) -> AppResult<Value> {
     let script = resolve_script(&script)?;
     let client = match server {
@@ -35,12 +56,17 @@ pub async fn run_workflow(
     client.validate(&script_path).await?;
     let run_id = RunId::new(run_id.unwrap_or_else(|| default_run_id(&script)))?;
     let started = client
-        .start(json!({"script_path": script_path, "run_id": &run_id, "provider": provider}))
+        .start(&StartRequest {
+            script_path: script_path.into_owned(),
+            run_id: Some(run_id.clone()),
+            provider: Some(provider.clone()),
+            budget: None,
+        })
         .await?;
     let ui_url = client.ui_url(&run_id);
     let mut warning = Value::Null;
     let mut opened = false;
-    if open {
+    if open_mode == OpenMode::Open {
         match open_url(&ui_url) {
             Ok(()) => opened = true,
             Err(error) => {
@@ -51,8 +77,8 @@ pub async fn run_workflow(
         }
     }
     Ok(json!({
-        "ok": true, "command": "run", "script_path": script, "workflow_name": started.pointer("/data/workflow_name"),
-        "run_id": run_id, "provider": provider, "state": started.pointer("/data/state"), "ui_url": ui_url,
+        "ok": true, "command": "run", "script_path": script, "workflow_name": started.data.workflow_name,
+        "run_id": run_id, "provider": provider, "state": started.data.state, "ui_url": ui_url,
         "opened": opened, "warning": warning, "scheduler_started": scheduler_started,
         "server_url": client.base_url().as_str()
     }))
@@ -63,9 +89,9 @@ pub async fn serve(
     port: Option<u16>,
     journal: Option<String>,
     model: Option<String>,
-    foreground: bool,
+    serve_mode: ServeMode,
 ) -> AppResult<Value> {
-    let (host, port, client) = local_target(host, port)?;
+    let LocalTarget { host, port, client } = local_target(host, port)?;
     validate_bind_host(&host)?;
     let options = StartOptions {
         bind_host: Some(host.clone()),
@@ -74,7 +100,7 @@ pub async fn serve(
             .transpose()?,
         model: option_or_env(model, "CODEX_LOOPS_CODEX_MODEL"),
     };
-    if foreground {
+    if serve_mode == ServeMode::Foreground {
         if matches!(client.health_state().await, HealthState::Compatible(_)) {
             return Err(AppError::new(
                 2,
@@ -110,10 +136,10 @@ pub async fn restart(
             .ok()
             .filter(|value| !value.is_empty())
             .is_none();
-    let (host, port, client) = local_target(host, port)?;
+    let LocalTarget { host, port, client } = local_target(host, port)?;
     validate_bind_host(&host)?;
     let previous = lifecycle::configuration(&client)?.unwrap_or_default();
-    let stopped = lifecycle::stop(&client, false).await?;
+    let stopped = lifecycle::stop(&client, StopMode::Graceful).await?;
     let options = StartOptions {
         bind_host: if inherit_bind {
             previous.bind_host.or_else(|| Some(host.clone()))
@@ -148,7 +174,7 @@ pub fn logs(
         {
             SchedulerClient::from_env()?
         }
-        None => local_target(host, port)?.2,
+        None => local_target(host, port)?.client,
     };
     let output = lifecycle::read_logs(&client, lines)?;
     Ok(json!({
@@ -161,7 +187,7 @@ pub async fn stop(
     server: Option<String>,
     host: Option<String>,
     port: Option<u16>,
-    force: bool,
+    mode: StopMode,
 ) -> AppResult<Value> {
     let client = match server {
         Some(server) => SchedulerClient::new(&server)?,
@@ -171,9 +197,9 @@ pub async fn stop(
         {
             SchedulerClient::from_env()?
         }
-        None => local_target(host, port)?.2,
+        None => local_target(host, port)?.client,
     };
-    let stopped = lifecycle::stop(&client, force).await?;
+    let stopped = lifecycle::stop(&client, mode).await?;
     Ok(
         json!({"ok": true, "command": "stop", "server_url": client.base_url().as_str(), "state": "stopped", "stopped": stopped}),
     )
@@ -183,14 +209,14 @@ pub async fn status(run_id: String, server: Option<String>) -> AppResult<Value> 
     let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
-    client.status(&run_id).await
+    Ok(client.status(&run_id).await?.into_wire_value()?)
 }
 
 pub async fn inspect(run_id: String, server: Option<String>) -> AppResult<Value> {
     let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
-    client.inspect(&run_id).await
+    Ok(client.inspect(&run_id).await?.into_wire_value()?)
 }
 
 pub async fn resume(
@@ -206,15 +232,11 @@ pub async fn resume(
     }
     lifecycle::ensure_ready(&client).await?;
     let script = script.map(|path| resolve_script(&path)).transpose()?;
-    let mut attrs = serde_json::Map::new();
-    attrs.insert("provider".into(), Value::String(provider));
-    if let Some(script) = script {
-        attrs.insert(
-            "script_path".into(),
-            Value::String(script.to_string_lossy().into_owned()),
-        );
-    }
-    client.resume(&run_id, Value::Object(attrs)).await
+    let request = ResumeRequest {
+        script_path: script.map(|path| path.to_string_lossy().into_owned()),
+        provider: Some(provider),
+    };
+    Ok(client.resume(&run_id, &request).await?.into_wire_value()?)
 }
 
 pub async fn open(run_id: String, server: Option<String>) -> AppResult<Value> {
@@ -256,7 +278,7 @@ pub async fn doctor() -> AppResult<Value> {
 }
 
 pub fn install(options: install::Options) -> AppResult<Value> {
-    install::run(options)
+    Ok(install::run(options)?)
 }
 
 fn default_run_id(script: &std::path::Path) -> String {
@@ -289,16 +311,13 @@ fn default_run_id(script: &std::path::Path) -> String {
 }
 
 fn client(server: Option<String>) -> AppResult<SchedulerClient> {
-    match server {
+    Ok(match server {
         Some(server) => SchedulerClient::new(&server),
         None => SchedulerClient::from_env(),
-    }
+    }?)
 }
 
-fn local_target(
-    host: Option<String>,
-    port: Option<u16>,
-) -> AppResult<(String, u16, SchedulerClient)> {
+fn local_target(host: Option<String>, port: Option<u16>) -> AppResult<LocalTarget> {
     let host = host
         .or_else(|| std::env::var("CODEX_LOOPS_SCHEDULER_HOST").ok())
         .filter(|value| !value.is_empty())
@@ -329,7 +348,7 @@ fn local_target(
         host.as_str()
     };
     let client = SchedulerClient::managed(&local_url(connect_host, port))?;
-    Ok((host, port, client))
+    Ok(LocalTarget { host, port, client })
 }
 
 fn option_or_env(value: Option<String>, key: &str) -> Option<String> {

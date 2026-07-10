@@ -3,6 +3,7 @@ mod error;
 mod install;
 mod lifecycle;
 mod mcp;
+mod provider;
 mod runtime;
 mod scheduler;
 
@@ -11,7 +12,23 @@ use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::Value;
 
-use crate::error::AppResult;
+use crate::error::AppError;
+
+#[derive(Clone, Copy)]
+enum OutputFormat {
+    Human,
+    Json,
+}
+
+macro_rules! output_format {
+    ($json:expr) => {
+        if $json {
+            OutputFormat::Json
+        } else {
+            OutputFormat::Human
+        }
+    };
+}
 
 #[derive(Parser)]
 #[command(
@@ -170,7 +187,7 @@ async fn main() -> ExitCode {
     match app.command {
         Some(Command::Mcp { stdio: _ }) => exit_silent(mcp::run().await),
         Some(Command::Daemon) => exit_silent(lifecycle::run_supervisor().await),
-        Some(Command::ProviderExec { args }) => provider_exec(args),
+        Some(Command::ProviderExec { args }) => provider::exec(args),
         Some(Command::Run {
             script,
             provider,
@@ -179,8 +196,13 @@ async fn main() -> ExitCode {
             open,
             json,
         }) => {
-            let result = cli::run_workflow(script, provider, run_id, server, open).await;
-            exit_value(result, json)
+            let open_mode = if open {
+                cli::OpenMode::Open
+            } else {
+                cli::OpenMode::Skip
+            };
+            let result = cli::run_workflow(script, provider, run_id, server, open_mode).await;
+            exit_value(result, output_format!(json))
         }
         Some(Command::Serve {
             host,
@@ -189,54 +211,77 @@ async fn main() -> ExitCode {
             model,
             foreground,
             json,
-        }) => exit_value(
-            cli::serve(host, port, journal, model, foreground).await,
-            json,
-        ),
+        }) => {
+            let mode = if foreground {
+                cli::ServeMode::Foreground
+            } else {
+                cli::ServeMode::Background
+            };
+            exit_value(
+                cli::serve(host, port, journal, model, mode).await,
+                output_format!(json),
+            )
+        }
         Some(Command::Stop {
             server,
             host,
             port,
             force,
             json,
-        }) => exit_value(cli::stop(server, host, port, force).await, json),
+        }) => {
+            let mode = if force {
+                lifecycle::StopMode::Force
+            } else {
+                lifecycle::StopMode::Graceful
+            };
+            exit_value(
+                cli::stop(server, host, port, mode).await,
+                output_format!(json),
+            )
+        }
         Some(Command::Restart {
             host,
             port,
             journal,
             model,
             json,
-        }) => exit_value(cli::restart(host, port, journal, model).await, json),
+        }) => exit_value(
+            cli::restart(host, port, journal, model).await,
+            output_format!(json),
+        ),
         Some(Command::Logs {
             server,
             host,
             port,
             lines,
             json,
-        }) => exit_value(cli::logs(server, host, port, lines), json),
+        }) => exit_value(cli::logs(server, host, port, lines), output_format!(json)),
         Some(Command::Status {
             run_id,
             server,
             json,
-        }) => exit_value(cli::status(run_id, server).await, json),
+        }) => exit_value(cli::status(run_id, server).await, output_format!(json)),
         Some(Command::Inspect {
             run_id,
             server,
             json,
-        }) => exit_value(cli::inspect(run_id, server).await, json),
+        }) => exit_value(cli::inspect(run_id, server).await, output_format!(json)),
         Some(Command::Resume {
             run_id,
             script,
             provider,
             server,
             json,
-        }) => exit_value(cli::resume(run_id, script, provider, server).await, json),
+        }) => exit_value(
+            cli::resume(run_id, script, provider, server).await,
+            output_format!(json),
+        ),
         Some(Command::Open {
             run_id,
             server,
             json,
-        }) => exit_value(cli::open(run_id, server).await, json),
-        Some(Command::Doctor { json }) => exit_value(cli::doctor().await, json),
+        }) => exit_value(cli::open(run_id, server).await, output_format!(json)),
+        Some(Command::Doctor { json }) => exit_value(cli::doctor().await, output_format!(json)),
         Some(Command::Install {
             check,
             dry_run,
@@ -257,7 +302,7 @@ async fn main() -> ExitCode {
                     verbose,
                     codex,
                 }),
-                json,
+                output_format!(json),
             )
         }
         None => {
@@ -272,44 +317,13 @@ async fn main() -> ExitCode {
     }
 }
 
-fn provider_exec(args: Vec<OsString>) -> ExitCode {
-    let binding = match runtime::CodexBinding::load(&match runtime::binding_path() {
-        Ok(path) => path,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::from(127);
-        }
-    }) {
-        Ok(binding) => binding,
-        Err(error) => {
-            eprintln!("{error}");
-            return ExitCode::from(127);
-        }
-    };
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        let error = std::process::Command::new(binding.path).args(args).exec();
-        eprintln!("Could not execute the configured Codex command: {error}");
-        ExitCode::from(127)
-    }
-    #[cfg(not(unix))]
-    {
-        match std::process::Command::new(binding.path).args(args).status() {
-            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
-            Err(error) => {
-                eprintln!("Could not execute the configured Codex command: {error}");
-                ExitCode::from(127)
-            }
-        }
-    }
-}
-
-fn exit_value(result: AppResult<Value>, json: bool) -> ExitCode {
+fn exit_value<E>(result: Result<Value, E>, output: OutputFormat) -> ExitCode
+where
+    E: Into<AppError>,
+{
     match result {
         Ok(value) => {
-            if json {
+            if matches!(output, OutputFormat::Json) {
                 println!("{value}");
             } else {
                 print_human(&value);
@@ -317,25 +331,30 @@ fn exit_value(result: AppResult<Value>, json: bool) -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(error) => {
-            if json {
+            let error = error.into();
+            if matches!(output, OutputFormat::Json) {
                 eprintln!("{}", error.cli_envelope());
             } else {
                 eprintln!("{error}");
-                for next_step in &error.next_steps {
+                for next_step in error.next_steps() {
                     eprintln!("  {next_step}");
                 }
             }
-            ExitCode::from(error.status)
+            ExitCode::from(error.status())
         }
     }
 }
 
-fn exit_silent(result: AppResult<()>) -> ExitCode {
+fn exit_silent<E>(result: Result<(), E>) -> ExitCode
+where
+    E: Into<AppError>,
+{
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
+            let error = error.into();
             eprintln!("{error}");
-            ExitCode::from(error.status)
+            ExitCode::from(error.status())
         }
     }
 }

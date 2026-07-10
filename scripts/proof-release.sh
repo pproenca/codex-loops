@@ -460,7 +460,7 @@ if [ "$backoff_seen" != "1" ]; then
   exit 1
 fi
 CODEX_LOOPS_RUNTIME_DIR="$bad_runtime" \
-  "$release_cli" stop --host "$host" --port "$port" --json >"$tmpdir/bad-backoff-stop.json"
+  "$bad_cli" stop --host "$host" --port "$port" --json >"$tmpdir/bad-backoff-stop.json"
 kill -TERM "$bad_client_pid" 2>/dev/null || true
 wait "$bad_client_pid" 2>/dev/null || true
 
@@ -560,7 +560,8 @@ assert_contains "$tmpdir/delay-conflict.err" '"code":"scheduler_configuration_co
 wait "$delay_winner_pid"
 assert_contains "$tmpdir/delay-winner.out" '"started":true' "delayed owner survives joiner timeouts"
 CODEX_LOOPS_RUNTIME_DIR="$delay_runtime" \
-  "$release_cli" stop --host "$host" --port "$port" >/dev/null
+  REAL_SCHEDULER="$release_ctl" \
+  "$delay_cli" stop --host "$host" --port "$port" >/dev/null
 
 echo "-- stale dead-owner metadata cannot conflict with a fresh lock generation"
 stale_runtime="$tmpdir/stale-runtime"
@@ -624,7 +625,7 @@ if grep -Fq '"started":true' "$tmpdir/handoff.out"; then
   exit 1
 fi
 CODEX_LOOPS_RUNTIME_DIR="$handoff_runtime" \
-  "$release_cli" stop --host "$host" --port "$port" --force \
+  "$handoff_cli" stop --host "$host" --port "$port" --force \
   >"$tmpdir/handoff-stop.out" 2>"$tmpdir/handoff-stop.err" || {
     cat "$tmpdir/handoff-stop.err" >&2
     exit 1

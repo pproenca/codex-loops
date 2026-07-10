@@ -320,6 +320,71 @@ esac
     let check: serde_json::Value = serde_json::from_slice(&check.stdout).unwrap();
     assert_eq!(check["changed"], false);
     assert_eq!(check["plan"], serde_json::json!([]));
+
+    let installed_skill = home.join(".agents/skills/codex-loops/SKILL.md");
+    fs::remove_file(&installed_skill).unwrap();
+    let partial = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--check", "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .output()
+        .unwrap();
+    assert_eq!(partial.status.code(), Some(1));
+    let partial: serde_json::Value = serde_json::from_slice(&partial.stderr).unwrap();
+    assert_eq!(
+        partial["error"]["details"]["plan"],
+        serde_json::json!(["install_skill"])
+    );
+
+    let recovered = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success());
+    assert!(installed_skill.is_file());
+
+    fs::write(&installed_skill, "corrupt").unwrap();
+    let corrupt = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--check", "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .output()
+        .unwrap();
+    assert_eq!(corrupt.status.code(), Some(1));
+    let corrupt: serde_json::Value = serde_json::from_slice(&corrupt.stderr).unwrap();
+    assert_eq!(
+        corrupt["error"]["details"]["plan"],
+        serde_json::json!(["install_skill"])
+    );
+
+    let recovered = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .output()
+        .unwrap();
+    assert!(recovered.status.success());
+    assert_ne!(fs::read_to_string(installed_skill).unwrap(), "corrupt");
+
+    fs::write(
+        home.join(".agents/skills/codex-loops/SKILL.md"),
+        "corrupt-again",
+    )
+    .unwrap();
+    let rollback = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .env("CODEX_LOOPS_TEST_SKILL_COMMIT_FAILURE", "rollback")
+        .output()
+        .unwrap();
+    assert_eq!(rollback.status.code(), Some(6));
+    let rollback: serde_json::Value = serde_json::from_slice(&rollback.stderr).unwrap();
+    assert_eq!(rollback["error"]["code"], "skill_rollback_failed");
+    assert_eq!(rollback["changed"], true);
+    assert_eq!(rollback["error"]["step"], "skill_restore");
 }
 
 #[cfg(unix)]
@@ -377,6 +442,68 @@ esac
             .and_then(|value| value.as_str()),
         Some("/old/codex-loops")
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn mcp_replacement_integration_covers_success_and_failed_rollback() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("runtime");
+    let home = temp.path().join("home");
+    let codex = temp.path().join("codex");
+    let mcp_state = temp.path().join("mcp.json");
+    runtime_bundle(&runtime);
+    let old = r#"{"name":"codex-loops","transport":{"type":"stdio","command":"/old/codex-loops","args":["mcp"]}}"#;
+    fs::write(&mcp_state, old).unwrap();
+    executable(
+        &codex,
+        &format!(
+            r#"#!/bin/sh
+set -eu
+state='{}'
+case "$*" in
+  "--version") echo "codex-cli 9.9.9" ;;
+  "mcp list --help") echo "--json" ;;
+  "mcp add --help") echo "-- COMMAND" ;;
+  "mcp list --json") printf '['; cat "$state"; printf ']\n' ;;
+  "mcp remove codex-loops") rm -f "$state" ;;
+  "mcp add codex-loops -- "*)
+    if [ "${{FAIL_ADDS:-0}}" = 1 ]; then echo failed >&2; exit 7; fi
+    printf '{{"name":"codex-loops","transport":{{"type":"stdio","command":"%s","args":["mcp"]}}}}\n' "$5" > "$state"
+    ;;
+  *) exit 9 ;;
+esac
+"#,
+            mcp_state.display()
+        ),
+    );
+
+    let success = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--codex", codex.to_str().unwrap(), "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .output()
+        .unwrap();
+    assert!(success.status.success());
+    let installed: serde_json::Value =
+        serde_json::from_slice(&fs::read(&mcp_state).unwrap()).unwrap();
+    assert_eq!(
+        installed["transport"]["command"],
+        runtime.join("bin/codex-loops").to_string_lossy().as_ref()
+    );
+
+    fs::write(&mcp_state, old).unwrap();
+    let rollback = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .env("FAIL_ADDS", "1")
+        .output()
+        .unwrap();
+    assert_eq!(rollback.status.code(), Some(5));
+    let rollback: serde_json::Value = serde_json::from_slice(&rollback.stderr).unwrap();
+    assert_eq!(rollback["error"]["code"], "mcp_rollback_failed");
+    assert_eq!(rollback["changed"], true);
 }
 
 #[test]

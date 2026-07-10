@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppResult};
+use crate::error::{ErrorContext, RuntimeError, RuntimeResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bundle {
@@ -29,7 +29,7 @@ pub struct Runtime {
 }
 
 impl CodexBinding {
-    pub fn probe(path: &Path) -> AppResult<Self> {
+    pub fn probe(path: &Path) -> RuntimeResult<Self> {
         if !path.is_absolute() || !path.is_file() {
             return Err(invalid_codex_binding(
                 path,
@@ -73,9 +73,9 @@ impl CodexBinding {
         })
     }
 
-    pub fn load(_path: &Path) -> AppResult<Self> {
+    pub fn load(_path: &Path) -> RuntimeResult<Self> {
         let bytes = fs::read(_path).map_err(|error| {
-            AppError::new(
+            RuntimeError::new(
                 3,
                 "codex_binding_missing",
                 "Codex Loops has no configured Codex command.",
@@ -88,7 +88,7 @@ impl CodexBinding {
         })?;
         let current = Self::probe(&stored.path)?;
         if current.version != stored.version {
-            return Err(AppError::new(
+            return Err(RuntimeError::new(
                 3,
                 "codex_binding_changed",
                 "The configured Codex command changed after it was bound to Codex Loops.",
@@ -103,7 +103,7 @@ impl CodexBinding {
         Ok(stored)
     }
 
-    pub fn persist(&self, path: &Path) -> AppResult<()> {
+    pub fn persist(&self, path: &Path) -> RuntimeResult<()> {
         let parent = path
             .parent()
             .ok_or_else(|| invalid_codex_binding(path, "binding path has no parent directory"))?;
@@ -127,20 +127,20 @@ impl CodexBinding {
 }
 
 impl Runtime {
-    pub fn open(bundle: Bundle, binding_path: &Path) -> AppResult<Self> {
+    pub fn open(bundle: Bundle, binding_path: &Path) -> RuntimeResult<Self> {
         Ok(Self {
             bundle,
             codex: CodexBinding::load(binding_path)?,
         })
     }
 
-    pub fn installed() -> AppResult<Self> {
+    pub fn installed() -> RuntimeResult<Self> {
         Self::open(Bundle::installed()?, &binding_path()?)
     }
 }
 
-fn invalid_codex_binding(path: &Path, reason: &str) -> AppError {
-    AppError::new(
+fn invalid_codex_binding(path: &Path, reason: &str) -> RuntimeError {
+    RuntimeError::new(
         3,
         "codex_binding_invalid",
         "Codex Loops could not use the selected Codex command.",
@@ -150,11 +150,11 @@ fn invalid_codex_binding(path: &Path, reason: &str) -> AppError {
 }
 
 impl Bundle {
-    pub fn installed() -> AppResult<Self> {
+    pub fn installed() -> RuntimeResult<Self> {
         let executable = std::env::current_exe()
             .and_then(fs::canonicalize)
             .map_err(|error| {
-                AppError::new(
+                RuntimeError::new(
                     6,
                     "runtime_invalid",
                     "Codex Loops could not resolve its installed executable.",
@@ -172,7 +172,7 @@ impl Bundle {
         Self::open(&root, &control_plane)
     }
 
-    pub fn open(root: &Path, control_plane: &Path) -> AppResult<Self> {
+    pub fn open(root: &Path, control_plane: &Path) -> RuntimeResult<Self> {
         let scheduler = root.join("libexec/scheduler/bin/agent_loops");
         let skill = root.join("share/skills/codex-loops");
         let skill_manifest = skill.join("SKILL.md");
@@ -185,7 +185,7 @@ impl Bundle {
             .into_iter()
             .find(|(path, _component)| !path.is_file())
         {
-            return Err(AppError::new(
+            return Err(RuntimeError::new(
                 6,
                 "runtime_invalid",
                 "Codex Loops is not installed as a complete runtime bundle.",
@@ -228,9 +228,9 @@ impl Bundle {
     }
 }
 
-pub fn binding_path() -> AppResult<PathBuf> {
+pub fn binding_path() -> RuntimeResult<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| {
-        AppError::new(
+        RuntimeError::new(
             6,
             "runtime_invalid",
             "HOME is not set; Codex binding cannot be loaded.",

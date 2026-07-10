@@ -30,22 +30,25 @@ fi
 # 3. Wildcard match arms _ => (excluding slice/tuple/char patterns)
 WILDCARDS=$(head -n "$TEST_LINE" "$FILE" | grep -n '_ =>' | grep -v '// lint:allow' || true)
 if [ -n "$WILDCARDS" ]; then
-  echo "WARNING: Wildcard match arm _ => found — prefer exhaustive matching:"
+  echo "ERROR: Wildcard match arm _ => found — use an exhaustive match or add lint:allow with a reason:"
   echo "$WILDCARDS"
+  ERRORS=$((ERRORS + 1))
 fi
 
 # 4. bool parameters in public function signatures
 BOOL_PARAMS=$(head -n "$TEST_LINE" "$FILE" | grep -n 'pub.*fn.*\bbool\b' | grep -v 'Result<bool' | grep -v -- '-> bool' || true)
 if [ -n "$BOOL_PARAMS" ]; then
-  echo "WARNING: bool parameter in public function — consider using an enum:"
+  echo "ERROR: bool parameter in public function — use a named enum:"
   echo "$BOOL_PARAMS"
+  ERRORS=$((ERRORS + 1))
 fi
 
 # 5. Tuple return types in public functions
-TUPLE_RETURNS=$(head -n "$TEST_LINE" "$FILE" | grep -n 'pub.*fn.*->.*(' | grep -v -e 'Result' -e 'Option' -e 'impl ' || true)
+TUPLE_RETURNS=$(head -n "$TEST_LINE" "$FILE" | grep -En 'pub.*fn.*->.*\([^)]*,' | grep -v -e 'impl ' || true)
 if [ -n "$TUPLE_RETURNS" ]; then
-  echo "WARNING: Tuple return type — consider a named struct:"
+  echo "ERROR: Tuple return type — use a named struct:"
   echo "$TUPLE_RETURNS"
+  ERRORS=$((ERRORS + 1))
 fi
 
 # 6. Missing Display impl for public enums
@@ -55,14 +58,13 @@ if [ "$PUB_ENUMS" -gt "$DISPLAY_IMPLS" ] 2>/dev/null; then
   echo "INFO: $PUB_ENUMS public enum(s) but only $DISPLAY_IMPLS Display impl(s)"
 fi
 
-# 7. Bare ? without .context(). Domain-typed results preserve their operation
-# context in a matchable error variant; application/anyhow results still need an
-# explicit context frame at each propagation site.
-if head -n "$TEST_LINE" "$FILE" | grep -q 'anyhow::Result'; then
-  BARE_Q=$(head -n "$TEST_LINE" "$FILE" | grep -n '?\s*;' | grep -v '\.context\|\.with_context\|// lint:allow' || true)
-else
-  BARE_Q=""
-fi
+# 7. Raw external failures must be translated at the operation that produced
+# them. Propagating an already typed domain result is allowed because its
+# variant retains that operation context.
+BARE_Q=$(head -n "$TEST_LINE" "$FILE" \
+  | grep -n '?\s*;' \
+  | grep -E 'fs::|env::|serde_json::|\.open\(|\.output\(|\.spawn\(|\.wait\(' \
+  | grep -v '\.map_err\|\.context\|\.with_context\|// lint:allow' || true)
 if [ -n "$BARE_Q" ]; then
   echo "ERROR: Bare ? without .context():"
   echo "$BARE_Q"

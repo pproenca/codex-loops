@@ -16,22 +16,41 @@ use tokio::{
 };
 
 use crate::{
-    error::{AppError, AppResult},
+    error::{ErrorContext, LifecycleError, LifecycleResult},
     runtime::Runtime,
     scheduler::{HealthState, SchedulerClient},
 };
 
+type AppError = LifecycleError;
+type AppResult<T> = LifecycleResult<T>;
+
+mod attempt;
+mod metadata;
 mod ownership;
+mod process;
+mod shutdown;
+mod spawn;
 mod supervisor;
 
+use attempt::StartAttempt;
+use metadata::*;
 use ownership::*;
-use supervisor::{OutputMode, signal_process, spawn_supervisor, supervise};
+use process::*;
+use shutdown::*;
+use spawn::*;
+use supervisor::{SupervisionRequest, supervise};
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct StartOptions {
     pub bind_host: Option<String>,
     pub journal: Option<String>,
     pub model: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StopMode {
+    Graceful,
+    Force,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -48,43 +67,6 @@ struct RuntimeMetadata {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct VerifiedSchedulerProcess {
     pid: u32,
-}
-
-struct StartAttempt {
-    owner_token: String,
-    marker: PathBuf,
-    marker_lock: File,
-}
-
-impl StartAttempt {
-    fn new(client: &SchedulerClient) -> AppResult<Self> {
-        let owner_token = new_owner_token();
-        let directory = runtime_dir(client)?.join("attempts");
-        fs::create_dir_all(&directory).map_err(io_error("scheduler_runtime_invalid"))?;
-        let marker = directory.join(&owner_token);
-        let marker_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&marker)
-            .map_err(io_error("scheduler_runtime_invalid"))?;
-        marker_lock
-            .try_lock_exclusive()
-            .map_err(io_error("scheduler_runtime_invalid"))?;
-        Ok(Self {
-            owner_token,
-            marker,
-            marker_lock,
-        })
-    }
-}
-
-impl Drop for StartAttempt {
-    fn drop(&mut self) {
-        let _ = FileExt::unlock(&self.marker_lock);
-        let _ = fs::remove_file(&self.marker);
-    }
 }
 
 pub async fn ensure_ready(client: &SchedulerClient) -> AppResult<bool> {
@@ -153,10 +135,12 @@ pub async fn ensure_ready_with(
     }
     let log = log_path(client)?;
     let cleanup_error = match read_metadata(client)? {
-        Some(metadata) if metadata.owner_token == attempt.owner_token => stop(client, false)
-            .await
-            .err()
-            .map(|error| error.cli_envelope()),
+        Some(metadata) if metadata.owner_token == attempt.owner_token => {
+            stop(client, StopMode::Graceful)
+                .await
+                .err()
+                .map(|error| error.diagnostic())
+        }
         Some(_) | None => None,
     };
     Err(AppError::new(
@@ -267,7 +251,7 @@ fn configuration_conflict(
     .next_steps(["Use the active configuration or stop the scheduler before reconfiguring it."])
 }
 
-fn new_owner_token() -> String {
+pub(super) fn new_owner_token() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -280,12 +264,12 @@ fn new_owner_token() -> String {
     )
 }
 
-pub async fn stop(client: &SchedulerClient, force: bool) -> AppResult<bool> {
+pub async fn stop(client: &SchedulerClient, mode: StopMode) -> AppResult<bool> {
     require_managed(client)?;
     let reachable = !matches!(client.health_state().await, HealthState::Unreachable { .. });
     if !owner_lock_is_held(client)? {
         let metadata = read_metadata(client)?;
-        if force && metadata.is_some() {
+        if mode == StopMode::Force && metadata.is_some() {
             return force_stop(client).await;
         }
         if let Some(metadata) = metadata {
@@ -409,11 +393,23 @@ pub async fn run_supervisor() -> AppResult<()> {
         model: env::var("CODEX_LOOPS_CODEX_MODEL").ok(),
     };
     let owner_token = env::var("CODEX_LOOPS_OWNER_TOKEN").unwrap_or_else(|_| new_owner_token());
-    supervise(client, options, OutputMode::Background, owner_token).await
+    supervise(SupervisionRequest {
+        client,
+        options,
+        output_mode: OutputMode::Background,
+        owner_token,
+    })
+    .await
 }
 
 pub async fn run_foreground(client: SchedulerClient, options: StartOptions) -> AppResult<()> {
-    supervise(client, options, OutputMode::Foreground, new_owner_token()).await
+    supervise(SupervisionRequest {
+        client,
+        options,
+        output_mode: OutputMode::Foreground,
+        owner_token: new_owner_token(),
+    })
+    .await
 }
 
 pub fn read_logs(client: &SchedulerClient, lines: usize) -> AppResult<String> {
@@ -478,100 +474,4 @@ fn version_mismatch(found: &str, envelope: serde_json::Value) -> AppError {
 
 fn io_error(code: &'static str) -> impl FnOnce(std::io::Error) -> AppError {
     move |error| AppError::new(6, code, error.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::supervisor::{publish_metadata, scheduler_command, terminate_child_with_timeout};
-    use super::*;
-
-    #[test]
-    fn runtime_metadata_is_outside_the_packaged_release() {
-        let client = SchedulerClient::new("http://127.0.0.1:49123").unwrap();
-        let path = runtime_dir(&client).unwrap();
-        assert!(path.ends_with(".codex/workflows/runtime/127.0.0.1-49123"));
-    }
-
-    #[test]
-    fn scheduler_process_runs_from_the_stable_runtime_directory() {
-        let root = tempfile::tempdir().unwrap();
-        let release = root.path().join("release/bin/agent_loops");
-        let runtime = root.path().join("runtime");
-        let command = scheduler_command(&release, &runtime);
-
-        assert_eq!(command.as_std().get_current_dir(), Some(runtime.as_path()));
-        assert_ne!(command.as_std().get_current_dir(), release.parent());
-    }
-
-    #[test]
-    fn a_stale_metadata_file_is_not_treated_as_a_live_owner() {
-        let root = tempfile::tempdir().unwrap();
-        let lock_path = root.path().join("owner.lock");
-        File::create(&lock_path).unwrap();
-        let lock = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .unwrap();
-        lock.try_lock_exclusive().unwrap();
-        assert!(owner_lock_is_held_at(&lock_path).unwrap());
-        FileExt::unlock(&lock).unwrap();
-        assert!(!owner_lock_is_held_at(&lock_path).unwrap());
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn metadata_failure_terminates_the_spawned_scheduler() {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "sleep 30"])
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let pid = child.id().unwrap();
-        let error = publish_metadata(&mut child, || {
-            Err(AppError::new(
-                6,
-                "scheduler_metadata_invalid",
-                "fixture failure",
-            ))
-        })
-        .await
-        .unwrap_err();
-        assert_eq!(error.code.as_ref(), "scheduler_metadata_invalid");
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stubborn_scheduler_is_killed_after_the_graceful_shutdown_deadline() {
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
-            .kill_on_drop(true)
-            .spawn()
-            .unwrap();
-        let pid = child.id().unwrap();
-
-        terminate_child_with_timeout(&mut child, Duration::from_millis(50))
-            .await
-            .unwrap();
-
-        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
-    }
-
-    #[test]
-    fn attempt_liveness_is_advisory_lock_backed_and_prunes_stale_markers() {
-        let root = tempfile::tempdir().unwrap();
-        let stale = root.path().join("stale");
-        File::create(&stale).unwrap();
-        assert!(!marker_is_live(&stale).unwrap());
-        assert!(!stale.exists());
-
-        let live = root.path().join("live");
-        let lock = File::create(&live).unwrap();
-        lock.try_lock_exclusive().unwrap();
-        assert!(marker_is_live(&live).unwrap());
-        FileExt::unlock(&lock).unwrap();
-        assert!(!marker_is_live(&live).unwrap());
-        assert!(!live.exists());
-    }
 }

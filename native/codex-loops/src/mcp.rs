@@ -5,7 +5,7 @@ use std::{
 };
 
 use rmcp::{
-    ErrorData as McpError, RoleServer, ServerHandler, ServiceExt,
+    ErrorData as ProtocolError, RoleServer, ServerHandler, ServiceExt,
     model::{
         CallToolRequestParams, CallToolResult, JsonObject, ListToolsResult, PaginatedRequestParams,
         ServerCapabilities, ServerInfo, Tool, object,
@@ -18,10 +18,13 @@ use serde_json::{Map, Value, json};
 
 use crate::{
     cli::{require_shared_filesystem, resolve_script_from},
-    error::{AppError, AppResult},
+    error::{AppError, ErrorContext, McpDomainError, McpResult},
     lifecycle,
-    scheduler::{RunId, SchedulerClient},
+    scheduler::{ResumeRequest, RunId, SchedulerClient, StartRequest},
 };
+
+type DomainError = McpDomainError;
+type DomainResult<T> = McpResult<T>;
 
 #[derive(Clone)]
 struct CodexLoopsServer {
@@ -33,6 +36,15 @@ struct CodexLoopsServer {
 enum Provider {
     Mock,
     Codex,
+}
+
+impl Provider {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Mock => "mock",
+            Self::Codex => "codex",
+        }
+    }
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -63,10 +75,8 @@ struct RunArgs {
 #[serde(deny_unknown_fields)]
 struct ResumeArgs {
     run_id: RunId,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, alias = "script", skip_serializing_if = "Option::is_none")]
     script_path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    script: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     provider: Option<Provider>,
 }
@@ -82,7 +92,7 @@ enum ToolCall {
 }
 
 impl ToolCall {
-    fn parse(name: &str, arguments: JsonObject) -> AppResult<Self> {
+    fn parse(name: &str, arguments: JsonObject) -> DomainResult<Self> {
         let value = Value::Object(arguments);
         let parsed = match name {
             "workflow_validate" => serde_json::from_value(value).map(Self::Validate),
@@ -92,7 +102,7 @@ impl ToolCall {
             "workflow_resume" => serde_json::from_value(value).map(Self::Resume),
             "workflow_open_ui" => serde_json::from_value(value).map(Self::OpenUi),
             unknown => {
-                return Err(AppError::new(
+                return Err(DomainError::new(
                     2,
                     "unknown_tool",
                     format!("Unknown tool: {unknown}"),
@@ -104,7 +114,7 @@ impl ToolCall {
         Ok(parsed)
     }
 
-    fn validate(&self, name: &str) -> AppResult<()> {
+    fn validate(&self, name: &str) -> DomainResult<()> {
         let invalid = match self {
             Self::Validate(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
             Self::Start(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
@@ -115,14 +125,6 @@ impl ToolCall {
                     .is_some_and(|path| path.as_os_str().is_empty()) =>
             {
                 Some("script_path")
-            }
-            Self::Resume(args)
-                if args
-                    .script
-                    .as_ref()
-                    .is_some_and(|path| path.as_os_str().is_empty()) =>
-            {
-                Some("script")
             }
             Self::Validate(_)
             | Self::Start(_)
@@ -144,11 +146,7 @@ impl ToolCall {
         match self {
             Self::Validate(args) => !args.script_path.is_absolute(),
             Self::Start(args) => !args.script_path.is_absolute(),
-            Self::Resume(args) => args
-                .script_path
-                .iter()
-                .chain(args.script.iter())
-                .any(|path| !path.is_absolute()),
+            Self::Resume(args) => args.script_path.iter().any(|path| !path.is_absolute()),
             Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => false,
         }
     }
@@ -156,12 +154,12 @@ impl ToolCall {
     fn requires_shared_filesystem(&self) -> bool {
         match self {
             Self::Validate(_) | Self::Start(_) => true,
-            Self::Resume(args) => args.script_path.is_some() || args.script.is_some(),
+            Self::Resume(args) => args.script_path.is_some(),
             Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => false,
         }
     }
 
-    fn resolve_scripts(&mut self, workspace_root: Option<&Path>) -> AppResult<()> {
+    fn resolve_scripts(&mut self, workspace_root: Option<&Path>) -> DomainResult<()> {
         match self {
             Self::Validate(args) => {
                 args.script_path = resolve_script_from(&args.script_path, workspace_root)?;
@@ -175,11 +173,6 @@ impl ToolCall {
                     .take()
                     .map(|path| resolve_script_from(&path, workspace_root))
                     .transpose()?;
-                args.script = args
-                    .script
-                    .take()
-                    .map(|path| resolve_script_from(&path, workspace_root))
-                    .transpose()?;
             }
             Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => {}
         }
@@ -188,7 +181,7 @@ impl ToolCall {
 }
 
 impl CodexLoopsServer {
-    fn new() -> AppResult<Self> {
+    fn new() -> DomainResult<Self> {
         Ok(Self {
             client: SchedulerClient::from_env()?,
         })
@@ -198,53 +191,71 @@ impl CodexLoopsServer {
         if call.requires_shared_filesystem()
             && let Err(error) = require_shared_filesystem(&self.client)
         {
-            return structured_error(error.mcp_envelope());
+            return structured_error(present(error).mcp_envelope());
         }
         if let Err(error) = lifecycle::ensure_ready(&self.client).await {
-            return structured_error(error.mcp_envelope());
+            return structured_error(present(error).mcp_envelope());
         }
 
-        let result = match call {
-            ToolCall::Validate(args) => {
-                self.client
-                    .validate(&args.script_path.to_string_lossy())
-                    .await
-            }
-            ToolCall::Start(args) => match serde_json::to_value(args) {
-                Ok(value) => self.client.start(value).await,
-                Err(error) => Err(invalid_args("workflow_start", error.to_string())),
-            },
+        let result: DomainResult<Value> = match call {
+            ToolCall::Validate(args) => self
+                .client
+                .validate(&args.script_path.to_string_lossy())
+                .await
+                .and_then(|response| response.into_wire_value())
+                .map_err(DomainError::from),
+            ToolCall::Start(args) => self
+                .client
+                .start(&StartRequest {
+                    script_path: args.script_path.to_string_lossy().into_owned(),
+                    run_id: args.run_id,
+                    provider: args.provider.map(|provider| provider.as_str().to_owned()),
+                    budget: args.budget,
+                })
+                .await
+                .and_then(|response| response.into_wire_value())
+                .map_err(DomainError::from),
             ToolCall::Status(args) => self
                 .client
                 .status(&args.run_id)
                 .await
-                .map(conform_projection),
+                .and_then(|response| response.into_wire_value())
+                .map(conform_projection)
+                .map_err(DomainError::from),
             ToolCall::Inspect(args) => self
                 .client
                 .inspect(&args.run_id)
                 .await
-                .map(conform_projection),
+                .and_then(|response| response.into_wire_value())
+                .map(conform_projection)
+                .map_err(DomainError::from),
             ToolCall::Resume(args) => {
                 let run_id = args.run_id.clone();
-                match serde_json::to_value(args) {
-                    Ok(mut value) => {
-                        if let Some(object) = value.as_object_mut() {
-                            object.remove("run_id");
-                        }
-                        self.client.resume(&run_id, value).await
-                    }
-                    Err(error) => Err(invalid_args("workflow_resume", error.to_string())),
-                }
+                self.client
+                    .resume(
+                        &run_id,
+                        &ResumeRequest {
+                            script_path: args
+                                .script_path
+                                .map(|path| path.to_string_lossy().into_owned()),
+                            provider: args.provider.map(|provider| provider.as_str().to_owned()),
+                        },
+                    )
+                    .await
+                    .and_then(|response| response.into_wire_value())
+                    .map_err(DomainError::from)
             }
             ToolCall::OpenUi(args) => self
                 .client
                 .status(&args.run_id)
                 .await
-                .map(|envelope| open_ui_envelope(envelope, &self.client)),
+                .and_then(|response| response.into_wire_value())
+                .map(|envelope| open_ui_envelope(envelope, &self.client))
+                .map_err(DomainError::from),
         };
         match result {
             Ok(value) => CallToolResult::structured(value),
-            Err(error) => structured_error(error.mcp_envelope()),
+            Err(error) => structured_error(present(error).mcp_envelope()),
         }
     }
 }
@@ -260,7 +271,7 @@ impl ServerHandler for CodexLoopsServer {
         &self,
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
-    ) -> Result<ListToolsResult, McpError> {
+    ) -> Result<ListToolsResult, ProtocolError> {
         Ok(ListToolsResult::with_all_items(tools()))
     }
 
@@ -268,10 +279,14 @@ impl ServerHandler for CodexLoopsServer {
         &self,
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResult, ProtocolError> {
         let mut call = ToolCall::parse(&request.name, request.arguments.unwrap_or_default())
             .map_err(|error| {
-                McpError::invalid_params(error.message.to_string(), Some(*error.details))
+                let error = present(error);
+                ProtocolError::invalid_params(
+                    error.message().to_owned(),
+                    Some(error.details().clone()),
+                )
             })?;
         let workspace_root = if call.contains_relative_script_path() {
             workspace_root(&context).await
@@ -280,21 +295,21 @@ impl ServerHandler for CodexLoopsServer {
         };
         match call.resolve_scripts(workspace_root.as_deref()) {
             Ok(()) => {}
-            Err(error) => return Ok(structured_error(error.mcp_envelope())),
+            Err(error) => return Ok(structured_error(present(error).mcp_envelope())),
         }
         Ok(self.execute(call).await)
     }
 }
 
-pub async fn run() -> AppResult<()> {
+pub async fn run() -> DomainResult<()> {
     let service = CodexLoopsServer::new()?
         .serve(stdio())
         .await
-        .map_err(|error| AppError::new(6, "mcp_transport_failed", error.to_string()))?;
+        .map_err(|error| DomainError::new(6, "mcp_transport_failed", error.to_string()))?;
     service
         .waiting()
         .await
-        .map_err(|error| AppError::new(6, "mcp_transport_failed", error.to_string()))?;
+        .map_err(|error| DomainError::new(6, "mcp_transport_failed", error.to_string()))?;
     Ok(())
 }
 
@@ -318,8 +333,12 @@ async fn workspace_root(context: &RequestContext<RoleServer>) -> Option<PathBuf>
     })
 }
 
-fn invalid_args(tool: &str, message: impl Into<String>) -> AppError {
-    AppError::new(2, "invalid_params", message).details(json!({"tool": tool}))
+fn invalid_args(tool: &str, message: impl Into<String>) -> DomainError {
+    DomainError::new(2, "invalid_params", message).details(json!({"tool": tool}))
+}
+
+fn present(error: impl Into<AppError>) -> AppError {
+    error.into()
 }
 
 fn tools() -> Vec<Tool> {
@@ -475,13 +494,37 @@ mod tests {
     #[test]
     fn invalid_arguments_are_rejected_before_execution() {
         let error = ToolCall::parse("workflow_start", JsonObject::new()).unwrap_err();
-        assert_eq!(error.code.as_ref(), "invalid_params");
+        assert_eq!(error.code(), "invalid_params");
         let error = ToolCall::parse(
             "workflow_start",
             object(json!({"script_path": "/missing", "unexpected": true})),
         )
         .unwrap_err();
-        assert_eq!(error.code.as_ref(), "invalid_params");
+        assert_eq!(error.code(), "invalid_params");
+    }
+
+    #[test]
+    fn resume_script_alias_normalizes_to_one_typed_field() {
+        let call = ToolCall::parse(
+            "workflow_resume",
+            serde_json::from_value(json!({"run_id": "run-1", "script": "/tmp/a.exs"})).unwrap(),
+        )
+        .unwrap();
+        assert!(matches!(
+            call,
+            ToolCall::Resume(ResumeArgs {
+                script_path: Some(_),
+                ..
+            })
+        ));
+
+        let duplicate: JsonObject = serde_json::from_value(json!({
+            "run_id": "run-1",
+            "script": "/tmp/a.exs",
+            "script_path": "/tmp/b.exs"
+        }))
+        .unwrap();
+        assert!(ToolCall::parse("workflow_resume", duplicate).is_err());
     }
 
     #[test]
@@ -518,9 +561,6 @@ mod tests {
         } else {
             panic!("resume with a script must require a shared filesystem")
         };
-        assert_eq!(
-            error.code.as_ref(),
-            "remote_scheduler_requires_shared_filesystem"
-        );
+        assert_eq!(error.code(), "remote_scheduler_requires_shared_filesystem");
     }
 }

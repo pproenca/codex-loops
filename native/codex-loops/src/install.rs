@@ -8,9 +8,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    error::{AppError, AppResult, ChangeState},
+    error::{ChangeState, ErrorContext, InstallError, InstallResult},
     runtime::{Bundle, CodexBinding, binding_path},
 };
+
+type AppError = InstallError;
+type AppResult<T> = InstallResult<T>;
 
 const MCP_NAME: &str = "codex-loops";
 const SKILL_VERSION_FILE: &str = ".codex-loops-version";
@@ -88,6 +91,35 @@ struct State {
     mcp: Option<ListedMcp>,
 }
 
+struct ExecutionContext<'a> {
+    bundle: &'a Bundle,
+    codex: &'a CodexBinding,
+    binding_path: &'a Path,
+    skill_destination: &'a Path,
+    integration_command: &'a Path,
+}
+
+struct RegistrationRequest<'a> {
+    codex: &'a Path,
+    registration: &'a McpRegistration,
+    changed: ChangeState,
+    step: &'static str,
+}
+
+struct CommandRequest<'a> {
+    program: &'a Path,
+    args: &'a [&'a str],
+    changed: ChangeState,
+    step: &'static str,
+}
+
+struct McpReplacement<'a> {
+    codex: &'a Path,
+    integration_command: &'a Path,
+    previous: &'a McpRegistration,
+    changed: ChangeState,
+}
+
 pub fn run(options: Options) -> AppResult<Value> {
     let bundle = Bundle::installed()?;
     let integration_command = bundle.integration_command();
@@ -110,19 +142,18 @@ pub fn run(options: Options) -> AppResult<Value> {
         );
     }
 
-    let mut changed = false;
+    let mut changed = ChangeState::Unchanged;
     if options.mode == Mode::Install {
+        let context = ExecutionContext {
+            bundle: &bundle,
+            codex: &codex,
+            binding_path: &binding_path,
+            skill_destination: &skill_destination,
+            integration_command: &integration_command,
+        };
         for action in &actions {
-            execute(
-                action,
-                &bundle,
-                &codex,
-                &binding_path,
-                &skill_destination,
-                &integration_command,
-                changed,
-            )?;
-            changed = true;
+            execute(action, &context, changed)?;
+            changed = changed.after_success();
         }
 
         let final_state = read_state(
@@ -139,7 +170,7 @@ pub fn run(options: Options) -> AppResult<Value> {
                 "Codex Loops installation could not be verified.",
             )
             .details(json!({"plan": action_names(&remaining)}))
-            .changed(ChangeState::from(changed))
+            .changed(changed)
             .step("verification"));
         }
     }
@@ -153,7 +184,7 @@ pub fn run(options: Options) -> AppResult<Value> {
     Ok(json!({
         "ok": true,
         "command": "install",
-        "changed": changed,
+        "changed": changed.as_bool(),
         "mode": match options.mode {
             Mode::Install => "install",
             Mode::Check => "check",
@@ -177,8 +208,8 @@ pub fn run(options: Options) -> AppResult<Value> {
 
 fn select_codex(explicit: Option<&Path>, binding_path: &Path) -> AppResult<CodexBinding> {
     match explicit {
-        Some(path) => CodexBinding::probe(path),
-        None if binding_path.is_file() => CodexBinding::load(binding_path),
+        Some(path) => Ok(CodexBinding::probe(path)?),
+        None if binding_path.is_file() => Ok(CodexBinding::load(binding_path)?),
         None => Err(AppError::new(
             3,
             "codex_binding_required",
@@ -229,18 +260,20 @@ fn read_mcp(codex: &Path) -> AppResult<Option<ListedMcp>> {
     let output = Command::new(codex)
         .args(["mcp", "list", "--json"])
         .output()
-        .map_err(|error| codex_command_error(error.to_string(), false, "mcp_read"))?;
+        .map_err(|error| {
+            codex_command_error(error.to_string(), ChangeState::Unchanged, "mcp_read")
+        })?;
     if !output.status.success() {
         return Err(codex_command_error(
             String::from_utf8_lossy(&output.stderr).trim().to_owned(),
-            false,
+            ChangeState::Unchanged,
             "mcp_read",
         ));
     }
     let servers: Vec<ListedMcp> = serde_json::from_slice(&output.stdout).map_err(|error| {
         codex_command_error(
             format!("Codex returned invalid MCP JSON: {error}"),
-            false,
+            ChangeState::Unchanged,
             "mcp_read",
         )
     })?;
@@ -273,22 +306,17 @@ fn mcp_matches(value: &ListedMcp, control_plane: &Path) -> bool {
         && value.transport.args == ["mcp"]
 }
 
-fn execute(
-    action: &Action,
-    bundle: &Bundle,
-    codex: &CodexBinding,
-    binding_path: &Path,
-    skill_destination: &Path,
-    integration_command: &Path,
-    changed: bool,
-) -> AppResult<()> {
+fn execute(action: &Action, context: &ExecutionContext<'_>, changed: ChangeState) -> AppResult<()> {
     match action {
-        Action::BindCodex => codex.persist(binding_path),
-        Action::InstallSkill => install_skill(&bundle.skill, skill_destination),
-        Action::AddMcp => add_mcp(&codex.path, integration_command, changed),
-        Action::ReplaceMcp { previous } => {
-            replace_mcp(&codex.path, integration_command, previous, changed)
-        }
+        Action::BindCodex => Ok(context.codex.persist(context.binding_path)?),
+        Action::InstallSkill => install_skill(&context.bundle.skill, context.skill_destination),
+        Action::AddMcp => add_mcp(&context.codex.path, context.integration_command, changed),
+        Action::ReplaceMcp { previous } => replace_mcp(McpReplacement {
+            codex: &context.codex.path,
+            integration_command: context.integration_command,
+            previous,
+            changed,
+        }),
     }
 }
 
@@ -312,24 +340,33 @@ fn restorable_mcp(value: &ListedMcp) -> AppResult<McpRegistration> {
     })
 }
 
-fn replace_mcp(
-    codex: &Path,
-    integration_command: &Path,
-    previous: &McpRegistration,
-    changed: bool,
-) -> AppResult<()> {
-    run_command(codex, &["mcp", "remove", MCP_NAME], changed, "mcp_remove")?;
-    if let Err(add_error) = add_mcp(codex, integration_command, true) {
-        return match add_registration(codex, previous, true, "mcp_restore") {
-            Ok(()) => Err(add_error.changed(ChangeState::from(changed))),
+fn replace_mcp(replacement: McpReplacement<'_>) -> AppResult<()> {
+    run_command(CommandRequest {
+        program: replacement.codex,
+        args: &["mcp", "remove", MCP_NAME],
+        changed: replacement.changed,
+        step: "mcp_remove",
+    })?;
+    if let Err(add_error) = add_mcp(
+        replacement.codex,
+        replacement.integration_command,
+        ChangeState::Changed,
+    ) {
+        return match add_registration(RegistrationRequest {
+            codex: replacement.codex,
+            registration: replacement.previous,
+            changed: ChangeState::Changed,
+            step: "mcp_restore",
+        }) {
+            Ok(()) => Err(add_error.changed(replacement.changed)),
             Err(restore_error) => Err(AppError::new(
                 5,
                 "mcp_rollback_failed",
                 "Codex Loops could not restore the previous MCP registration.",
             )
             .details(json!({
-                "replacement_error": add_error.cli_envelope(),
-                "restore_error": restore_error.cli_envelope()
+                "replacement_error": add_error.diagnostic(),
+                "restore_error": restore_error.diagnostic()
             }))
             .changed(ChangeState::Changed)
             .step("mcp_restore")),
@@ -338,7 +375,7 @@ fn replace_mcp(
     Ok(())
 }
 
-fn add_mcp(codex: &Path, control_plane: &Path, changed: bool) -> AppResult<()> {
+fn add_mcp(codex: &Path, control_plane: &Path, changed: ChangeState) -> AppResult<()> {
     let command = control_plane.to_str().ok_or_else(|| {
         AppError::new(
             6,
@@ -346,28 +383,24 @@ fn add_mcp(codex: &Path, control_plane: &Path, changed: bool) -> AppResult<()> {
             "The control-plane path is not valid UTF-8.",
         )
     })?;
-    add_registration(
+    let registration = McpRegistration {
+        command: command.to_owned(),
+        args: vec!["mcp".into()],
+    };
+    add_registration(RegistrationRequest {
         codex,
-        &McpRegistration {
-            command: command.to_owned(),
-            args: vec!["mcp".into()],
-        },
+        registration: &registration,
         changed,
-        "mcp_add",
-    )
+        step: "mcp_add",
+    })
 }
 
-fn add_registration(
-    codex: &Path,
-    registration: &McpRegistration,
-    changed: bool,
-    step: &'static str,
-) -> AppResult<()> {
-    let output = Command::new(codex)
-        .args(["mcp", "add", MCP_NAME, "--", &registration.command])
-        .args(&registration.args)
+fn add_registration(request: RegistrationRequest<'_>) -> AppResult<()> {
+    let output = Command::new(request.codex)
+        .args(["mcp", "add", MCP_NAME, "--", &request.registration.command])
+        .args(&request.registration.args)
         .output()
-        .map_err(|error| codex_command_error(error.to_string(), changed, step))?;
+        .map_err(|error| codex_command_error(error.to_string(), request.changed, request.step))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -377,29 +410,29 @@ fn add_registration(
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-            changed,
-            step,
+            request.changed,
+            request.step,
         ))
     }
 }
 
-fn run_command(program: &Path, args: &[&str], changed: bool, step: &'static str) -> AppResult<()> {
-    let output = Command::new(program)
-        .args(args)
+fn run_command(request: CommandRequest<'_>) -> AppResult<()> {
+    let output = Command::new(request.program)
+        .args(request.args)
         .output()
-        .map_err(|error| codex_command_error(error.to_string(), changed, step))?;
+        .map_err(|error| codex_command_error(error.to_string(), request.changed, request.step))?;
     if output.status.success() {
         Ok(())
     } else {
         Err(codex_command_error(
             format!(
                 "{} exited {}: {}",
-                args.join(" "),
+                request.args.join(" "),
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-            changed,
-            step,
+            request.changed,
+            request.step,
         ))
     }
 }
@@ -408,7 +441,7 @@ fn text_command(program: &Path, args: &[&str], step: &'static str) -> AppResult<
     let output = Command::new(program)
         .args(args)
         .output()
-        .map_err(|error| codex_command_error(error.to_string(), false, step))?;
+        .map_err(|error| codex_command_error(error.to_string(), ChangeState::Unchanged, step))?;
     if output.status.success() {
         Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     } else {
@@ -419,20 +452,20 @@ fn text_command(program: &Path, args: &[&str], step: &'static str) -> AppResult<
                 output.status,
                 String::from_utf8_lossy(&output.stderr).trim()
             ),
-            false,
+            ChangeState::Unchanged,
             step,
         ))
     }
 }
 
-fn codex_command_error(reason: String, changed: bool, step: &'static str) -> AppError {
+fn codex_command_error(reason: String, changed: ChangeState, step: &'static str) -> AppError {
     AppError::new(
         5,
         "codex_command_failed",
         "Codex command failed unexpectedly.",
     )
     .details(json!({"reason": reason}))
-    .changed(ChangeState::from(changed))
+    .changed(changed)
     .step(step)
 }
 
@@ -465,6 +498,19 @@ fn action_commands(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    fn fake_codex(body: &str) -> tempfile::TempDir {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("codex");
+        fs::write(&path, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+        let mut permissions = fs::metadata(&path).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(path, permissions).unwrap();
+        root
+    }
 
     fn bundle() -> Bundle {
         Bundle {
@@ -533,5 +579,63 @@ mod tests {
 
         fs::write(destination.path().join("SKILL.md"), "expected").unwrap();
         assert!(skill_matches(source.path(), destination.path()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_mcp_add_failure_preserves_unchanged_state() {
+        let root = fake_codex("echo failed >&2; exit 7");
+        let error = add_mcp(
+            &root.path().join("codex"),
+            Path::new("/new/codex-loops"),
+            ChangeState::Unchanged,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "codex_command_failed");
+        assert_eq!(error.diagnostic()["changed"], false);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_replacement_reports_failed_rollback() {
+        let root = fake_codex(
+            r#"case "$1 $2" in
+  "mcp remove") exit 0 ;;
+  "mcp add") echo failed >&2; exit 7 ;;
+esac"#,
+        );
+        let previous = McpRegistration {
+            command: "/old/codex-loops".into(),
+            args: vec!["mcp".into()],
+        };
+        let error = replace_mcp(McpReplacement {
+            codex: &root.path().join("codex"),
+            integration_command: Path::new("/new/codex-loops"),
+            previous: &previous,
+            changed: ChangeState::Unchanged,
+        })
+        .unwrap_err();
+
+        assert_eq!(error.code(), "mcp_rollback_failed");
+        assert_eq!(error.diagnostic()["changed"], true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mcp_replacement_succeeds_when_new_registration_is_added() {
+        let root = fake_codex("exit 0");
+        let previous = McpRegistration {
+            command: "/old/codex-loops".into(),
+            args: vec!["mcp".into()],
+        };
+
+        replace_mcp(McpReplacement {
+            codex: &root.path().join("codex"),
+            integration_command: Path::new("/new/codex-loops"),
+            previous: &previous,
+            changed: ChangeState::Unchanged,
+        })
+        .unwrap();
     }
 }

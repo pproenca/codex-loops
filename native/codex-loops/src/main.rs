@@ -169,7 +169,7 @@ async fn main() -> ExitCode {
     let app = App::parse();
     match app.command {
         Some(Command::Mcp { stdio: _ }) => exit_silent(mcp::run().await),
-        Some(Command::Daemon) => exit_silent(lifecycle::run_supervisor().await.map_err(Into::into)),
+        Some(Command::Daemon) => exit_silent(lifecycle::run_supervisor().await),
         Some(Command::ProviderExec { args }) => provider_exec(args),
         Some(Command::Run {
             script,

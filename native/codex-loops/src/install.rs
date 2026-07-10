@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    error::{ChangeState, InstallError as AppError, InstallResult as AppResult},
+    error::{AppError, AppResult, ChangeState},
     runtime::{Bundle, CodexBinding, binding_path},
 };
 
@@ -177,8 +177,8 @@ pub fn run(options: Options) -> AppResult<Value> {
 
 fn select_codex(explicit: Option<&Path>, binding_path: &Path) -> AppResult<CodexBinding> {
     match explicit {
-        Some(path) => Ok(CodexBinding::probe(path)?),
-        None if binding_path.is_file() => Ok(CodexBinding::load(binding_path)?),
+        Some(path) => CodexBinding::probe(path),
+        None if binding_path.is_file() => CodexBinding::load(binding_path),
         None => Err(AppError::new(
             3,
             "codex_binding_required",
@@ -283,7 +283,7 @@ fn execute(
     changed: bool,
 ) -> AppResult<()> {
     match action {
-        Action::BindCodex => Ok(codex.persist(binding_path)?),
+        Action::BindCodex => codex.persist(binding_path),
         Action::InstallSkill => install_skill(&bundle.skill, skill_destination),
         Action::AddMcp => add_mcp(&codex.path, integration_command, changed),
         Action::ReplaceMcp { previous } => {

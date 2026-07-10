@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use crate::{
-    error::{LifecycleError as AppError, LifecycleResult as AppResult},
+    error::{AppError, AppResult},
     runtime::Runtime,
     scheduler::{HealthState, SchedulerClient},
 };

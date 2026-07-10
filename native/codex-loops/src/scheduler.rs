@@ -10,7 +10,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::error::{SchedulerError as AppError, SchedulerResult as AppResult};
+use crate::error::{AppError, AppResult};
 
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b' ')

@@ -183,14 +183,14 @@ pub async fn status(run_id: String, server: Option<String>) -> AppResult<Value> 
     let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
-    client.status(&run_id).await.map_err(AppError::from)
+    client.status(&run_id).await
 }
 
 pub async fn inspect(run_id: String, server: Option<String>) -> AppResult<Value> {
     let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
-    client.inspect(&run_id).await.map_err(AppError::from)
+    client.inspect(&run_id).await
 }
 
 pub async fn resume(
@@ -214,10 +214,7 @@ pub async fn resume(
             Value::String(script.to_string_lossy().into_owned()),
         );
     }
-    client
-        .resume(&run_id, Value::Object(attrs))
-        .await
-        .map_err(AppError::from)
+    client.resume(&run_id, Value::Object(attrs)).await
 }
 
 pub async fn open(run_id: String, server: Option<String>) -> AppResult<Value> {
@@ -259,7 +256,7 @@ pub async fn doctor() -> AppResult<Value> {
 }
 
 pub fn install(options: install::Options) -> AppResult<Value> {
-    install::run(options).map_err(AppError::from)
+    install::run(options)
 }
 
 fn default_run_id(script: &std::path::Path) -> String {
@@ -293,8 +290,8 @@ fn default_run_id(script: &std::path::Path) -> String {
 
 fn client(server: Option<String>) -> AppResult<SchedulerClient> {
     match server {
-        Some(server) => SchedulerClient::new(&server).map_err(AppError::from),
-        None => SchedulerClient::from_env().map_err(AppError::from),
+        Some(server) => SchedulerClient::new(&server),
+        None => SchedulerClient::from_env(),
     }
 }
 

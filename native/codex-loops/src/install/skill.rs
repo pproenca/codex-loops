@@ -6,7 +6,7 @@ use std::{
 
 use serde_json::json;
 
-use crate::error::{ChangeState, InstallError, InstallResult};
+use crate::error::{AppError, AppResult, ChangeState};
 
 use super::SKILL_VERSION_FILE;
 
@@ -46,9 +46,9 @@ fn directory_snapshot(root: &Path, ignore_version: bool) -> Option<BTreeMap<Path
     Some(snapshot)
 }
 
-pub(super) fn install_skill(source: &Path, destination: &Path) -> InstallResult<()> {
+pub(super) fn install_skill(source: &Path, destination: &Path) -> AppResult<()> {
     let parent = destination.parent().ok_or_else(|| {
-        InstallError::new(
+        AppError::new(
             6,
             "skill_install_failed",
             "The user skill path has no parent.",
@@ -68,7 +68,7 @@ pub(super) fn install_skill(source: &Path, destination: &Path) -> InstallResult<
         if backup.exists()
             && let Err(restore_error) = fs::rename(&backup, destination)
         {
-            return Err(InstallError::new(
+            return Err(AppError::new(
                 6,
                 "skill_rollback_failed",
                 "Codex Loops could not restore the previous user skill.",
@@ -86,7 +86,7 @@ pub(super) fn install_skill(source: &Path, destination: &Path) -> InstallResult<
     Ok(())
 }
 
-fn copy_dir(source: &Path, destination: &Path) -> InstallResult<()> {
+fn copy_dir(source: &Path, destination: &Path) -> AppResult<()> {
     fs::create_dir_all(destination).map_err(skill_error)?;
     for entry in fs::read_dir(source).map_err(skill_error)? {
         let entry = entry.map_err(skill_error)?;
@@ -100,9 +100,9 @@ fn copy_dir(source: &Path, destination: &Path) -> InstallResult<()> {
     Ok(())
 }
 
-pub(super) fn skill_destination() -> InstallResult<PathBuf> {
+pub(super) fn skill_destination() -> AppResult<PathBuf> {
     let home = std::env::var_os("HOME").ok_or_else(|| {
-        InstallError::new(
+        AppError::new(
             6,
             "skill_install_failed",
             "HOME is not set; the user skill cannot be installed.",
@@ -111,8 +111,8 @@ pub(super) fn skill_destination() -> InstallResult<PathBuf> {
     Ok(PathBuf::from(home).join(".agents/skills/codex-loops"))
 }
 
-fn skill_error(error: std::io::Error) -> InstallError {
-    InstallError::new(
+fn skill_error(error: std::io::Error) -> AppError {
+    AppError::new(
         6,
         "skill_install_failed",
         "Codex Loops could not install its user skill.",

@@ -183,14 +183,14 @@ pub async fn status(run_id: String, server: Option<String>) -> AppResult<Value> 
     let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
-    client.status(&run_id).await
+    client.status(&run_id).await.map_err(AppError::from)
 }
 
 pub async fn inspect(run_id: String, server: Option<String>) -> AppResult<Value> {
     let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
-    client.inspect(&run_id).await
+    client.inspect(&run_id).await.map_err(AppError::from)
 }
 
 pub async fn resume(
@@ -214,7 +214,10 @@ pub async fn resume(
             Value::String(script.to_string_lossy().into_owned()),
         );
     }
-    client.resume(&run_id, Value::Object(attrs)).await
+    client
+        .resume(&run_id, Value::Object(attrs))
+        .await
+        .map_err(AppError::from)
 }
 
 pub async fn open(run_id: String, server: Option<String>) -> AppResult<Value> {
@@ -256,7 +259,7 @@ pub async fn doctor() -> AppResult<Value> {
 }
 
 pub fn install(options: install::Options) -> AppResult<Value> {
-    install::run(options)
+    install::run(options).map_err(AppError::from)
 }
 
 fn default_run_id(script: &std::path::Path) -> String {
@@ -290,8 +293,8 @@ fn default_run_id(script: &std::path::Path) -> String {
 
 fn client(server: Option<String>) -> AppResult<SchedulerClient> {
     match server {
-        Some(server) => SchedulerClient::new(&server),
-        None => SchedulerClient::from_env(),
+        Some(server) => SchedulerClient::new(&server).map_err(AppError::from),
+        None => SchedulerClient::from_env().map_err(AppError::from),
     }
 }
 
@@ -321,10 +324,12 @@ fn local_target(
             .transpose()?
             .unwrap_or(47_125),
     };
-    let connect_host = match host.as_str() {
-        "0.0.0.0" => "127.0.0.1",
-        "::" => "::1",
-        _ => host.as_str(),
+    let connect_host = if host == "0.0.0.0" {
+        "127.0.0.1"
+    } else if host == "::" {
+        "::1"
+    } else {
+        host.as_str()
     };
     let client = SchedulerClient::managed(&local_url(connect_host, port))?;
     Ok((host, port, client))

@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use crate::{
-    error::{AppError, AppResult},
+    error::{LifecycleError as AppError, LifecycleResult as AppResult},
     runtime::Runtime,
     scheduler::{HealthState, SchedulerClient},
 };
@@ -157,7 +157,7 @@ pub async fn ensure_ready_with(
             .await
             .err()
             .map(|error| error.cli_envelope()),
-        _ => None,
+        Some(_) | None => None,
     };
     Err(AppError::new(
         6,

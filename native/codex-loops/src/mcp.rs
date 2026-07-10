@@ -204,26 +204,28 @@ impl CodexLoopsServer {
             return structured_error(error.mcp_envelope());
         }
 
-        let result = match call {
-            ToolCall::Validate(args) => {
-                self.client
-                    .validate(&args.script_path.to_string_lossy())
-                    .await
-            }
+        let result: AppResult<Value> = match call {
+            ToolCall::Validate(args) => self
+                .client
+                .validate(&args.script_path.to_string_lossy())
+                .await
+                .map_err(AppError::from),
             ToolCall::Start(args) => match serde_json::to_value(args) {
-                Ok(value) => self.client.start(value).await,
+                Ok(value) => self.client.start(value).await.map_err(AppError::from),
                 Err(error) => Err(invalid_args("workflow_start", error.to_string())),
             },
             ToolCall::Status(args) => self
                 .client
                 .status(&args.run_id)
                 .await
-                .map(conform_projection),
+                .map(conform_projection)
+                .map_err(AppError::from),
             ToolCall::Inspect(args) => self
                 .client
                 .inspect(&args.run_id)
                 .await
-                .map(conform_projection),
+                .map(conform_projection)
+                .map_err(AppError::from),
             ToolCall::Resume(args) => {
                 let run_id = args.run_id.clone();
                 match serde_json::to_value(args) {
@@ -231,7 +233,10 @@ impl CodexLoopsServer {
                         if let Some(object) = value.as_object_mut() {
                             object.remove("run_id");
                         }
-                        self.client.resume(&run_id, value).await
+                        self.client
+                            .resume(&run_id, value)
+                            .await
+                            .map_err(AppError::from)
                     }
                     Err(error) => Err(invalid_args("workflow_resume", error.to_string())),
                 }
@@ -240,7 +245,8 @@ impl CodexLoopsServer {
                 .client
                 .status(&args.run_id)
                 .await
-                .map(|envelope| open_ui_envelope(envelope, &self.client)),
+                .map(|envelope| open_ui_envelope(envelope, &self.client))
+                .map_err(AppError::from),
         };
         match result {
             Ok(value) => CallToolResult::structured(value),
@@ -271,7 +277,7 @@ impl ServerHandler for CodexLoopsServer {
     ) -> Result<CallToolResult, McpError> {
         let mut call = ToolCall::parse(&request.name, request.arguments.unwrap_or_default())
             .map_err(|error| {
-                McpError::invalid_params(error.message.to_string(), Some(*error.details))
+                McpError::invalid_params(error.message.to_string(), Some((*error.details).clone()))
             })?;
         let workspace_root = if call.contains_relative_script_path() {
             workspace_root(&context).await

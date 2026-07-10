@@ -169,7 +169,7 @@ async fn main() -> ExitCode {
     let app = App::parse();
     match app.command {
         Some(Command::Mcp { stdio: _ }) => exit_silent(mcp::run().await),
-        Some(Command::Daemon) => exit_silent(lifecycle::run_supervisor().await),
+        Some(Command::Daemon) => exit_silent(lifecycle::run_supervisor().await.map_err(Into::into)),
         Some(Command::ProviderExec { args }) => provider_exec(args),
         Some(Command::Run {
             script,
@@ -455,7 +455,7 @@ fn print_human(value: &Value) {
                 serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
             );
         }
-        _ => {
+        Some(_) | None => {
             println!(
                 "Codex Loops is {}.",
                 if value["changed"] == Value::Bool(true) {

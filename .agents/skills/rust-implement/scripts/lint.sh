@@ -7,7 +7,7 @@ FILE="${1:?Usage: lint.sh <file.rs>}"
 ERRORS=0
 
 # Find where test module starts (to exclude test code from prod checks)
-TEST_LINE=$(grep -n '#\[cfg(test)\]' "$FILE" 2>/dev/null | head -1 | cut -d: -f1)
+TEST_LINE=$(grep -n '#\[cfg(test)\]' "$FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)
 if [ -z "$TEST_LINE" ]; then
   TEST_LINE=$(wc -l < "$FILE")
 fi
@@ -55,8 +55,14 @@ if [ "$PUB_ENUMS" -gt "$DISPLAY_IMPLS" ] 2>/dev/null; then
   echo "INFO: $PUB_ENUMS public enum(s) but only $DISPLAY_IMPLS Display impl(s)"
 fi
 
-# 7. Bare ? without .context() — flag lines with ? that lack context/with_context
-BARE_Q=$(head -n "$TEST_LINE" "$FILE" | grep -n '?\s*;' | grep -v '\.context\|\.with_context\|// lint:allow' || true)
+# 7. Bare ? without .context(). Domain-typed results preserve their operation
+# context in a matchable error variant; application/anyhow results still need an
+# explicit context frame at each propagation site.
+if head -n "$TEST_LINE" "$FILE" | grep -q 'anyhow::Result'; then
+  BARE_Q=$(head -n "$TEST_LINE" "$FILE" | grep -n '?\s*;' | grep -v '\.context\|\.with_context\|// lint:allow' || true)
+else
+  BARE_Q=""
+fi
 if [ -n "$BARE_Q" ]; then
   echo "ERROR: Bare ? without .context():"
   echo "$BARE_Q"

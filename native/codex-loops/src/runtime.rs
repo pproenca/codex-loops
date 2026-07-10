@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{AppError, AppResult};
+use crate::error::{RuntimeError as AppError, RuntimeResult as AppResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Bundle {

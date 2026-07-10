@@ -1,26 +1,35 @@
-use std::{
-    collections::BTreeMap,
-    fs,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{fs, path::{Path, PathBuf}, process::Command};
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
-    error::{AppError, AppResult},
+    error::{ChangeState, InstallError as AppError, InstallResult as AppResult},
     runtime::{Bundle, CodexBinding, binding_path},
 };
 
 const MCP_NAME: &str = "codex-loops";
 const SKILL_VERSION_FILE: &str = ".codex-loops-version";
 
+mod skill;
+
+use skill::{install_skill, skill_destination, skill_matches};
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Install,
     Check,
     DryRun,
+}
+
+impl std::fmt::Display for Mode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Install => "install",
+            Self::Check => "check",
+            Self::DryRun => "dry_run",
+        })
+    }
 }
 
 pub struct Options {
@@ -126,7 +135,7 @@ pub fn run(options: Options) -> AppResult<Value> {
                 "Codex Loops installation could not be verified.",
             )
             .details(json!({"plan": action_names(&remaining)}))
-            .changed(changed)
+            .changed(ChangeState::from(changed))
             .step("verification"));
         }
     }
@@ -164,8 +173,8 @@ pub fn run(options: Options) -> AppResult<Value> {
 
 fn select_codex(explicit: Option<&Path>, binding_path: &Path) -> AppResult<CodexBinding> {
     match explicit {
-        Some(path) => CodexBinding::probe(path),
-        None if binding_path.is_file() => CodexBinding::load(binding_path),
+        Some(path) => Ok(CodexBinding::probe(path)?),
+        None if binding_path.is_file() => Ok(CodexBinding::load(binding_path)?),
         None => Err(AppError::new(
             3,
             "codex_binding_required",
@@ -270,7 +279,7 @@ fn execute(
     changed: bool,
 ) -> AppResult<()> {
     match action {
-        Action::BindCodex => codex.persist(binding_path),
+        Action::BindCodex => Ok(codex.persist(binding_path)?),
         Action::InstallSkill => install_skill(&bundle.skill, skill_destination),
         Action::AddMcp => add_mcp(&codex.path, integration_command, changed),
         Action::ReplaceMcp { previous } => {
@@ -308,7 +317,7 @@ fn replace_mcp(
     run_command(codex, &["mcp", "remove", MCP_NAME], changed, "mcp_remove")?;
     if let Err(add_error) = add_mcp(codex, integration_command, true) {
         return match add_registration(codex, previous, true, "mcp_restore") {
-            Ok(()) => Err(add_error.changed(changed)),
+            Ok(()) => Err(add_error.changed(ChangeState::from(changed))),
             Err(restore_error) => Err(AppError::new(
                 5,
                 "mcp_rollback_failed",
@@ -318,7 +327,7 @@ fn replace_mcp(
                 "replacement_error": add_error.cli_envelope(),
                 "restore_error": restore_error.cli_envelope()
             }))
-            .changed(true)
+            .changed(ChangeState::Changed)
             .step("mcp_restore")),
         };
     }
@@ -436,7 +445,7 @@ fn install_skill(source: &Path, destination: &Path) -> AppResult<()> {
                     "install_error": error.to_string(),
                     "restore_error": restore_error.to_string()
                 }))
-                .changed(true)
+                .changed(ChangeState::Changed)
                 .step("skill_restore"));
             }
         }
@@ -529,7 +538,7 @@ fn codex_command_error(reason: String, changed: bool, step: &'static str) -> App
         "Codex command failed unexpectedly.",
     )
     .details(json!({"reason": reason}))
-    .changed(changed)
+    .changed(ChangeState::from(changed))
     .step(step)
 }
 

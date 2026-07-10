@@ -38,6 +38,9 @@ native-quality:
 	$(CARGO) fmt --manifest-path $(NATIVE_MANIFEST) -- --check
 	$(CARGO) clippy --locked --manifest-path $(NATIVE_MANIFEST) -- -D warnings
 	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST)
+	@for file in native/codex-loops/src/*.rs native/codex-loops/src/lifecycle/*.rs; do \
+		bash .agents/skills/rust-implement/scripts/lint.sh "$$file"; \
+	done
 
 quality: setup format-check install-docs-check audit-check build native-quality credo-check security-check test
 

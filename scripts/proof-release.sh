@@ -435,7 +435,8 @@ echo "-- crash backoff remains explicitly stoppable"
 bad_runtime="$tmpdir/bad-runtime"
 bad_bundle="$tmpdir/bad-bundle"
 bad_scheduler="$bad_bundle/libexec/scheduler/bin/agent_loops"
-mkdir -p "$(dirname "$bad_scheduler")"
+mkdir -p "$bad_bundle/libexec/scheduler"
+cp -R "$repo_root/_build/dev-bundle/libexec/scheduler/." "$bad_bundle/libexec/scheduler/"
 cat >"$bad_scheduler" <<'EOF'
 #!/bin/sh
 exit 1
@@ -519,7 +520,8 @@ echo "-- short-timeout joiners cannot terminate a delayed lock winner"
 delay_runtime="$tmpdir/delay-runtime"
 delay_bundle="$tmpdir/delay-bundle"
 delay_scheduler="$delay_bundle/libexec/scheduler/bin/agent_loops"
-mkdir -p "$(dirname "$delay_scheduler")"
+mkdir -p "$delay_bundle/libexec/scheduler"
+cp -R "$repo_root/_build/dev-bundle/libexec/scheduler/." "$delay_bundle/libexec/scheduler/"
 cat >"$delay_scheduler" <<'EOF'
 #!/bin/sh
 sleep 2

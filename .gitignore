@@ -26,3 +26,6 @@ deps/
 !plugins/codex-loops/scheduler/**/*.beam
 erl_crash.dump
 .elixir_ls/
+
+# Rust build artifacts
+target/

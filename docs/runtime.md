@@ -13,11 +13,12 @@ Codex MCP tool -> scheduler HTTP API -> supervised run writer
                -> scheduler API / Phoenix LiveView projections
 ```
 
-MCP owns adapter concerns: discovering or starting the local scheduler release,
-health-checking it, translating MCP tool calls into scheduler HTTP requests, and
-returning MCP-friendly envelopes. Elixir owns runtime supervision: the OTP
-application, `DynamicSupervisor`, `Registry`, run writers, journal owner,
-Phoenix PubSub, and Phoenix LiveView.
+The native Rust control plane owns adapter and OS-process concerns: discovering,
+starting, supervising, and stopping the local scheduler release; health-checking
+it; translating MCP tool calls into scheduler HTTP requests; and returning
+MCP-friendly envelopes. Elixir owns supervision inside the OTP application:
+`DynamicSupervisor`, `Registry`, run writers, journal owner, Phoenix PubSub, and
+Phoenix LiveView.
 
 ## Realtime And Durable Surfaces
 
@@ -60,9 +61,25 @@ make release
 test -x _build/prod/rel/agent_loops/bin/agent_loops
 ```
 
-The release includes `bin/agent_loops` for lifecycle commands plus overlay
-commands `bin/codex-loops` and `bin/codex-loops-mcp`. Both overlays enter the
-same release; ERTS and application code are packaged once.
+The release includes `bin/agent_loops` for scheduler lifecycle commands. A
+separate native Rust binary is installed as `codex-loops` and
+`codex-loops-mcp`; the latter name selects stdio MCP mode. MCP disconnection
+does not stop the scheduler. The native per-user supervisor keeps it alive until
+an explicit `codex-loops stop`, restarting unexpected scheduler exits with
+bounded backoff while retaining the owner lock. `codex-loops serve --foreground`
+uses the same supervision loop without daemonizing for external process-manager
+integration. Supervisor metadata persists independently of each child
+generation and records the effective bind, journal, and model configuration so
+explicit stop remains available during backoff and restart inherits stateful
+settings.
+
+Endpoint configuration also declares ownership. Host/port configuration uses
+the local native supervisor. An explicit `--server URL` or
+`CODEX_LOOPS_SCHEDULER_URL` is externally owned: the native client verifies
+health and API version but never autostarts, stops, restarts, or reads local
+logs for that endpoint. Path-bearing remote operations remain opt-in through
+`CODEX_LOOPS_SHARED_FILESYSTEM=1`; status, inspection, UI, and pathless resume
+need no shared filesystem.
 
 Run the scheduler server from the release by enabling the endpoint at runtime:
 
@@ -92,7 +109,9 @@ reachable. It then launches another mock run through the packaged
 The MCP stage inside `make ci` also stages the formula layout without modifying
 the source-only plugin, copies the plugin into a temporary installed root, and
 proves lifecycle, validation, mock execution, conformance variants, status,
-inspection, resume, UI opening, and shutdown against that external runtime.
+inspection, resume, and UI opening against that external runtime. The proof
+asserts that the scheduler survives MCP shutdown, then stops it explicitly
+through the native CLI.
 
 ## Journal Model
 

@@ -29,12 +29,7 @@ defmodule CodexLoops.MixProject do
 
   defp releases do
     [
-      agent_loops: [
-        include_executables_for: [:unix],
-        applications: [
-          anubis_mcp: :load
-        ]
-      ]
+      agent_loops: [include_executables_for: [:unix]]
     ]
   end
 
@@ -46,7 +41,6 @@ defmodule CodexLoops.MixProject do
       {:jason, "~> 1.4"},
       {:exqlite, "~> 0.38.0"},
       {:bandit, "~> 1.5"},
-      {:anubis_mcp, "~> 1.6", runtime: false},
       {:styler, "~> 1.11", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14.1", only: [:dev, :test], runtime: false},
@@ -61,7 +55,7 @@ defmodule CodexLoops.MixProject do
 
   defp dialyzer do
     [
-      plt_add_apps: [:mix, :ex_unit, :anubis_mcp, :peri],
+      plt_add_apps: [:mix, :ex_unit],
       ignore_warnings: ".dialyzer_ignore.exs"
     ]
   end

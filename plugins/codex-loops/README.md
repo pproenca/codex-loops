@@ -1,6 +1,6 @@
 # Codex Loops Plugin
 
-Codex Loops provides one Codex skill plus a local Elixir MCP adapter for authoring,
+Codex Loops provides one Codex skill plus a native Rust MCP adapter for authoring,
 validating, executing, and inspecting local Elixir workflow files. The MCP
 adapter is the Codex-facing surface: it talks to the scheduler HTTP API and can
 start the packaged scheduler release when no local scheduler is already
@@ -8,12 +8,15 @@ reachable.
 
 ## Install
 
+The Homebrew tap is not published yet. For a local clone, build the native
+control plane and scheduler first:
+
 ```bash
-brew install pproenca/codex-loops/codex-loops
-codex-loops install
+make build
+make release
 ```
 
-For a local clone:
+Then install the source plugin:
 
 ```bash
 codex plugin marketplace add .
@@ -21,6 +24,9 @@ codex plugin add codex-loops@codex-loops
 ```
 
 Start a new Codex thread after installing so the `codex-loops` skill is loaded.
+For a local source install, start Codex in this checkout; the cached plugin
+launcher resolves the configured `codex-loops` local marketplace and discovers
+the artifacts built in that checkout automatically.
 
 ## Manual CLI Run
 
@@ -28,8 +34,8 @@ Run a workflow and watch its LiveView without configuring environment
 variables or calling the HTTP API directly:
 
 ```bash
-codex-loops run .codex/workflows/codex_answer.exs --open
-codex-loops stop
+./native/codex-loops/target/release/codex-loops run .codex/workflows/codex_answer.exs --open
+./native/codex-loops/target/release/codex-loops stop
 ```
 
 The defaults are the local scheduler at `127.0.0.1:47125`, the standard user
@@ -40,10 +46,14 @@ provide custom ports, journals, models, providers, run IDs, and scheduler URLs.
 ## MCP Surface
 
 The source-only plugin includes a tracked stdio launcher at
-`plugins/codex-loops/mcp/codex-loops-mcp`. The launcher finds the
-Homebrew-owned runtime, enforces exact plugin/runtime version compatibility,
-and executes the Anubis MCP command from that runtime. MCP starts or discovers
-the scheduler release when a tool call needs the scheduler HTTP API.
+`plugins/codex-loops/mcp/codex-loops-mcp`. From a source checkout, the launcher
+finds the native and scheduler artifacts created by `make build` and
+`make release` from either its own location or the configured local marketplace
+root, including when Codex has copied the plugin into its cache. It also
+supports a staged packaged runtime, enforces exact plugin/runtime version
+compatibility, and executes the native MCP command from that runtime. Homebrew
+distribution is planned but is not published. MCP starts or discovers the
+scheduler release when a tool call needs the scheduler HTTP API.
 It exposes:
 
 - `workflow_validate`: validates a workflow through `POST /api/workflows/validate`
@@ -78,10 +88,11 @@ The packaging stage inside `make ci` builds one production Mix release and
 stages the formula-owned `libexec` tree. It never copies generated artifacts
 into this plugin.
 
-When it owns the scheduler lifecycle, it starts the release with
+When it starts the scheduler, the native control plane uses
 `CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
-`RELEASE_NODE`, and unique `RELEASE_TMP`. `CODEX_LOOPS_JOURNAL_PATH` is passed
-through when present.
+per-endpoint `RELEASE_TMP`, and `RELEASE_DISTRIBUTION=none`.
+`CODEX_LOOPS_JOURNAL_PATH` is passed through when present. The scheduler is not
+owned by the MCP session and survives stdio disconnection.
 
 The MCP adapter stays on the scheduler HTTP boundary. It does not read SQLite,
 call `Workflow.Scheduler`, or reach into journal/runtime internals directly.
@@ -138,6 +149,5 @@ credential-free and does not spend a real Codex turn.
 MIT. See the repository [LICENSE](../../LICENSE).
 
 Third-party MCP/package notices are recorded in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including the accepted Anubis
-LGPL-3.0 distribution gate for this local plugin and Homebrew-oriented package
-model.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including the Apache-2.0
+`rmcp` dependency used by the native MCP adapter.

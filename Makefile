@@ -1,10 +1,14 @@
-.PHONY: build ci release setup format-check quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: build ci release setup format-check native-build native-test native-quality quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
 APP_BUILD_DIR = _build/prod/lib/codex_loops
 HOMEBREW_PACKAGE_DIR ?= _build/homebrew
 HOMEBREW_RUNTIME_ROOT = $(HOMEBREW_PACKAGE_DIR)/libexec
+CARGO ?= cargo
+NATIVE_MANIFEST = native/codex-loops/Cargo.toml
+NATIVE_BIN = native/codex-loops/target/release/codex-loops
+NATIVE_MCP_BIN = native/codex-loops/target/release/codex-loops-mcp
 
 setup:
 	mix local.hex --if-missing --force
@@ -12,7 +16,7 @@ setup:
 	mix deps.get
 
 # Public developer gate: compile the project from a clean checkout.
-build: setup package-version-check
+build: setup package-version-check native-build
 	mix compile --warnings-as-errors
 
 # Public CI gate: every deterministic, credential-free check and end-to-end proof.
@@ -20,8 +24,21 @@ ci: setup quality dialyzer-check browser-e2e verify-plugin-package proof proof-m
 
 format-check:
 	mix format --check-formatted
+	$(CARGO) fmt --manifest-path $(NATIVE_MANIFEST) -- --check
 
-quality: setup format-check install-docs-check audit-check build credo-check security-check test
+native-build:
+	$(CARGO) build --locked --release --manifest-path $(NATIVE_MANIFEST)
+	ln -sf codex-loops "$(NATIVE_MCP_BIN)"
+
+native-test:
+	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST)
+
+native-quality:
+	$(CARGO) fmt --manifest-path $(NATIVE_MANIFEST) -- --check
+	$(CARGO) clippy --locked --manifest-path $(NATIVE_MANIFEST) -- -D warnings
+	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST)
+
+quality: setup format-check install-docs-check audit-check build native-quality credo-check security-check test
 
 credo-check:
 	mix credo
@@ -61,31 +78,30 @@ release: setup package-version-check
 	rm -rf "_build/prod/rel/$(RELEASE_NAME)" "$(APP_BUILD_DIR)"
 	MIX_ENV=prod mix release $(RELEASE_NAME) --overwrite
 	test -x "$(RELEASE_CTL)"
-	test -x "_build/prod/rel/$(RELEASE_NAME)/bin/codex-loops"
-	test -x "_build/prod/rel/$(RELEASE_NAME)/bin/codex-loops-mcp"
 
-# Compatibility target: MCP is a command in the single OTP release.
-release-mcp: release
-	_build/prod/rel/$(RELEASE_NAME)/bin/codex-loops-mcp --version
+# Compatibility target: MCP is a mode of the native control-plane binary.
+release-mcp: native-build
+	@tmpdir="$$(mktemp -d)"; \
+	trap 'rm -rf "$$tmpdir"' EXIT; \
+	ln -s "$(abspath $(NATIVE_BIN))" "$$tmpdir/codex-loops-mcp"; \
+	"$$tmpdir/codex-loops-mcp" --version
 
 # Formula input only. This stages a Homebrew-style prefix; it is not a user install command.
-package-homebrew-runtime: release
+package-homebrew-runtime: release native-build
 	rm -rf "$(HOMEBREW_PACKAGE_DIR)"
 	mkdir -p "$(HOMEBREW_RUNTIME_ROOT)/scheduler" "$(HOMEBREW_RUNTIME_ROOT)/mcp" "$(HOMEBREW_RUNTIME_ROOT)/bin"
 	mkdir -p "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops" "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops"
 	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(HOMEBREW_RUNTIME_ROOT)/scheduler/"
-	cp "$(HOMEBREW_RUNTIME_ROOT)/scheduler/bin/codex-loops-mcp" "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp"
-	cp "$(HOMEBREW_RUNTIME_ROOT)/scheduler/bin/codex-loops" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops"
+	cp "$(NATIVE_BIN)" "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp"
+	cp "$(NATIVE_BIN)" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops"
 	cp LICENSE "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops/LICENSE"
-	cp deps/anubis_mcp/LICENSE "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops/ANUBIS_MCP_LICENSE"
 	cp plugins/codex-loops/THIRD_PARTY_NOTICES.md "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops/THIRD_PARTY_NOTICES.md"
 	chmod 755 "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops"
 	CODEX_LOOPS_RUNTIME_ROOT="$(abspath $(HOMEBREW_RUNTIME_ROOT))" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops" --version
 	CODEX_LOOPS_RUNTIME_ROOT="$(abspath $(HOMEBREW_RUNTIME_ROOT))" "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp" --version
-	test -s "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops/ANUBIS_MCP_LICENSE"
-	grep -Fq 'https://github.com/zoedsoupe/anubis-mcp' "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops/THIRD_PARTY_NOTICES.md"
+	grep -Fq 'https://github.com/modelcontextprotocol/rust-sdk' "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops/THIRD_PARTY_NOTICES.md"
 
-proof: release
+proof: release native-build
 	scripts/proof-release.sh
 
 proof-live: proof-mcp-live

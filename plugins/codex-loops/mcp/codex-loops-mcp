@@ -11,9 +11,14 @@ fail_missing() {
   cat >&2 <<EOF
 Codex Loops runtime was not found.
 
-Install it with:
-  brew install pproenca/codex-loops/codex-loops
-  codex-loops install
+The Homebrew tap is not published yet. From a Codex Loops source checkout,
+build the native control plane and scheduler with:
+  make build
+  make release
+
+For a copied plugin, stage the runtime with make package-homebrew-runtime and
+point this launcher at it:
+  CODEX_LOOPS_RUNTIME_ROOT=<checkout>/_build/homebrew/libexec
 EOF
   exit 1
 }
@@ -27,8 +32,8 @@ Expected:
   $1/mcp/codex-loops-mcp
   $1/scheduler/bin/agent_loops
 
-Install it with:
-  brew install pproenca/codex-loops/codex-loops
+The Homebrew tap is not published yet. Rebuild the source runtime with:
+  make package-homebrew-runtime
 EOF
   exit 1
 }
@@ -73,9 +78,9 @@ Codex Loops plugin/runtime version mismatch.
 Plugin:  $plugin_version
 Runtime: $runtime_version
 
-Repair with:
-  brew upgrade pproenca/codex-loops/codex-loops
-  codex-loops install
+The Homebrew tap is not published yet. Rebuild the source runtime and plugin
+from the same checkout with:
+  make package-homebrew-runtime
 EOF
     exit 1
   fi
@@ -85,6 +90,20 @@ EOF
   CODEX_LOOPS_SCHEDULER_BIN=$scheduler
   export CODEX_LOOPS_PLUGIN_ROOT CODEX_LOOPS_RUNTIME_ROOT CODEX_LOOPS_SCHEDULER_BIN
   exec "$candidate" "$@"
+}
+
+source_runtime() {
+  root=$1
+  shift
+  [ -f "$root/mix.exs" ] || return 1
+  [ -f "$root/native/codex-loops/Cargo.toml" ] || return 1
+
+  candidate="$root/native/codex-loops/target/release/codex-loops-mcp"
+  scheduler="$root/_build/prod/rel/agent_loops/bin/agent_loops"
+  [ -x "$candidate" ] && [ -x "$scheduler" ] || return 1
+
+  CODEX_LOOPS_SCHEDULER_BIN=$scheduler
+  compatible_runtime "$candidate" "$root" "$@"
 }
 
 if [ -n "${CODEX_LOOPS_MCP_BIN:-}" ]; then
@@ -109,6 +128,18 @@ fi
 if candidate=$(command -v codex-loops-mcp 2>/dev/null); then
   root=$(runtime_root_for "$candidate")
   compatible_runtime "$candidate" "$root" "$@"
+fi
+
+source_root=$(CDPATH= cd -- "$plugin_root/../.." 2>/dev/null && pwd || true)
+[ -z "$source_root" ] || source_runtime "$source_root" "$@" || true
+
+if command -v codex >/dev/null 2>&1; then
+  source_root=$(
+    codex plugin marketplace list 2>/dev/null |
+      sed -n 's/^codex-loops[[:space:]][[:space:]]*//p' |
+      head -n 1
+  )
+  [ -z "$source_root" ] || source_runtime "$source_root" "$@" || true
 fi
 
 if command -v brew >/dev/null 2>&1; then

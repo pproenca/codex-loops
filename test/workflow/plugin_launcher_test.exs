@@ -13,7 +13,62 @@ defmodule Workflow.PluginLauncherTest do
     assert output == "runtime --stdio\n"
   end
 
-  test "fails with install guidance when the runtime is missing" do
+  test "a cached source plugin discovers builds from its configured local marketplace" do
+    source_root = tmp_dir("source")
+    cache_root = tmp_dir("cache")
+    plugin_root = Path.join(cache_root, "plugins/codex-loops")
+    launcher = Path.join(plugin_root, "mcp/codex-loops-mcp")
+    mcp = Path.join(source_root, "native/codex-loops/target/release/codex-loops-mcp")
+    scheduler = Path.join(source_root, "_build/prod/rel/agent_loops/bin/agent_loops")
+    fake_bin = Path.join(cache_root, "bin")
+    codex = Path.join(fake_bin, "codex")
+
+    File.mkdir_p!(Path.dirname(launcher))
+    File.mkdir_p!(Path.join(plugin_root, ".codex-plugin"))
+    File.mkdir_p!(Path.dirname(mcp))
+    File.mkdir_p!(Path.dirname(scheduler))
+    File.mkdir_p!(fake_bin)
+    File.write!(Path.join(source_root, "mix.exs"), "source checkout")
+    File.write!(Path.join(source_root, "native/codex-loops/Cargo.toml"), "source checkout")
+    File.cp!(@launcher, launcher)
+
+    File.cp!(
+      Path.join(Path.dirname(@launcher), "../.codex-plugin/plugin.json"),
+      Path.join(plugin_root, ".codex-plugin/plugin.json")
+    )
+
+    File.write!(
+      mcp,
+      "#!/bin/sh\nif [ \"$1\" = \"--version\" ]; then echo 'codex-loops-mcp #{@version}'; else echo \"source $* scheduler=$CODEX_LOOPS_SCHEDULER_BIN\"; fi\n"
+    )
+
+    File.write!(scheduler, "#!/bin/sh\nexit 0\n")
+    File.write!(codex, "#!/bin/sh\nprintf 'MARKETPLACE  ROOT\\ncodex-loops  %s\\n' '#{source_root}'\n")
+    File.chmod!(launcher, 0o755)
+    File.chmod!(mcp, 0o755)
+    File.chmod!(scheduler, 0o755)
+    File.chmod!(codex, 0o755)
+
+    on_exit(fn ->
+      File.rm_rf(source_root)
+      File.rm_rf(cache_root)
+    end)
+
+    assert {output, 0} =
+             System.cmd("/bin/sh", [launcher, "--stdio"],
+               cd: plugin_root,
+               env: [
+                 {"CODEX_LOOPS_RUNTIME_ROOT", nil},
+                 {"CODEX_LOOPS_MCP_BIN", nil},
+                 {"CODEX_LOOPS_SCHEDULER_BIN", nil},
+                 {"PATH", "#{fake_bin}:/usr/bin:/bin"}
+               ]
+             )
+
+    assert output == "source --stdio scheduler=#{scheduler}\n"
+  end
+
+  test "fails with source-build guidance when the runtime is missing" do
     missing_root = tmp_dir("missing")
 
     assert {output, 1} =
@@ -27,7 +82,8 @@ defmodule Workflow.PluginLauncherTest do
              )
 
     assert output =~ "CODEX_LOOPS_RUNTIME_ROOT is set but does not contain a usable"
-    assert output =~ "brew install pproenca/codex-loops/codex-loops"
+    assert output =~ "Homebrew tap is not published yet"
+    assert output =~ "make package-homebrew-runtime"
   end
 
   test "fails closed when plugin and runtime versions differ" do

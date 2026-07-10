@@ -12,12 +12,26 @@ defmodule CheckPackageVersion do
     version = root |> Path.join("VERSION") |> File.read!() |> String.trim()
     manifest_path = Path.join(root, "plugins/codex-loops/.codex-plugin/plugin.json")
     manifest = manifest_path |> File.read!() |> Jason.decode!()
+    cargo_manifest_path = Path.join(root, "native/codex-loops/Cargo.toml")
+    cargo_manifest = File.read!(cargo_manifest_path)
+    [cargo_version] = Regex.run(~r/^version\s*=\s*"([^"]+)"/m, cargo_manifest, capture: :all_but_first)
+    cargo_lock_path = Path.join(root, "native/codex-loops/Cargo.lock")
+    cargo_lock = File.read!(cargo_lock_path)
+
+    [cargo_lock_version] =
+      Regex.run(
+        ~r/\[\[package\]\]\nname = "codex-loops"\nversion = "([^"]+)"/,
+        cargo_lock,
+        capture: :all_but_first
+      )
 
     expected = %{
       "VERSION" => version,
       "Mix project" => Mix.Project.config()[:version],
       "runtime module" => Workflow.PackageVersion.version(),
-      "plugin manifest" => manifest["version"]
+      "plugin manifest" => manifest["version"],
+      "Rust control plane" => cargo_version,
+      "Rust lockfile" => cargo_lock_version
     }
 
     mismatches =

@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Provide one Codex skill plus a local Elixir MCP adapter for authoring, validating,
+Provide one Codex skill plus a native Rust MCP adapter for authoring, validating,
 testing, executing, and inspecting local Elixir workflow scripts.
 
 The plugin is deliberately thin. The Elixir runtime owns runner behavior; the
@@ -40,7 +40,7 @@ User CLI:
 
 MCP behavior:
 
-- Anubis MCP server over stdio with newline-delimited JSON-RPC messages
+- `rmcp` MCP server over stdio with newline-delimited JSON-RPC messages
 - `initialize`, `tools/list`, `tools/call`, and notifications
 - `workflow_validate` input schema requires `script_path`
 - `workflow_start` input schema requires `script_path` and accepts optional
@@ -209,18 +209,22 @@ after retry exhaustion.
 
 ## Packaging
 
-The production artifact is a Mix release:
+The production package contains a Mix scheduler release and a native Rust
+control-plane binary:
 
 ```bash
 make release
+make native-build
 ```
 
-The MCP command is an overlay in that same OTP release. The supported MCP adapter uses Anubis over stdio. A release overlay invokes it
-through Mix release `eval`; no hand-rolled stdio protocol layer or second ERTS
-payload is shipped.
+The same native binary is installed as `codex-loops` and `codex-loops-mcp`.
+The latter command name selects `rmcp` stdio mode. It calls the scheduler only
+through HTTP and does not boot a second ERTS payload.
 
-The MCP executable starts or discovers the generated `agent_loops` release
-script when it owns scheduler lifecycle.
+The native control plane starts or discovers the generated `agent_loops` release
+through a durable per-user supervisor. An MCP stdio session does not own that
+supervisor or stop it when disconnected; scheduler shutdown is always explicit.
+The supervisor restarts unexpected scheduler exits with bounded backoff.
 
 Public development commands:
 

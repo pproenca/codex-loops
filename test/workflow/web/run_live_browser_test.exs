@@ -102,6 +102,23 @@ defmodule Workflow.Web.RunLiveBrowserTest do
     |> assert_has("[data-testid=run-state]", text: "completed", timeout: 2_000)
     |> assert_has("[data-testid=agent-detail]", text: "Finished render the completed browser smoke")
     |> assert_has("[data-testid=result]", text: "Completed successfully")
+    |> evaluate(
+      """
+      (() => {
+        const paragraph = document.querySelector('[data-testid="latest-activity"] .detail-text');
+        const styles = getComputedStyle(paragraph);
+        const rect = paragraph.getBoundingClientRect();
+
+        return {
+          height: rect.height,
+          lineHeight: Number.parseFloat(styles.lineHeight)
+        };
+      })()
+      """,
+      fn metrics ->
+        assert metrics["height"] <= metrics["lineHeight"] * 2
+      end
+    )
     |> evaluate("window.__codexLoopsStreamingPage", &assert(&1))
   end
 

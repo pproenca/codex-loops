@@ -347,9 +347,7 @@ defmodule Workflow.Web.RunLive do
 
             <section data-testid="latest-activity" class="detail-panel">
               <h3>Latest activity</h3>
-              <p class="detail-text">
-                {latest_meaningful_event(@status, agent, rejections, failed_rejections)}
-              </p>
+              <p class="detail-text">{latest_meaningful_event(@status, agent, rejections, failed_rejections)}</p>
             </section>
 
             <section data-testid="retry-context" class="detail-panel">

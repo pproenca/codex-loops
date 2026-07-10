@@ -27,4 +27,23 @@ if config_env() == :prod do
     http: [ip: ip, port: port],
     url: [host: host, port: port],
     server: server?
+
+  if server? do
+    codex_bin =
+      System.get_env("CODEX_LOOPS_CODEX_BIN") ||
+        raise "CODEX_LOOPS_CODEX_BIN must be injected by the Codex Loops control plane"
+
+    stat = File.stat!(codex_bin)
+
+    if !(Path.type(codex_bin) == :absolute and stat.type == :regular and
+           Bitwise.band(stat.mode, 0o111) != 0) do
+      raise "CODEX_LOOPS_CODEX_BIN must name an absolute executable file"
+    end
+
+    config :codex_loops, codex_command: {codex_bin, ["provider-exec"]}
+  end
+
+  if codex_model = System.get_env("CODEX_LOOPS_CODEX_MODEL") do
+    config :codex_loops, codex_model: codex_model
+  end
 end

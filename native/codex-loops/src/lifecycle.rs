@@ -17,6 +17,7 @@ use tokio::{
 
 use crate::{
     error::{AppError, AppResult},
+    runtime::Runtime,
     scheduler::{HealthState, SchedulerClient},
 };
 
@@ -127,6 +128,11 @@ pub async fn ensure_ready_with(
         match client.health_state().await {
             HealthState::Compatible(_) => {
                 return ready_result(client, options, Some(&attempt.owner_token)).await;
+            }
+            HealthState::Incompatible { found, .. }
+                if found == "unknown" && attempt_is_live(client, &attempt.owner_token)? =>
+            {
+                sleep(Duration::from_millis(100)).await;
             }
             HealthState::Incompatible { found, envelope } => {
                 return Err(version_mismatch(&found, envelope));
@@ -491,9 +497,8 @@ async fn spawn_scheduler(
     foreground: bool,
 ) -> AppResult<Child> {
     let runtime_dir = runtime_dir(client)?;
-    let release = scheduler_bin()?
-        .canonicalize()
-        .map_err(io_error("runtime_invalid"))?;
+    let runtime = Runtime::installed()?;
+    let release = runtime.bundle.scheduler;
     let port = scheduler_port(client)?;
     let bind_host = options
         .bind_host
@@ -515,6 +520,7 @@ async fn spawn_scheduler(
         .env("PORT", port.to_string())
         .env("RELEASE_DISTRIBUTION", "none")
         .env("RELEASE_TMP", runtime_dir.join("release"))
+        .env("CODEX_LOOPS_CODEX_BIN", runtime.bundle.control_plane)
         .env_remove("CODEX_LOOPS_INTERNAL_DAEMON")
         .env_remove("ROOTDIR")
         .env_remove("BINDIR")
@@ -532,7 +538,6 @@ async fn spawn_scheduler(
     if let Some(journal) = &options.journal {
         command.env("CODEX_LOOPS_JOURNAL_PATH", journal);
     }
-    pass_env(&mut command, "CODEX_LOOPS_CODEX_BIN");
     if let Some(model) = &options.model {
         command.env("CODEX_LOOPS_CODEX_MODEL", model);
     }
@@ -619,56 +624,6 @@ async fn spawn_supervisor(
         .details(json!({"reason": error.to_string()}))
     })?;
     Ok(())
-}
-
-pub fn scheduler_bin() -> AppResult<PathBuf> {
-    let candidate = env::var("CODEX_LOOPS_SCHEDULER_BIN")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(PathBuf::from)
-        .or_else(|| {
-            env::var("CODEX_LOOPS_RUNTIME_ROOT")
-                .ok()
-                .filter(|value| !value.is_empty())
-                .map(|root| PathBuf::from(root).join("scheduler/bin/agent_loops"))
-        })
-        .or_else(source_checkout_scheduler_bin);
-    match candidate {
-        Some(path) if path.is_file() => Ok(path),
-        Some(path) => Err(AppError::new(
-            6,
-            "runtime_invalid",
-            "The packaged scheduler was not found.",
-        )
-        .details(json!({"scheduler_bin": path}))),
-        None => Err(
-            AppError::new(6, "runtime_invalid", "Codex Loops runtime was not found.")
-                .next_steps(["From a source checkout, run `make build && make release`."]),
-        ),
-    }
-}
-
-fn source_checkout_scheduler_bin() -> Option<PathBuf> {
-    let root = env::current_exe()
-        .ok()
-        .and_then(|executable| source_checkout_root(&executable))
-        .or_else(|| {
-            env::current_dir()
-                .ok()
-                .and_then(|directory| source_checkout_root(&directory))
-        })?;
-
-    Some(root.join("_build/prod/rel/agent_loops/bin/agent_loops"))
-}
-
-fn source_checkout_root(path: &Path) -> Option<PathBuf> {
-    path.ancestors().find_map(|candidate| {
-        let root = candidate.to_path_buf();
-        let mix_project = root.join("mix.exs");
-        let native_project = root.join("native/codex-loops/Cargo.toml");
-
-        (mix_project.is_file() && native_project.is_file()).then_some(root)
-    })
 }
 
 pub fn read_logs(client: &SchedulerClient, lines: usize) -> AppResult<String> {
@@ -862,7 +817,9 @@ fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<()> {
 }
 
 fn scheduler_release_root() -> AppResult<PathBuf> {
-    scheduler_bin()?
+    Runtime::installed()?
+        .bundle
+        .scheduler
         .parent()
         .and_then(Path::parent)
         .and_then(|path| path.canonicalize().ok())
@@ -895,12 +852,6 @@ fn open_log(path: &Path) -> AppResult<File> {
         .append(true)
         .open(path)
         .map_err(io_error("scheduler_log_failed"))
-}
-
-fn pass_env(command: &mut Command, key: &str) {
-    if let Ok(value) = env::var(key) {
-        command.env(key, value);
-    }
 }
 
 fn signal_process(pid: u32, signal: i32) -> AppResult<()> {

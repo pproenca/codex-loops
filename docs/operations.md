@@ -5,14 +5,17 @@
 ```sh
 make build
 make ci
-make release
-make native-build
+make dev-bundle
+MINISIGN_SECRET_KEY=/path/to/key make dist
 ```
 
 `make build` installs missing dependencies and compiles with warnings as
 errors. `make ci` executes every deterministic validation stage end-to-end.
-`make release` produces the distributable local scheduler artifact under
-`_build/prod/rel/agent_loops/`. `.tool-versions` pins the known-good local
+`make dev-bundle` assembles the native command, scheduler release, and skill
+under `_build/dev-bundle/`. `make dist` signs and packages that exact layout
+under `_build/dist/`; it deliberately fails without a minisign key. The archive's
+`install` command performs the versioned installation and atomic `current` link
+switch. `.tool-versions` pins the known-good local
 toolchain for `mise`/`asdf`.
 
 After `make ci`, maintainers can perform a separate authenticated dogfood run
@@ -66,9 +69,9 @@ The browser stack is PhoenixTest plus PhoenixTest Playwright. Recode, Green,
 Wallaby, Hound, Selenium, Cypress, and non-Elixir browser frameworks are not
 part of the selected gate for this rollout.
 
-## Release Proof
+## Bundle Proof
 
-The release-proof stage of `make ci` builds the Mix release and exercises the scheduler readiness path. The
+The bundle-proof stage of `make ci` builds the complete runtime and exercises the scheduler readiness path. The
 proof starts the packaged Phoenix scheduler release on `127.0.0.1:47125` by
 default with an isolated SQLite journal, then:
 
@@ -96,12 +99,14 @@ not part of normal CI.
 
 ## Manual CLI Run
 
-For a normal interactive run, start the managed local scheduler and launch the
-workflow directly with one command. No environment variables or raw HTTP calls
-are required:
+For a normal interactive run, assemble and bind the bundle once, then launch a
+workflow. No runtime-discovery environment variables or raw HTTP calls are
+required:
 
 ```sh
-./native/codex-loops/target/release/codex-loops run .codex/workflows/codex_answer.exs --open
+make dev-bundle
+_build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
+_build/dev-bundle/bin/codex-loops run .codex/workflows/codex_answer.exs --open
 ```
 
 The CLI defaults to `127.0.0.1:47125`, the standard user journal, a generated
@@ -110,10 +115,10 @@ the LiveView URL even without `--open`, and starts the managed scheduler when
 the local endpoint is not already healthy.
 
 ```sh
-./native/codex-loops/target/release/codex-loops stop
+_build/dev-bundle/bin/codex-loops stop
 ```
 
-Use `./native/codex-loops/target/release/codex-loops serve` when you want to
+Use `_build/dev-bundle/bin/codex-loops serve` when you want to
 start or customize the scheduler separately. Configuration is progressively
 disclosed through `serve --host`, `--port`, `--journal`, and `--model`, or
 `run --provider`, `--run-id`, and `--server`.
@@ -167,11 +172,11 @@ slower lock winner.
 Power-user reads use the same scheduler HTTP seam:
 
 ```sh
-./native/codex-loops/target/release/codex-loops status RUN_ID --json
-./native/codex-loops/target/release/codex-loops inspect RUN_ID --json
-./native/codex-loops/target/release/codex-loops resume RUN_ID --provider codex
-./native/codex-loops/target/release/codex-loops open RUN_ID
-./native/codex-loops/target/release/codex-loops doctor --json
+_build/dev-bundle/bin/codex-loops status RUN_ID --json
+_build/dev-bundle/bin/codex-loops inspect RUN_ID --json
+_build/dev-bundle/bin/codex-loops resume RUN_ID --provider codex
+_build/dev-bundle/bin/codex-loops open RUN_ID
+_build/dev-bundle/bin/codex-loops doctor --json
 ```
 
 ## Manual MCP Smoke
@@ -179,10 +184,11 @@ Power-user reads use the same scheduler HTTP seam:
 Build the scheduler and native control plane first:
 
 ```sh
-make package-homebrew-runtime
+make dev-bundle
+_build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
 ```
 
-Then, from a Codex thread with the local plugin installed, run a non-mutating
+Then, from a restarted Codex task, run a non-mutating
 workflow through the MCP tools:
 
 ```text
@@ -208,14 +214,14 @@ summaries plus raw refs; neither MCP tool is a realtime stream.
 
 ## Normal Workflow Run
 
-Agents should use the Codex plugin MCP tools. The MCP adapter starts or
+Agents should use the registered Codex Loops MCP tools. The MCP adapter starts or
 discovers the scheduler, health-checks it, and talks to the scheduler HTTP API.
 The Elixir/Phoenix scheduler owns the workflow workers, PubSub/LiveView, and
 SQLite journal.
 
 Relative MCP script paths resolve against the client's workspace root, so the
-usual `.codex/workflows/<name>.exs` form works even though the plugin launcher
-runs from its own directory. Clients without MCP roots may set
+usual `.codex/workflows/<name>.exs` form works independently of the installed
+bundle directory. Clients without MCP roots may set
 `CODEX_LOOPS_WORKSPACE_ROOT` explicitly. Sending workflow paths to a non-local
 scheduler is rejected unless `CODEX_LOOPS_SHARED_FILESYSTEM=1` confirms that the
 same absolute paths exist on both sides.

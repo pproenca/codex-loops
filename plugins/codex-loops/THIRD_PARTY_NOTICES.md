@@ -1,7 +1,7 @@
 # Third-Party Notices
 
-The source-only plugin launches a Homebrew runtime whose native control plane
-includes the following direct MCP dependency:
+The skill-only plugin contains no executable runtime or third-party code. The
+separately distributed native control plane includes this direct MCP dependency:
 
 | Package | Version | License | Source |
 | --- | --- | --- | --- |

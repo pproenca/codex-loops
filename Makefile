@@ -1,14 +1,13 @@
-.PHONY: build ci release setup assets-build format-check native-build native-test native-quality quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: build ci release setup assets-build format-check native-build native-test native-quality quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint dev-bundle dist proof-dist-install proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
 APP_BUILD_DIR = _build/prod/lib/codex_loops
-HOMEBREW_PACKAGE_DIR ?= _build/homebrew
-HOMEBREW_RUNTIME_ROOT = $(HOMEBREW_PACKAGE_DIR)/libexec
+DEV_BUNDLE_DIR ?= _build/dev-bundle
+DIST_DIR ?= _build/dist
 CARGO ?= cargo
 NATIVE_MANIFEST = native/codex-loops/Cargo.toml
 NATIVE_BIN = native/codex-loops/target/release/codex-loops
-NATIVE_MCP_BIN = native/codex-loops/target/release/codex-loops-mcp
 
 setup:
 	mix local.hex --if-missing --force
@@ -23,7 +22,7 @@ assets-build:
 	mix tailwind codex_loops
 
 # Public CI gate: every deterministic, credential-free check and end-to-end proof.
-ci: setup quality dialyzer-check browser-e2e verify-plugin-package proof proof-mcp
+ci: setup quality dialyzer-check browser-e2e verify-plugin-package proof-dist-install proof proof-mcp
 
 format-check:
 	mix format --check-formatted
@@ -31,7 +30,6 @@ format-check:
 
 native-build:
 	$(CARGO) build --locked --release --manifest-path $(NATIVE_MANIFEST)
-	ln -sf codex-loops "$(NATIVE_MCP_BIN)"
 
 native-test:
 	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST)
@@ -83,36 +81,31 @@ release: setup package-version-check assets-build
 	test -x "$(RELEASE_CTL)"
 
 # Compatibility target: MCP is a mode of the native control-plane binary.
-release-mcp: native-build
-	@tmpdir="$$(mktemp -d)"; \
-	trap 'rm -rf "$$tmpdir"' EXIT; \
-	ln -s "$(abspath $(NATIVE_BIN))" "$$tmpdir/codex-loops-mcp"; \
-	"$$tmpdir/codex-loops-mcp" --version
+dev-bundle: release native-build
+	rm -rf "$(DEV_BUNDLE_DIR)"
+	mkdir -p "$(DEV_BUNDLE_DIR)/bin" "$(DEV_BUNDLE_DIR)/libexec/scheduler" "$(DEV_BUNDLE_DIR)/share/skills"
+	cp "$(NATIVE_BIN)" "$(DEV_BUNDLE_DIR)/bin/codex-loops"
+	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(DEV_BUNDLE_DIR)/libexec/scheduler/"
+	cp -R plugins/codex-loops/skills/codex-loops "$(DEV_BUNDLE_DIR)/share/skills/codex-loops"
+	test -x "$(DEV_BUNDLE_DIR)/bin/codex-loops"
+	test -x "$(DEV_BUNDLE_DIR)/libexec/scheduler/bin/agent_loops"
+	test -f "$(DEV_BUNDLE_DIR)/share/skills/codex-loops/SKILL.md"
 
-# Formula input only. This stages a Homebrew-style prefix; it is not a user install command.
-package-homebrew-runtime: release native-build
-	rm -rf "$(HOMEBREW_PACKAGE_DIR)"
-	mkdir -p "$(HOMEBREW_RUNTIME_ROOT)/scheduler" "$(HOMEBREW_RUNTIME_ROOT)/mcp" "$(HOMEBREW_RUNTIME_ROOT)/bin"
-	mkdir -p "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops" "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops"
-	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(HOMEBREW_RUNTIME_ROOT)/scheduler/"
-	cp "$(NATIVE_BIN)" "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp"
-	cp "$(NATIVE_BIN)" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops"
-	cp LICENSE "$(HOMEBREW_RUNTIME_ROOT)/share/licenses/codex-loops/LICENSE"
-	cp plugins/codex-loops/THIRD_PARTY_NOTICES.md "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops/THIRD_PARTY_NOTICES.md"
-	chmod 755 "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops"
-	CODEX_LOOPS_RUNTIME_ROOT="$(abspath $(HOMEBREW_RUNTIME_ROOT))" "$(HOMEBREW_RUNTIME_ROOT)/bin/codex-loops" --version
-	CODEX_LOOPS_RUNTIME_ROOT="$(abspath $(HOMEBREW_RUNTIME_ROOT))" "$(HOMEBREW_RUNTIME_ROOT)/mcp/codex-loops-mcp" --version
-	grep -Fq 'https://github.com/modelcontextprotocol/rust-sdk' "$(HOMEBREW_RUNTIME_ROOT)/share/doc/codex-loops/THIRD_PARTY_NOTICES.md"
+dist: dev-bundle
+	scripts/package-dist.sh "$(abspath $(DEV_BUNDLE_DIR))" "$(abspath $(DIST_DIR))" "$$(tr -d '[:space:]' < VERSION)"
 
-proof: release native-build
+proof-dist-install: dev-bundle
+	scripts/proof-dist-install.sh "$(abspath $(DEV_BUNDLE_DIR))"
+
+proof: dev-bundle
 	scripts/proof-release.sh
 
 proof-live: proof-mcp-live
 
-proof-mcp: package-homebrew-runtime
+proof-mcp: dev-bundle
 	MIX_ENV=dev mix run --no-start scripts/proof-mcp-validate.exs
 
-proof-mcp-live: package-homebrew-runtime
+proof-mcp-live: dev-bundle
 	MIX_ENV=dev mix run --no-start scripts/proof-mcp-live.exs
 
 verify-plugin-package:
@@ -123,4 +116,4 @@ dogfood:
 
 clean-release:
 	rm -rf _build/prod/rel/$(RELEASE_NAME)
-	rm -rf "$(HOMEBREW_PACKAGE_DIR)"
+	rm -rf "$(DEV_BUNDLE_DIR)" "$(DIST_DIR)"

@@ -12,6 +12,7 @@ use crate::{
     error::{AppError, AppResult},
     install,
     lifecycle::{self, StartOptions},
+    runtime::Runtime,
     scheduler::{HealthState, SchedulerClient, local_url},
 };
 
@@ -223,13 +224,15 @@ pub async fn open(run_id: String, server: Option<String>) -> AppResult<Value> {
 
 pub async fn doctor() -> AppResult<Value> {
     let client = SchedulerClient::from_env()?;
-    let scheduler = lifecycle::scheduler_bin()?;
+    let runtime = Runtime::installed()?;
+    let scheduler = &runtime.bundle.scheduler;
     match client.health_state().await {
         HealthState::Compatible(health) => Ok(json!({
             "ok": true, "command": "doctor", "version": env!("CARGO_PKG_VERSION"),
             "scheduler_bin": scheduler, "scheduler_url": client.base_url().as_str(),
             "scheduler_state": "running", "scheduler_health": health,
-            "runtime_root": std::env::var("CODEX_LOOPS_RUNTIME_ROOT").ok()
+            "runtime_root": runtime.bundle.root,
+            "codex": {"path": runtime.codex.path, "version": runtime.codex.version}
         })),
         HealthState::Incompatible { found, envelope } => Err(AppError::new(
             6,

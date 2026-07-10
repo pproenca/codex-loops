@@ -78,8 +78,9 @@ MCP behavior:
 - the MCP adapter reaches the scheduler only through HTTP API calls; it does not
   read SQLite or call `Workflow.Scheduler`, `Workflow.Journal`, or runtime
   internals directly
-- the packaging stage of `make ci` assembles one external runtime under
-  `_build/homebrew/libexec`; the plugin contains no generated release artifacts
+- the packaging stage of `make ci` assembles one fixed runtime under
+  `_build/dev-bundle`; the plugin contains no generated release artifacts or
+  MCP launcher
 
 ## Artifact-Aware Authoring
 
@@ -209,17 +210,18 @@ after retry exhaustion.
 
 ## Packaging
 
-The production package contains a Mix scheduler release and a native Rust
-control-plane binary:
+The production package is one immutable directory containing a Mix scheduler
+release, native Rust control-plane binary, and the skill:
 
 ```bash
-make release
-make native-build
+make dev-bundle
+make dist
 ```
 
-The same native binary is installed as `codex-loops` and `codex-loops-mcp`.
-The latter command name selects `rmcp` stdio mode. It calls the scheduler only
-through HTTP and does not boot a second ERTS payload.
+The single `codex-loops` command selects stdio mode with the `mcp` subcommand.
+`codex-loops install` registers that exact command directly in Codex shared
+configuration and installs the skill under the user skill root. It calls the
+scheduler only through HTTP and does not boot a second ERTS payload.
 
 The native control plane starts or discovers the generated `agent_loops` release
 through a durable per-user supervisor. An MCP stdio session does not own that
@@ -231,7 +233,8 @@ Public development commands:
 ```bash
 make build
 make ci
-make release
+make dev-bundle
+make dist
 ```
 
 `make ci` builds and tests the external runtime, copied source-only plugin,

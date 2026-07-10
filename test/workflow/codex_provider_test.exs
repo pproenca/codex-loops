@@ -69,6 +69,7 @@ defmodule Workflow.CodexProviderTest do
       "turn_failed_exit" -> "partial assistant output"
       "stream_error" -> "partial assistant output"
       "stream_error_exit" -> "partial assistant output"
+      "completed_exit" -> "plausible but uncommitted output"
       "always_invalid" -> JSON.encode!(invalid)
       "retry" ->
         counter = Enum.at(rest, 0)
@@ -115,7 +116,7 @@ defmodule Workflow.CodexProviderTest do
     IO.puts(JSON.encode!(event))
   end
 
-  if mode in ["turn_failed_exit", "stream_error_exit"] do
+  if mode in ["turn_failed_exit", "stream_error_exit", "completed_exit"] do
     System.halt(1)
   end
   """
@@ -236,23 +237,6 @@ defmodule Workflow.CodexProviderTest do
     assert Enum.count(types(id), &(&1 == :agent_activity)) == 3
   end
 
-  test "the production default backend is the real codex exec one-shot entrypoint" do
-    # No live turn is spent: this pins the untested production wiring. The default
-    # command resolves to the real `codex` binary's one-shot JSONL entrypoint — the
-    # protocol the stub above faithfully mimics.
-    assert {path,
-            [
-              "exec",
-              "--json",
-              "--dangerously-bypass-approvals-and-sandbox",
-              "--skip-git-repo-check"
-            ]} =
-             Codex.default_command()
-
-    assert Path.basename(path) == "codex"
-    assert File.exists?(path)
-  end
-
   test "provider selection is a port swap; the interpreter path is unchanged", ctx do
     mock_id = run_id()
     codex_id = run_id()
@@ -344,6 +328,17 @@ defmodule Workflow.CodexProviderTest do
 
     assert settled_types(id) == [:run_started, :agent_failed]
     refute Enum.any?(Journal.fold(id), &(&1.type == :run_failed))
+  end
+
+  test "a nonzero exit cannot commit a plausible completed response", ctx do
+    id = run_id()
+
+    assert {:error, {:provider_failure, [0], :backend, detail}} =
+             Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "completed_exit"))
+
+    assert detail["message"] =~ "exited with status 1"
+    assert settled_types(id) == [:run_started, :agent_failed]
+    refute Enum.any?(Journal.fold(id), &(&1.type == :agent_committed))
   end
 
   test "stream-level error prevents successful settlement even after assistant output", ctx do

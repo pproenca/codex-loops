@@ -13,8 +13,8 @@ Codex MCP tool -> scheduler HTTP API -> supervised run writer
                -> scheduler API / Phoenix LiveView projections
 ```
 
-The native Rust control plane owns adapter and OS-process concerns: discovering,
-starting, supervising, and stopping the local scheduler release; health-checking
+The native Rust control plane owns adapter and OS-process concerns: locating its
+fixed runtime bundle, starting, supervising, and stopping the local scheduler release; health-checking
 it; translating MCP tool calls into scheduler HTTP requests; and returning
 MCP-friendly envelopes. Elixir owns supervision inside the OTP application:
 `DynamicSupervisor`, `Registry`, run writers, journal owner, Phoenix PubSub, and
@@ -49,21 +49,28 @@ Raw refs are pointers to durable journal events. `eventCount` counts persisted
 journal events only, not transient progress messages seen by a connected
 LiveView.
 
-## Packaging
+## Runtime Bundle
 
-The production artifact is the local Elixir/Phoenix workflow scheduler packaged
-as a Mix release named `agent_loops`. It includes ERTS, compiled BEAM code,
-dependency `priv/` directories, and native artifacts such as `exqlite`'s SQLite
-NIF.
+The production artifact is one immutable target-specific directory. The
+Elixir/Phoenix scheduler remains a Mix release named `agent_loops`, including
+ERTS, compiled BEAM code, dependency `priv/` directories, and native artifacts
+such as `exqlite`'s SQLite NIF.
 
 ```sh
-make release
-test -x _build/prod/rel/agent_loops/bin/agent_loops
+make dev-bundle
+make dist
 ```
 
-The release includes `bin/agent_loops` for scheduler lifecycle commands. A
-separate native Rust binary is installed as `codex-loops` and
-`codex-loops-mcp`; the latter name selects stdio MCP mode. MCP disconnection
+The bundle layout is fixed:
+
+```text
+bin/codex-loops
+libexec/scheduler/
+share/skills/codex-loops/
+```
+
+The native command derives the bundle root from its own executable and selects
+stdio MCP with `codex-loops mcp`. MCP disconnection
 does not stop the scheduler. The native per-user supervisor keeps it alive until
 an explicit `codex-loops stop`, restarting unexpected scheduler exits with
 bounded backoff while retaining the owner lock. `codex-loops serve --foreground`
@@ -98,7 +105,7 @@ local machine; put that deployment behind the host's normal access controls
 such as a trusted reverse proxy, tunnel, firewall, or private network boundary.
 `CODEX_LOOPS_PORT` defaults to `PORT`, then `4000`.
 
-The release stage inside `make ci` starts the packaged scheduler, checks
+The bundle stage inside `make ci` starts the packaged scheduler, checks
 `/api/health`, validates a workflow through
 `/api/workflows/validate`, starts a mock run through `/api/runs`, reads the
 polling status snapshot and journal summaries through `/api/runs/<id>` and
@@ -106,8 +113,7 @@ polling status snapshot and journal summaries through `/api/runs/<id>` and
 reachable. It then launches another mock run through the packaged
 `codex-loops run` command and verifies that run's LiveView URL.
 
-The MCP stage inside `make ci` also stages the formula layout without modifying
-the source-only plugin, copies the plugin into a temporary installed root, and
+The MCP stage inside `make ci` executes the bundled control plane directly and
 proves lifecycle, validation, mock execution, conformance variants, status,
 inspection, resume, and UI opening against that external runtime. The proof
 asserts that the scheduler survives MCP shutdown, then stops it explicitly
@@ -122,7 +128,7 @@ folded to reconstruct status, summaries, and resume decisions.
 ## Providers
 
 - `mock`: offline provider used by `test`.
-- `codex`: live provider that shells out to `codex exec --json
+- `codex`: live provider that shells out to the explicitly bound `codex exec --json
   --skip-git-repo-check`, folds each Codex event once, emits normalized activity
   entries for realtime UI, and settles with a result plus token usage.
 
@@ -130,6 +136,11 @@ Schema-backed turns use Codex structured output via `--output-schema`; the
 schema owns output shape, while prompts should carry semantic work
 instructions. The writer still validates results locally and fails closed after
 configured retries.
+
+`codex-loops install --codex /absolute/path/to/codex` probes and persists the
+lexical path plus exact version. The native launcher passes that path into
+runtime configuration. The provider consumes normalized application
+configuration and never searches PATH or reads process environment.
 
 ## Supervision
 

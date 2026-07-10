@@ -21,27 +21,23 @@ defmodule ProofMCPLive do
 
     temp_root = make_temp_root("codex-loops-mcp-live-proof")
 
-    source_plugin_root = Path.join(repo_root, "plugins/codex-loops")
-    installed_plugin_root = Path.join(temp_root, "installed-plugin/codex-loops")
-    File.mkdir_p!(Path.dirname(installed_plugin_root))
-    File.cp_r!(source_plugin_root, installed_plugin_root)
-
-    entrypoint = Path.join(installed_plugin_root, "mcp/codex-loops-mcp")
-    runtime_root = Path.join(repo_root, "_build/homebrew/libexec")
-    packaged_scheduler = Path.join(runtime_root, "scheduler/bin/agent_loops")
+    runtime_root = Path.join(repo_root, "_build/dev-bundle")
+    entrypoint = Path.join(runtime_root, "bin/codex-loops")
+    packaged_scheduler = Path.join(runtime_root, "libexec/scheduler/bin/agent_loops")
     package_version = package_version(repo_root)
+    prepare_codex_binding!(temp_root, codex_path)
 
     assert!(
       executable_file?(entrypoint),
-      "copied source plugin should include its MCP launcher"
+      "development bundle should include its native control plane"
     )
 
     assert!(
       executable_file?(packaged_scheduler),
-      "staged Homebrew runtime should include scheduler release"
+      "development bundle should include scheduler release"
     )
 
-    assert_mcp_version!(entrypoint, runtime_root, package_version)
+    assert_control_plane_version!(entrypoint, package_version)
 
     workflow_path = Path.join(temp_root, "live-workflow.exs")
     journal_path = Path.join(temp_root, "runs.sqlite")
@@ -62,7 +58,7 @@ defmodule ProofMCPLive do
         temp_root,
         entrypoint,
         repo_root,
-        mcp_env(port, journal_path, codex_path, runtime_root),
+        mcp_env(port, journal_path, temp_root),
         fn client ->
           {initialize, client} =
             request!(client, 1, "initialize", %{
@@ -127,18 +123,14 @@ defmodule ProofMCPLive do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path, codex_path, runtime_root) do
+  defp mcp_env(port, journal_path, temp_root) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
-      {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
-      {~c"CODEX_LOOPS_RUNTIME_ROOT", String.to_charlist(runtime_root)},
       {~c"CODEX_LOOPS_RUNTIME_DIR", String.to_charlist(Path.join(Path.dirname(journal_path), "runtime"))},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
       {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
-      {~c"CODEX_LOOPS_CODEX_BIN", String.to_charlist(codex_path)},
-      {~c"CODEX_LOOPS_CODEX_MODEL", ~c"gpt-5.5"},
-      {~c"CODEX_LOOPS_PARENT_PATH", String.to_charlist(System.get_env("PATH") || "")},
+      {~c"HOME", String.to_charlist(Path.join(temp_root, "home"))},
       {~c"PATH", String.to_charlist(System.get_env("PATH") || "")}
     ]
   end
@@ -151,7 +143,7 @@ defmodule ProofMCPLive do
       Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
         :exit_status,
-        {:args, ["-c", ~s(exec "$1" --stdio < "$2"), "codex-loops-mcp", entrypoint, fifo_path]},
+        {:args, ["-c", ~s(exec "$1" mcp < "$2"), "codex-loops", entrypoint, fifo_path]},
         {:cd, repo_root},
         {:env, env}
       ])
@@ -397,19 +389,23 @@ defmodule ProofMCPLive do
 
   defp assert_initialize!(message, _version), do: raise("initialize response was not valid: #{inspect(message)}")
 
-  defp assert_mcp_version!(entrypoint, runtime_root, version) do
-    expected = "codex-loops-mcp #{version}\n"
+  defp assert_control_plane_version!(entrypoint, version) do
+    expected = "codex-loops #{version}\n"
 
-    case System.cmd(entrypoint, ["--version"],
-           env: [{"CODEX_LOOPS_RUNTIME_ROOT", runtime_root}],
-           stderr_to_stdout: true
-         ) do
+    case System.cmd(entrypoint, ["--version"], stderr_to_stdout: true) do
       {^expected, 0} ->
         :ok
 
       {output, status} ->
-        raise("MCP --version failed with #{status}: #{inspect(output)}")
+        raise("control-plane --version failed with #{status}: #{inspect(output)}")
     end
+  end
+
+  defp prepare_codex_binding!(temp_root, codex_path) do
+    {version, 0} = System.cmd(codex_path, ["--version"])
+    binding = Path.join(temp_root, "home/.codex/workflows/codex-binding.json")
+    File.mkdir_p!(Path.dirname(binding))
+    File.write!(binding, JSON.encode!(%{"path" => codex_path, "version" => String.trim(version)}))
   end
 
   defp package_version(repo_root) do
@@ -562,10 +558,10 @@ defmodule ProofMCPLive do
 
     System.cmd(cli, ["stop", "--host", "127.0.0.1", "--port", to_string(port), "--json"],
       env: [
-        {"CODEX_LOOPS_RUNTIME_ROOT", runtime_root},
         {"CODEX_LOOPS_RUNTIME_DIR", runtime_dir},
         {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
-        {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)}
+        {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)},
+        {"HOME", Path.join(Path.dirname(runtime_dir), "home")}
       ],
       stderr_to_stdout: true
     )

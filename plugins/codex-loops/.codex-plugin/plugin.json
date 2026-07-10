@@ -6,11 +6,10 @@
     "name": "Pedro Proenca"
   },
   "skills": "./skills/",
-  "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "Codex Loops",
     "shortDescription": "Validate and run Codex Loops workflows through the scheduler adapter.",
-    "longDescription": "Codex Loops packages one opt-in skill plus a source launcher for the Homebrew-installed Elixir runtime. The MCP adapter health-checks or starts the scheduler release, validates workflow files through the scheduler API, and leaves scheduler state inside the Elixir/Phoenix runtime.",
+    "longDescription": "Codex Loops packages the workflow-authoring skill. The separately installed Codex Loops runtime registers its MCP server directly in shared Codex configuration.",
     "developerName": "Pedro Proenca",
     "category": "Productivity",
     "websiteURL": "https://github.com/pproenca/codex-loops/tree/master/plugins/codex-loops",

@@ -2,8 +2,8 @@
 set -eu
 
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-release_ctl="$repo_root/_build/prod/rel/agent_loops/bin/agent_loops"
-release_cli="$repo_root/native/codex-loops/target/release/codex-loops"
+release_ctl="$repo_root/_build/dev-bundle/libexec/scheduler/bin/agent_loops"
+release_cli="$repo_root/_build/dev-bundle/bin/codex-loops"
 package_version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
 cd "$repo_root"
 
@@ -20,6 +20,21 @@ if [ ! -x "$release_cli" ]; then
 fi
 
 tmpdir=$(mktemp -d)
+HOME="$tmpdir/home"
+export HOME
+mkdir -p "$HOME/.codex/workflows"
+codex_stub="$tmpdir/codex"
+cat >"$codex_stub" <<'EOF'
+#!/bin/sh
+if [ "${1:-}" = "--version" ]; then
+  echo "codex-cli proof"
+  exit 0
+fi
+echo "proof Codex stub should not execute a live turn" >&2
+exit 9
+EOF
+chmod 755 "$codex_stub"
+printf '{"path":"%s","version":"codex-cli proof"}\n' "$codex_stub" >"$HOME/.codex/workflows/codex-binding.json"
 scheduler_managed=0
 bad_runtime=""
 conflict_runtime=""
@@ -59,6 +74,15 @@ cleanup() {
 }
 
 trap cleanup EXIT INT TERM
+
+fixture_cli() {
+  root=$1
+  mkdir -p "$root/bin" "$root/share/skills/codex-loops"
+  cp "$release_cli" "$root/bin/codex-loops"
+  cp "$repo_root/plugins/codex-loops/skills/codex-loops/SKILL.md" \
+    "$root/share/skills/codex-loops/SKILL.md"
+  printf '%s\n' "$root/bin/codex-loops"
+}
 
 workflow="$tmpdir/proof_workflow.exs"
 journal="${CODEX_LOOPS_PROOF_JOURNAL_PATH:-$tmpdir/runs.sqlite}"
@@ -409,15 +433,17 @@ fi
 
 echo "-- crash backoff remains explicitly stoppable"
 bad_runtime="$tmpdir/bad-runtime"
-bad_scheduler="$tmpdir/bad-scheduler/bin/agent_loops"
+bad_bundle="$tmpdir/bad-bundle"
+bad_scheduler="$bad_bundle/libexec/scheduler/bin/agent_loops"
 mkdir -p "$(dirname "$bad_scheduler")"
 cat >"$bad_scheduler" <<'EOF'
 #!/bin/sh
 exit 1
 EOF
 chmod 755 "$bad_scheduler"
-CODEX_LOOPS_RUNTIME_DIR="$bad_runtime" CODEX_LOOPS_SCHEDULER_BIN="$bad_scheduler" \
-  "$release_cli" serve --host "$host" --port "$port" --json \
+bad_cli=$(fixture_cli "$bad_bundle")
+CODEX_LOOPS_RUNTIME_DIR="$bad_runtime" \
+  "$bad_cli" serve --host "$host" --port "$port" --json \
   >"$tmpdir/bad-backoff.out" 2>"$tmpdir/bad-backoff.err" &
 bad_client_pid=$!
 backoff_seen=0
@@ -440,8 +466,7 @@ wait "$bad_client_pid" 2>/dev/null || true
 echo "-- failed startup releases ownership for a corrected retry"
 if CODEX_LOOPS_RUNTIME_DIR="$bad_runtime" \
   CODEX_LOOPS_SCHEDULER_START_TIMEOUT_MS=1200 \
-  CODEX_LOOPS_SCHEDULER_BIN="$bad_scheduler" \
-  "$release_cli" serve --host "$host" --port "$port" --json \
+  "$bad_cli" serve --host "$host" --port "$port" --json \
   >"$tmpdir/bad-timeout.out" 2>"$tmpdir/bad-timeout.err"; then
   echo "invalid journal unexpectedly started the scheduler" >&2
   exit 1
@@ -492,7 +517,8 @@ CODEX_LOOPS_RUNTIME_DIR="$conflict_runtime" \
 
 echo "-- short-timeout joiners cannot terminate a delayed lock winner"
 delay_runtime="$tmpdir/delay-runtime"
-delay_scheduler="$tmpdir/delay-scheduler/bin/agent_loops"
+delay_bundle="$tmpdir/delay-bundle"
+delay_scheduler="$delay_bundle/libexec/scheduler/bin/agent_loops"
 mkdir -p "$(dirname "$delay_scheduler")"
 cat >"$delay_scheduler" <<'EOF'
 #!/bin/sh
@@ -500,9 +526,10 @@ sleep 2
 exec "$REAL_SCHEDULER" "$@"
 EOF
 chmod 755 "$delay_scheduler"
-CODEX_LOOPS_RUNTIME_DIR="$delay_runtime" CODEX_LOOPS_SCHEDULER_BIN="$delay_scheduler" \
+delay_cli=$(fixture_cli "$delay_bundle")
+CODEX_LOOPS_RUNTIME_DIR="$delay_runtime" \
   REAL_SCHEDULER="$release_ctl" \
-  "$release_cli" serve --host "$host" --port "$port" \
+  "$delay_cli" serve --host "$host" --port "$port" \
   --journal "$tmpdir/delay-a.sqlite" --model delay-model --json \
   >"$tmpdir/delay-winner.out" 2>"$tmpdir/delay-winner.err" &
 delay_winner_pid=$!
@@ -511,17 +538,17 @@ for _ in $(seq 1 50); do
   sleep 0.05
 done
 assert_contains "$delay_runtime/owner.json" '"owner_token"' "delayed winner publishes stable ownership"
-if CODEX_LOOPS_RUNTIME_DIR="$delay_runtime" CODEX_LOOPS_SCHEDULER_BIN="$delay_scheduler" \
+if CODEX_LOOPS_RUNTIME_DIR="$delay_runtime" \
   CODEX_LOOPS_SCHEDULER_START_TIMEOUT_MS=300 REAL_SCHEDULER="$release_ctl" \
-  "$release_cli" serve --host "$host" --port "$port" \
+  "$delay_cli" serve --host "$host" --port "$port" \
   --journal "$tmpdir/delay-a.sqlite" --model delay-model --json \
   >"$tmpdir/delay-joiner.out" 2>"$tmpdir/delay-joiner.err"; then
   echo "short-timeout identical joiner unexpectedly reached readiness" >&2
   exit 1
 fi
-if CODEX_LOOPS_RUNTIME_DIR="$delay_runtime" CODEX_LOOPS_SCHEDULER_BIN="$delay_scheduler" \
+if CODEX_LOOPS_RUNTIME_DIR="$delay_runtime" \
   CODEX_LOOPS_SCHEDULER_START_TIMEOUT_MS=300 REAL_SCHEDULER="$release_ctl" \
-  "$release_cli" serve --host "$host" --port "$port" \
+  "$delay_cli" serve --host "$host" --port "$port" \
   --journal "$tmpdir/delay-b.sqlite" --model other-model --json \
   >"$tmpdir/delay-conflict.out" 2>"$tmpdir/delay-conflict.err"; then
   echo "conflicting delayed joiner unexpectedly succeeded" >&2
@@ -537,7 +564,7 @@ echo "-- stale dead-owner metadata cannot conflict with a fresh lock generation"
 stale_runtime="$tmpdir/stale-runtime"
 mkdir -p "$stale_runtime/attempts"
 cat >"$stale_runtime/owner.json" <<EOF
-{"owner_token":"dead-token","supervisor_pid":999999,"scheduler_pid":null,"version":"$package_version","port":$port,"scheduler_root":"$repo_root/_build/prod/rel/agent_loops","config":{"bind_host":"$host","journal":"$tmpdir/stale.sqlite","model":"stale-model"}}
+{"owner_token":"dead-token","supervisor_pid":999999,"scheduler_pid":null,"version":"$package_version","port":$port,"scheduler_root":"$repo_root/_build/dev-bundle/libexec/scheduler","config":{"bind_host":"$host","journal":"$tmpdir/stale.sqlite","model":"stale-model"}}
 EOF
 : >"$stale_runtime/owner.lock"
 : >"$stale_runtime/attempts/dead-token"
@@ -560,8 +587,11 @@ CODEX_LOOPS_RUNTIME_DIR="$stale_runtime" \
 
 echo "-- health cannot complete the supervisor ownership handoff after owner death"
 handoff_runtime="$tmpdir/handoff-runtime"
-handoff_scheduler="$tmpdir/handoff-scheduler/bin/agent_loops"
-mkdir -p "$(dirname "$handoff_scheduler")"
+handoff_bundle="$tmpdir/handoff-bundle"
+handoff_scheduler="$handoff_bundle/libexec/scheduler/bin/agent_loops"
+mkdir -p "$handoff_bundle/libexec/scheduler"
+cp -R "$repo_root/_build/dev-bundle/libexec/scheduler/." "$handoff_bundle/libexec/scheduler/"
+mv "$handoff_scheduler" "$handoff_scheduler.real"
 cat >"$handoff_scheduler" <<'EOF'
 #!/bin/sh
 set -eu
@@ -575,15 +605,13 @@ supervisor_pid=$(sed -n 's/.*"supervisor_pid":\([0-9][0-9]*\).*/\1/p' "$CODEX_LO
 cp "$CODEX_LOOPS_RUNTIME_DIR/owner.json" "$CODEX_LOOPS_RUNTIME_DIR/owner.saved.json"
 kill -KILL "$supervisor_pid"
 cp "$CODEX_LOOPS_RUNTIME_DIR/owner.saved.json" "$CODEX_LOOPS_RUNTIME_DIR/owner.json"
-"$REAL_SCHEDULER" "$@" &
-child=$!
-trap 'kill -TERM "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; exit 0' TERM INT
-wait "$child"
+exec "$REAL_SCHEDULER" "$@"
 EOF
 chmod 755 "$handoff_scheduler"
-if CODEX_LOOPS_RUNTIME_DIR="$handoff_runtime" CODEX_LOOPS_SCHEDULER_BIN="$handoff_scheduler" \
-  REAL_SCHEDULER="$release_ctl" \
-  "$release_cli" serve --host "$host" --port "$port" --journal "$tmpdir/handoff.sqlite" --json \
+handoff_cli=$(fixture_cli "$handoff_bundle")
+if CODEX_LOOPS_RUNTIME_DIR="$handoff_runtime" \
+  REAL_SCHEDULER="$handoff_scheduler.real" \
+  "$handoff_cli" serve --host "$host" --port "$port" --journal "$tmpdir/handoff.sqlite" --json \
   >"$tmpdir/handoff.out" 2>"$tmpdir/handoff.err"; then
   echo "serve claimed success after its durable supervisor died" >&2
   exit 1
@@ -593,10 +621,21 @@ if grep -Fq '"started":true' "$tmpdir/handoff.out"; then
   echo "orphaned handoff reported managed ownership" >&2
   exit 1
 fi
-CODEX_LOOPS_RUNTIME_DIR="$handoff_runtime" CODEX_LOOPS_SCHEDULER_BIN="$handoff_scheduler" \
-  "$release_cli" stop --host "$host" --port "$port" --force >/dev/null 2>&1 || true
+CODEX_LOOPS_RUNTIME_DIR="$handoff_runtime" \
+  "$release_cli" stop --host "$host" --port "$port" --force \
+  >"$tmpdir/handoff-stop.out" 2>"$tmpdir/handoff-stop.err" || {
+    cat "$tmpdir/handoff-stop.err" >&2
+    exit 1
+  }
 
-if curl -fsS "$base_url/api/health" >/dev/null 2>&1; then
+for _ in $(seq 1 50); do
+  if ! curl -fsS "$base_url/api/health" >/dev/null 2>&1; then
+    scheduler_stopped=1
+    break
+  fi
+  sleep 0.1
+done
+if [ "${scheduler_stopped:-0}" != "1" ]; then
   echo "scheduler remained healthy after lifecycle control proofs" >&2
   exit 1
 fi

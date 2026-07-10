@@ -43,8 +43,6 @@ defmodule Workflow.Provider.Codex do
     "--skip-git-repo-check"
   ]
 
-  @codex_bin_env "CODEX_LOOPS_CODEX_BIN"
-  @codex_model_env "CODEX_LOOPS_CODEX_MODEL"
   @timeout_detail %{"message" => "codex turn timed out"}
 
   @impl true
@@ -68,13 +66,14 @@ defmodule Workflow.Provider.Codex do
             {:error, {:backend_exit, status, output}} when status in [126, 127] ->
               {:error, unavailable_failure(backend_start_message(status, output))}
 
-            {:error, {:backend_exit, _status, _output} = reason} ->
+            {:error, {:backend_exit, status, output}} ->
               case finish_accumulator(accumulator) do
                 {:error, {:provider_failure, :backend, _detail, _usage, _activity} = failure} ->
                   {:error, failure}
 
-                _result ->
-                  raise "codex turn failed: #{inspect(reason)}"
+                {:ok, _result, usage, activity} ->
+                  {:error,
+                   {:provider_failure, :backend, %{"message" => backend_exit_message(status, output)}, usage, activity}}
               end
           end
         after
@@ -91,10 +90,9 @@ defmodule Workflow.Provider.Codex do
   The production default backend: the real `codex` binary's one-shot
   `exec --json` entrypoint. Overridable per run via
   `command: {path, args}` (the seam a test uses to point at a hermetic stub).
-  Packaged MCP/scheduler launches can also set `CODEX_LOOPS_CODEX_BIN` to an
-  absolute Codex CLI path when release wrappers have rewritten `PATH`.
-  `CODEX_LOOPS_CODEX_MODEL` optionally appends a per-run `--model` override so
-  scheduler turns need not inherit an incompatible model from user config.
+  The native composition root injects a validated absolute Codex path into
+  application configuration before the scheduler boots. This provider never
+  discovers commands through `PATH` or process environment.
   """
   @spec default_command() :: {String.t(), [String.t()]}
   def default_command do
@@ -130,31 +128,15 @@ defmodule Workflow.Provider.Codex do
   end
 
   defp default_command_result do
-    cond do
-      configured_codex_bin() not in [nil, ""] ->
-        configured_codex_bin()
-        |> Path.expand()
-        |> executable_command_result()
+    case Application.fetch_env(:codex_loops, :codex_command) do
+      {:ok, {path, prefix_args}} ->
+        {:ok, {path, prefix_args ++ exec_args()}}
 
-      path = System.find_executable("codex") ->
-        {:ok, {path, exec_args()}}
+      :error ->
+        {:error, unavailable_failure("Codex command was not configured")}
 
-      true ->
-        {:error, unavailable_failure(missing_codex_message())}
-    end
-  end
-
-  defp executable_command_result(path) do
-    case File.stat(path) do
-      {:ok, %File.Stat{type: :regular, mode: mode}} ->
-        if Bitwise.band(mode, 0o111) == 0 do
-          {:error, unavailable_failure("#{@codex_bin_env} is not executable: #{path}")}
-        else
-          {:ok, {path, exec_args()}}
-        end
-
-      _other ->
-        {:error, unavailable_failure("#{@codex_bin_env} does not point to a file: #{path}")}
+      {:ok, value} ->
+        {:error, unavailable_failure("invalid Codex command configuration: #{inspect(value)}")}
     end
   end
 
@@ -162,14 +144,9 @@ defmodule Workflow.Provider.Codex do
     {:provider_failure, :unavailable,
      %{
        "message" => message,
-       "env" => @codex_bin_env,
-       "hint" =>
-         "Install/authenticate the Codex CLI, set #{@codex_bin_env} to its absolute path, or include `codex` on PATH."
+       "config" => "codex_command",
+       "hint" => "Run `codex-loops install --codex /absolute/path/to/codex` to bind a tested Codex command."
      }, nil, []}
-  end
-
-  defp missing_codex_message do
-    "no `codex` executable found; set #{@codex_bin_env} or include `codex` on PATH"
   end
 
   defp backend_start_message(status, output) do
@@ -184,10 +161,17 @@ defmodule Workflow.Provider.Codex do
     end
   end
 
-  defp configured_codex_bin, do: System.get_env(@codex_bin_env)
+  defp backend_exit_message(status, output) do
+    detail = output |> String.trim() |> truncate(180)
+
+    case detail do
+      "" -> "codex command exited with status #{status}"
+      _text -> "codex command exited with status #{status}: #{detail}"
+    end
+  end
 
   defp exec_args do
-    case System.get_env(@codex_model_env) do
+    case Application.get_env(:codex_loops, :codex_model) do
       model when is_binary(model) and model != "" -> @base_exec_args ++ ["--model", model]
       _unset -> @base_exec_args
     end

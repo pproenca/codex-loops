@@ -1,50 +1,39 @@
-# Codex Loops
+# Codex Loops Documentation
 
-Codex Loops is the local, path-first workflow scheduler for Codex. The current
-product architecture is a Codex plugin with a native Rust CLI/MCP control plane
-plus a packaged Elixir/Phoenix scheduler. Rust manages OS-process lifecycle and
-tool calls through the scheduler HTTP interface; Elixir owns OTP supervision,
-workflow workers, Phoenix PubSub/LiveView, and the SQLite journal.
-
-The distributable scheduler artifact is the `agent_loops` Mix release. The user
-CLI and MCP adapter are modes of the native `codex-loops` binary.
+Codex Loops is a local, path-first workflow scheduler distributed as one
+immutable runtime bundle. Its native Rust control plane owns installation,
+stdio MCP, scheduler HTTP translation, and OS-process lifecycle. Its packaged
+Elixir/Phoenix scheduler owns OTP supervision, workflow workers, the SQLite
+journal, PubSub, and LiveView.
 
 ## Canonical Subdocs
 
-- `docs/runtime.md`: architecture, journal model, packaging, providers.
-- `docs/workflow-authoring.md`: `.exs` workflow authoring and testing gate.
-- `docs/operations.md`: setup, build, release, proof, live proof.
-- `docs/adr/`: accepted architecture and packaging decisions.
+- `docs/runtime.md`: runtime architecture, bundle, journal, and providers.
+- `docs/workflow-authoring.md`: executable `.exs` workflows and testing gates.
+- `docs/operations.md`: development, installation, proofs, and release work.
+- `docs/adr/`: accepted and superseded architecture decisions.
 
 ## Quick Start
 
 ```sh
-make build
+make dev-bundle
+_build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
 make ci
-make release
+make dist
 ```
 
-`make build` compiles from a clean checkout. `make ci` owns the full
-credential-free validation graph, including static analysis, all Elixir tests,
-browser E2E, release/API/CLI proof, and packaged MCP workflow conformance.
-`make release` builds the scheduler; `make native-build` builds the control
-plane. `make package-homebrew-runtime` stages both as the distributable layout.
+`make dev-bundle` assembles the same fixed layout used by production archives.
+`make dist` emits one target-specific archive plus checksum and optional
+minisign signature.
 
 ## Supported Scope
 
-Supported:
-
 - explicit path-first Elixir workflow scripts;
-- offline mock tests;
-- live Codex provider runs via `codex exec --json`;
-- SQLite-backed scheduler projections for status, inspect, and resume;
-- Codex-facing MCP tools for validate/start/status/inspect/resume/open UI;
-- scheduler API polling snapshots, journal inspection, and realtime run LiveView;
-- native CLI/MCP plus self-contained Mix scheduler release packaging.
+- offline mock and live Codex provider runs;
+- SQLite-backed status, inspect, and resume projections;
+- MCP validate/start/status/inspect/resume/open-UI tools;
+- Phoenix API polling and realtime LiveView;
+- one native control-plane command plus one self-contained OTP scheduler release.
 
-Not currently shipped in the scheduler/plugin product:
-
-- workflow draft scaffolding;
-- automatic launch at OS login;
-- hosted workflow services;
-- per-agent skip controls.
+Not currently shipped: workflow draft scaffolding, OS-login launch, hosted
+workflow services, and per-agent skip controls.

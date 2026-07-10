@@ -26,7 +26,8 @@ workers, Phoenix PubSub/LiveView, and the SQLite journal.
 ```sh
 make build
 make ci
-make release
+make dev-bundle
+make dist
 make native-test
 ```
 

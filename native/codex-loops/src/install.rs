@@ -1,17 +1,18 @@
 use std::{
-    env,
+    fs,
     path::{Path, PathBuf},
     process::Command,
 };
 
-use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
 
-use crate::error::{AppError, AppResult};
+use crate::{
+    error::{AppError, AppResult},
+    runtime::{Bundle, CodexBinding, binding_path},
+};
 
-const MARKETPLACE: &str = "codex-loops";
-const MARKETPLACE_SOURCE: &str = "pproenca/codex-loops";
-const PLUGIN_ID: &str = "codex-loops@codex-loops";
+const MCP_NAME: &str = "codex-loops";
+const SKILL_VERSION_FILE: &str = ".codex-loops-version";
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -23,405 +24,434 @@ pub enum Mode {
 pub struct Options {
     pub mode: Mode,
     pub verbose: bool,
+    pub codex: Option<PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Action {
+    BindCodex,
+    InstallSkill,
+    AddMcp,
+    ReplaceMcp,
+}
+
+impl Action {
+    fn name(self) -> &'static str {
+        match self {
+            Self::BindCodex => "bind_codex",
+            Self::InstallSkill => "install_skill",
+            Self::AddMcp => "add_mcp",
+            Self::ReplaceMcp => "replace_mcp",
+        }
+    }
+}
+
+struct State {
+    binding: Option<CodexBinding>,
+    skill_version: Option<String>,
+    mcp: Option<Value>,
 }
 
 pub fn run(options: Options) -> AppResult<Value> {
-    let runtime = runtime().map_err(|error| {
-        AppError::new(6, "runtime_invalid", error.to_string())
-            .next_steps(["From a source checkout, run `make build && make release`."])
-    })?;
-    let codex = which::which("codex").map_err(|_| {
-        AppError::new(3, "codex_missing", "Codex CLI was not found on PATH.")
-            .next_steps(["Run `brew install --cask codex`."])
-    })?;
-    let codex_version = text_command(&codex, &["--version"]).map_err(|error| {
-        AppError::new(3, "codex_incompatible", error.to_string()).step("codex_preflight")
-    })?;
-    check_capabilities(&codex).map_err(|error| {
-        AppError::new(3, "codex_incompatible", error.to_string())
-            .step("codex_preflight")
-            .next_steps(["Run `codex update`."])
-    })?;
-    let initial = state(&codex).map_err(|error| codex_command_error(error, false, "state_read"))?;
-    let actions =
-        plan(&initial).map_err(|error| AppError::new(4, "install_conflict", error.to_string()))?;
+    let bundle = Bundle::installed()?;
+    let integration_command = bundle.integration_command();
+    let binding_path = binding_path()?;
+    let codex = select_codex(options.codex.as_deref(), &binding_path)?;
+    check_capabilities(&codex.path)?;
+    let skill_destination = skill_destination()?;
+    let initial = read_state(&codex.path, &binding_path, &skill_destination)?;
+    let actions = plan(&initial, &codex, &integration_command);
 
     if options.mode == Mode::Check && !actions.is_empty() {
         return Err(
             AppError::new(1, "state_missing", "Codex Loops is not fully installed.")
-                .details(json!({"plan": actions})),
+                .details(json!({"plan": action_names(&actions)})),
         );
     }
 
     let mut changed = false;
     if options.mode == Mode::Install {
         for action in &actions {
-            for args in action_commands(action) {
-                command(&codex, &args)
-                    .map_err(|error| codex_command_error(error, changed, command_step(&args)))?;
-                changed = true;
-            }
+            execute(
+                *action,
+                &bundle,
+                &codex,
+                &binding_path,
+                &skill_destination,
+                &integration_command,
+                changed,
+            )?;
+            changed = true;
         }
-    }
 
-    let final_state = if options.mode == Mode::Install {
-        state(&codex).map_err(|error| codex_command_error(error, changed, "state_verify"))?
-    } else {
-        initial
-    };
-    if options.mode != Mode::DryRun {
-        let remaining = plan(&final_state).map_err(|error| {
-            AppError::new(4, "install_conflict", error.to_string()).changed(changed)
-        })?;
+        let final_state = read_state(&codex.path, &binding_path, &skill_destination)?;
+        let remaining = plan(&final_state, &codex, &integration_command);
         if !remaining.is_empty() {
             return Err(AppError::new(
                 6,
                 "verification_failed",
                 "Codex Loops installation could not be verified.",
             )
-            .details(json!({"plan": remaining}))
+            .details(json!({"plan": action_names(&remaining)}))
             .changed(changed)
             .step("verification"));
         }
-        verify_launcher(&final_state, &runtime).map_err(|error| {
-            AppError::new(6, "launcher_discovery_failed", error.to_string())
-                .changed(changed)
-                .step("launcher_verify")
-        })?;
     }
 
-    let commands: Vec<String> = actions
-        .iter()
-        .flat_map(|action| action_commands(action))
-        .map(|args| format!("codex {}", args.join(" ")))
-        .collect();
+    let commands = if options.verbose || options.mode == Mode::DryRun {
+        action_commands(&actions, &codex, &integration_command)
+    } else {
+        Vec::new()
+    };
+
     Ok(json!({
         "ok": true,
         "command": "install",
         "changed": changed,
-        "mode": match options.mode { Mode::Install => "install", Mode::Check => "check", Mode::DryRun => "dry_run" },
-        "runtime": runtime,
-        "codex": {"path": codex, "version": codex_version.trim()},
-        "marketplace": marketplace_result(final_state.get("marketplace")),
-        "plugin": plugin_result(final_state.get("plugin")),
-        "plan": actions,
-        "commands": if options.verbose || options.mode == Mode::DryRun { Value::Array(commands.into_iter().map(Value::String).collect()) } else { Value::Null },
-        "next_steps": ["Open a new Codex task and ask: Use the codex-loops skill."]
+        "mode": match options.mode {
+            Mode::Install => "install",
+            Mode::Check => "check",
+            Mode::DryRun => "dry_run",
+        },
+        "runtime": {
+            "root": bundle.root,
+            "control_plane": bundle.control_plane,
+            "scheduler": bundle.scheduler,
+            "skill": bundle.skill,
+        },
+        "codex": {"path": codex.path, "version": codex.version},
+        "skill": {"path": skill_destination, "version": env!("CARGO_PKG_VERSION")},
+        "mcp": {"name": MCP_NAME, "command": integration_command, "args": ["mcp"]},
+        "plugin": Value::Null,
+        "plan": action_names(&actions),
+        "commands": commands,
+        "next_steps": ["Restart Codex, then ask: Use the codex-loops skill."],
     }))
 }
 
-fn codex_command_error(error: anyhow::Error, changed: bool, step: &str) -> AppError {
+fn select_codex(explicit: Option<&Path>, binding_path: &Path) -> AppResult<CodexBinding> {
+    match explicit {
+        Some(path) => CodexBinding::probe(path),
+        None if binding_path.is_file() => CodexBinding::load(binding_path),
+        None => Err(AppError::new(
+            3,
+            "codex_binding_required",
+            "The first installation requires an explicit Codex CLI binding.",
+        )
+        .next_steps([
+            "Run `codex-loops install --codex /absolute/path/to/codex` with the exact command you want this runtime to use.",
+        ])),
+    }
+}
+
+fn check_capabilities(codex: &Path) -> AppResult<()> {
+    let list_help = text_command(codex, &["mcp", "list", "--help"], "codex_preflight")?;
+    let add_help = text_command(codex, &["mcp", "add", "--help"], "codex_preflight")?;
+    if !list_help.contains("--json") || !add_help.contains("--") {
+        return Err(AppError::new(
+            3,
+            "codex_incompatible",
+            "The selected Codex CLI does not support direct MCP registration.",
+        )
+        .next_steps([
+            "Select a newer CLI with `codex-loops install --codex /absolute/path/to/codex`.",
+        ]));
+    }
+    Ok(())
+}
+
+fn read_state(codex: &Path, binding_path: &Path, skill_destination: &Path) -> AppResult<State> {
+    Ok(State {
+        binding: read_stored_binding(binding_path),
+        skill_version: fs::read_to_string(skill_destination.join(SKILL_VERSION_FILE))
+            .ok()
+            .map(|value| value.trim().to_owned()),
+        mcp: read_mcp(codex)?,
+    })
+}
+
+fn read_stored_binding(path: &Path) -> Option<CodexBinding> {
+    fs::read(path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+}
+
+fn read_mcp(codex: &Path) -> AppResult<Option<Value>> {
+    let output = Command::new(codex)
+        .args(["mcp", "list", "--json"])
+        .output()
+        .map_err(|error| codex_command_error(error.to_string(), false, "mcp_read"))?;
+    if !output.status.success() {
+        return Err(codex_command_error(
+            String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            false,
+            "mcp_read",
+        ));
+    }
+    let servers: Vec<Value> = serde_json::from_slice(&output.stdout).map_err(|error| {
+        codex_command_error(
+            format!("Codex returned invalid MCP JSON: {error}"),
+            false,
+            "mcp_read",
+        )
+    })?;
+    Ok(servers
+        .into_iter()
+        .find(|server| server.get("name").and_then(Value::as_str) == Some(MCP_NAME)))
+}
+
+fn plan(state: &State, codex: &CodexBinding, integration_command: &Path) -> Vec<Action> {
+    let mut actions = Vec::new();
+    if state.binding.as_ref() != Some(codex) {
+        actions.push(Action::BindCodex);
+    }
+    if state.skill_version.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+        actions.push(Action::InstallSkill);
+    }
+    match state.mcp.as_ref() {
+        None => actions.push(Action::AddMcp),
+        Some(mcp) if !mcp_matches(mcp, integration_command) => actions.push(Action::ReplaceMcp),
+        Some(_mcp) => {}
+    }
+    actions
+}
+
+fn mcp_matches(value: &Value, control_plane: &Path) -> bool {
+    value.pointer("/transport/type").and_then(Value::as_str) == Some("stdio")
+        && value.pointer("/transport/command").and_then(Value::as_str) == control_plane.to_str()
+        && value.pointer("/transport/args") == Some(&json!(["mcp"]))
+}
+
+fn execute(
+    action: Action,
+    bundle: &Bundle,
+    codex: &CodexBinding,
+    binding_path: &Path,
+    skill_destination: &Path,
+    integration_command: &Path,
+    changed: bool,
+) -> AppResult<()> {
+    match action {
+        Action::BindCodex => codex.persist(binding_path),
+        Action::InstallSkill => install_skill(&bundle.skill, skill_destination),
+        Action::AddMcp => add_mcp(&codex.path, integration_command, changed),
+        Action::ReplaceMcp => {
+            run_command(
+                &codex.path,
+                &["mcp", "remove", MCP_NAME],
+                changed,
+                "mcp_remove",
+            )?;
+            add_mcp(&codex.path, integration_command, true)
+        }
+    }
+}
+
+fn add_mcp(codex: &Path, control_plane: &Path, changed: bool) -> AppResult<()> {
+    let command = control_plane.to_str().ok_or_else(|| {
+        AppError::new(
+            6,
+            "runtime_invalid",
+            "The control-plane path is not valid UTF-8.",
+        )
+    })?;
+    run_command(
+        codex,
+        &["mcp", "add", MCP_NAME, "--", command, "mcp"],
+        changed,
+        "mcp_add",
+    )
+}
+
+fn install_skill(source: &Path, destination: &Path) -> AppResult<()> {
+    let parent = destination.parent().ok_or_else(|| {
+        AppError::new(
+            6,
+            "skill_install_failed",
+            "The user skill path has no parent.",
+        )
+    })?;
+    fs::create_dir_all(parent).map_err(skill_error)?;
+    let temp = parent.join(format!(".codex-loops-{}.tmp", std::process::id()));
+    let backup = parent.join(format!(".codex-loops-{}.old", std::process::id()));
+    let _ = fs::remove_dir_all(&temp);
+    let _ = fs::remove_dir_all(&backup);
+    copy_dir(source, &temp)?;
+    fs::write(temp.join(SKILL_VERSION_FILE), env!("CARGO_PKG_VERSION")).map_err(skill_error)?;
+    if destination.exists() {
+        fs::rename(destination, &backup).map_err(skill_error)?;
+    }
+    if let Err(error) = fs::rename(&temp, destination) {
+        if backup.exists() {
+            let _ = fs::rename(&backup, destination);
+        }
+        return Err(skill_error(error));
+    }
+    let _ = fs::remove_dir_all(backup);
+    Ok(())
+}
+
+fn copy_dir(source: &Path, destination: &Path) -> AppResult<()> {
+    fs::create_dir_all(destination).map_err(skill_error)?;
+    for entry in fs::read_dir(source).map_err(skill_error)? {
+        let entry = entry.map_err(skill_error)?;
+        let target = destination.join(entry.file_name());
+        if entry.file_type().map_err(skill_error)?.is_dir() {
+            copy_dir(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target).map_err(skill_error)?;
+        }
+    }
+    Ok(())
+}
+
+fn skill_destination() -> AppResult<PathBuf> {
+    let home = std::env::var_os("HOME").ok_or_else(|| {
+        AppError::new(
+            6,
+            "skill_install_failed",
+            "HOME is not set; the user skill cannot be installed.",
+        )
+    })?;
+    Ok(PathBuf::from(home).join(".agents/skills/codex-loops"))
+}
+
+fn skill_error(error: std::io::Error) -> AppError {
+    AppError::new(
+        6,
+        "skill_install_failed",
+        "Codex Loops could not install its user skill.",
+    )
+    .details(json!({"reason": error.to_string()}))
+}
+
+fn run_command(program: &Path, args: &[&str], changed: bool, step: &'static str) -> AppResult<()> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| codex_command_error(error.to_string(), changed, step))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(codex_command_error(
+            format!(
+                "{} exited {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            changed,
+            step,
+        ))
+    }
+}
+
+fn text_command(program: &Path, args: &[&str], step: &'static str) -> AppResult<String> {
+    let output = Command::new(program)
+        .args(args)
+        .output()
+        .map_err(|error| codex_command_error(error.to_string(), false, step))?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    } else {
+        Err(codex_command_error(
+            format!(
+                "{} exited {}: {}",
+                args.join(" "),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            false,
+            step,
+        ))
+    }
+}
+
+fn codex_command_error(reason: String, changed: bool, step: &'static str) -> AppError {
     AppError::new(
         5,
         "codex_command_failed",
         "Codex command failed unexpectedly.",
     )
-    .details(json!({"reason": error.to_string()}))
+    .details(json!({"reason": reason}))
     .changed(changed)
     .step(step)
 }
 
-fn command_step(args: &[&str]) -> &'static str {
-    match args {
-        ["plugin", "marketplace", "remove", ..] => "marketplace_remove",
-        ["plugin", "marketplace", "add", ..] => "marketplace_add",
-        ["plugin", "add", ..] => "plugin_install",
-        _ => "codex_command",
-    }
+fn action_names(actions: &[Action]) -> Vec<&'static str> {
+    actions.iter().map(|action| action.name()).collect()
 }
 
-fn runtime() -> Result<Value> {
-    let root = env::var("CODEX_LOOPS_RUNTIME_ROOT")
-        .context("CODEX_LOOPS_RUNTIME_ROOT is not set; reinstall Codex Loops")?;
-    let root = PathBuf::from(root)
-        .canonicalize()
-        .context("Codex Loops runtime root does not exist")?;
-    let scheduler = root.join("scheduler/bin/agent_loops");
-    let mcp = root.join("mcp/codex-loops-mcp");
-    if !scheduler.is_file() || !mcp.is_file() {
-        bail!("Codex Loops runtime files are missing; reinstall the Homebrew package");
-    }
-    let version = text_command(&mcp, &["--version"])?;
-    if version.trim() != format!("codex-loops-mcp {}", env!("CARGO_PKG_VERSION")) {
-        bail!("Codex Loops runtime is incompatible: {}", version.trim());
-    }
-    Ok(
-        json!({"root": root, "scheduler": scheduler, "mcp": mcp, "version": env!("CARGO_PKG_VERSION")}),
-    )
-}
-
-fn check_capabilities(codex: &Path) -> Result<()> {
-    for args in [
-        ["plugin", "marketplace", "add", "--help"].as_slice(),
-        ["plugin", "add", "--help"].as_slice(),
-        ["plugin", "marketplace", "list", "--help"].as_slice(),
-        ["plugin", "list", "--help"].as_slice(),
-    ] {
-        let output = text_command(codex, args).context("This Codex CLI does not support plugin marketplace installation. Update Codex, then rerun: codex update")?;
-        if !output.contains("--json") {
-            bail!(
-                "This Codex CLI does not support plugin marketplace installation. Update Codex, then rerun: codex update"
-            );
-        }
-    }
-    Ok(())
-}
-
-fn state(codex: &Path) -> Result<Value> {
-    let marketplaces = json_command(codex, &["plugin", "marketplace", "list", "--json"])?;
-    let plugins = json_command(codex, &["plugin", "list", "--json"])?;
-    let marketplace = marketplaces
-        .get("marketplaces")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|item| item.get("name").and_then(Value::as_str) == Some(MARKETPLACE))
+fn action_commands(
+    actions: &[Action],
+    codex: &CodexBinding,
+    integration_command: &Path,
+) -> Vec<String> {
+    actions
+        .iter()
+        .map(|action| match action {
+            Action::BindCodex => format!("bind Codex {}", codex.path.display()),
+            Action::InstallSkill => "install user skill ~/.agents/skills/codex-loops".into(),
+            Action::AddMcp => format!(
+                "codex mcp add {MCP_NAME} -- {} mcp",
+                integration_command.display()
+            ),
+            Action::ReplaceMcp => format!(
+                "codex mcp remove {MCP_NAME} && codex mcp add {MCP_NAME} -- {} mcp",
+                integration_command.display()
+            ),
         })
-        .cloned()
-        .unwrap_or(Value::Null);
-    let plugin = plugins
-        .get("installed")
-        .and_then(Value::as_array)
-        .and_then(|items| {
-            items
-                .iter()
-                .find(|item| item.get("pluginId").and_then(Value::as_str) == Some(PLUGIN_ID))
-        })
-        .cloned()
-        .unwrap_or(Value::Null);
-    Ok(json!({"marketplace": marketplace, "plugin": plugin}))
-}
-
-fn plan(state: &Value) -> Result<Vec<String>> {
-    let marketplace = state.get("marketplace").filter(|value| !value.is_null());
-    let plugin = state.get("plugin").filter(|value| !value.is_null());
-    let marketplace_action = match marketplace {
-        None => Some("add_marketplace"),
-        Some(value) => {
-            let source = marketplace_source(value);
-            if !expected_source(&source) {
-                bail!("Codex marketplace {MARKETPLACE} is owned by a conflicting source: {source}");
-            }
-            if marketplace_ref(value).as_deref() == Some(&format!("v{}", env!("CARGO_PKG_VERSION")))
-            {
-                None
-            } else {
-                Some("replace_marketplace")
-            }
-        }
-    };
-    let plugin_action = match plugin {
-        None => Some("install_plugin"),
-        Some(value) => {
-            if value.get("marketplaceName").and_then(Value::as_str) != Some(MARKETPLACE) {
-                bail!("Codex Loops plugin is installed from a conflicting marketplace");
-            }
-            if marketplace_action.is_some()
-                || value.get("version").and_then(Value::as_str) != Some(env!("CARGO_PKG_VERSION"))
-                || value.get("installed").and_then(Value::as_bool) != Some(true)
-                || value.get("enabled").and_then(Value::as_bool) != Some(true)
-            {
-                Some("install_plugin")
-            } else {
-                None
-            }
-        }
-    };
-    Ok([marketplace_action, plugin_action]
-        .into_iter()
-        .flatten()
-        .map(str::to_owned)
-        .collect())
-}
-
-fn action_commands(action: &str) -> Vec<Vec<&'static str>> {
-    match action {
-        "add_marketplace" => vec![vec![
-            "plugin",
-            "marketplace",
-            "add",
-            MARKETPLACE_SOURCE,
-            "--ref",
-            release_ref(),
-            "--json",
-        ]],
-        "replace_marketplace" => vec![
-            vec!["plugin", "marketplace", "remove", MARKETPLACE, "--json"],
-            vec![
-                "plugin",
-                "marketplace",
-                "add",
-                MARKETPLACE_SOURCE,
-                "--ref",
-                release_ref(),
-                "--json",
-            ],
-        ],
-        "install_plugin" => vec![vec!["plugin", "add", PLUGIN_ID, "--json"]],
-        _ => vec![],
-    }
-}
-
-fn release_ref() -> &'static str {
-    concat!("v", env!("CARGO_PKG_VERSION"))
-}
-
-fn verify_launcher(state: &Value, runtime: &Value) -> Result<()> {
-    let plugin = state
-        .get("plugin")
-        .context("installed plugin state is missing")?;
-    let marketplace = state
-        .get("marketplace")
-        .context("marketplace state is missing")?;
-    let launcher = plugin
-        .pointer("/source/path")
-        .and_then(Value::as_str)
-        .map(|path| PathBuf::from(path).join("mcp/codex-loops-mcp"))
-        .or_else(|| {
-            marketplace
-                .get("root")
-                .and_then(Value::as_str)
-                .map(|path| PathBuf::from(path).join("plugins/codex-loops/mcp/codex-loops-mcp"))
-        })
-        .context("installed plugin launcher path could not be resolved")?;
-    let root = runtime
-        .get("root")
-        .and_then(Value::as_str)
-        .context("runtime root is missing")?;
-    let output = Command::new(&launcher)
-        .arg("--version")
-        .env("CODEX_LOOPS_RUNTIME_ROOT", root)
-        .output()
-        .with_context(|| format!("could not execute plugin launcher {}", launcher.display()))?;
-    if !output.status.success()
-        || String::from_utf8_lossy(&output.stdout).trim()
-            != format!("codex-loops-mcp {}", env!("CARGO_PKG_VERSION"))
-    {
-        bail!("the installed Codex Loops plugin could not discover this runtime");
-    }
-    Ok(())
-}
-
-fn marketplace_source(value: &Value) -> String {
-    value
-        .pointer("/marketplaceSource/source")
-        .or_else(|| value.get("source"))
-        .and_then(Value::as_str)
-        .unwrap_or("unknown")
-        .to_owned()
-}
-
-fn marketplace_ref(value: &Value) -> Option<String> {
-    value
-        .pointer("/marketplaceSource/ref")
-        .or_else(|| value.pointer("/marketplaceSource/refName"))
-        .or_else(|| value.get("ref"))
-        .and_then(Value::as_str)
-        .map(str::to_owned)
-}
-
-fn expected_source(source: &str) -> bool {
-    source
-        .trim()
-        .trim_start_matches("https://github.com/")
-        .trim_start_matches("git@github.com:")
-        .trim_end_matches(".git")
-        == MARKETPLACE_SOURCE
-}
-
-fn marketplace_result(value: Option<&Value>) -> Value {
-    match value.filter(|value| !value.is_null()) {
-        Some(value) => {
-            json!({"name": value.get("name"), "source": marketplace_source(value), "ref": marketplace_ref(value)})
-        }
-        None => Value::Null,
-    }
-}
-
-fn plugin_result(value: Option<&Value>) -> Value {
-    match value.filter(|value| !value.is_null()) {
-        Some(value) => {
-            json!({"id": value.get("pluginId"), "installed": value.get("installed") == Some(&Value::Bool(true)), "enabled": value.get("enabled") == Some(&Value::Bool(true)), "version": value.get("version")})
-        }
-        None => Value::Null,
-    }
-}
-
-fn json_command(program: &Path, args: &[&str]) -> Result<Value> {
-    let text = text_command(program, args)?;
-    serde_json::from_str(&text)
-        .with_context(|| format!("Codex command returned invalid JSON: {}", args.join(" ")))
-}
-
-fn command(program: &Path, args: &[&str]) -> Result<()> {
-    text_command(program, args).map(|_| ())
-}
-
-fn text_command(program: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new(program)
-        .args(args)
-        .output()
-        .with_context(|| format!("could not execute {}", program.display()))?;
-    if !output.status.success() {
-        bail!(
-            "Codex command failed: {} (exit {}): {}",
-            args.join(" "),
-            output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
-        );
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn marketplace(source: &str, release: &str) -> Value {
-        json!({"name": MARKETPLACE, "marketplaceSource": {"source": source, "ref": release}})
+    fn bundle() -> Bundle {
+        Bundle {
+            root: "/runtime".into(),
+            control_plane: "/runtime/bin/codex-loops".into(),
+            scheduler: "/runtime/libexec/scheduler/bin/agent_loops".into(),
+            skill: "/runtime/share/skills/codex-loops".into(),
+        }
     }
 
-    fn plugin() -> Value {
-        json!({"pluginId": PLUGIN_ID, "marketplaceName": MARKETPLACE, "version": env!("CARGO_PKG_VERSION"), "installed": true, "enabled": true})
-    }
-
-    #[test]
-    fn desired_install_state_has_no_plan() {
-        let state = json!({"marketplace": marketplace(MARKETPLACE_SOURCE, release_ref()), "plugin": plugin()});
-        assert!(plan(&state).unwrap().is_empty());
-    }
-
-    #[test]
-    fn missing_state_has_deterministic_plan() {
-        let state = json!({"marketplace": null, "plugin": null});
-        assert_eq!(plan(&state).unwrap(), ["add_marketplace", "install_plugin"]);
+    fn binding() -> CodexBinding {
+        CodexBinding {
+            path: "/usr/local/bin/codex".into(),
+            version: "codex-cli 9.9.9".into(),
+        }
     }
 
     #[test]
-    fn conflicting_marketplace_fails_closed() {
-        let state =
-            json!({"marketplace": marketplace("someone/else", release_ref()), "plugin": null});
-        assert!(
-            plan(&state)
-                .unwrap_err()
-                .to_string()
-                .contains("conflicting source")
+    fn missing_install_state_has_one_deterministic_plan() {
+        let state = State {
+            binding: None,
+            skill_version: None,
+            mcp: None,
+        };
+        assert_eq!(
+            plan(&state, &binding(), Path::new("/runtime/bin/codex-loops")),
+            [Action::BindCodex, Action::InstallSkill, Action::AddMcp]
         );
     }
 
     #[test]
-    fn partial_install_failures_report_the_mutation_and_exact_step() {
-        let error = codex_command_error(anyhow::anyhow!("fixture failed"), true, "plugin_install");
-        assert_eq!(error.status, 5);
-        assert_eq!(error.code.as_ref(), "codex_command_failed");
-        assert!(error.changed);
-        assert_eq!(error.step.as_deref(), Some("plugin_install"));
-        assert!(
-            error.details["reason"]
-                .as_str()
-                .unwrap()
-                .contains("fixture failed")
-        );
+    fn matching_direct_state_is_idempotent() {
+        let runtime = bundle();
+        let codex = binding();
+        let state = State {
+            binding: Some(codex.clone()),
+            skill_version: Some(env!("CARGO_PKG_VERSION").into()),
+            mcp: Some(json!({
+                "transport": {
+                    "type": "stdio",
+                    "command": runtime.control_plane,
+                    "args": ["mcp"]
+                }
+            })),
+        };
+        assert!(plan(&state, &codex, Path::new("/runtime/bin/codex-loops")).is_empty());
     }
 }

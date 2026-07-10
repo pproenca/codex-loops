@@ -19,27 +19,22 @@ step "Checking required commands"
 require_cmd codex
 require_cmd mix
 
-step "Proving source plugin plus external runtime"
+step "Proving immutable bundle plus direct MCP"
 make proof-mcp
 
-step "Resetting codex-loops plugin install"
-codex plugin remove codex-loops@codex-loops >/dev/null 2>&1 || true
-codex plugin marketplace remove codex-loops >/dev/null 2>&1 || true
+step "Binding this Codex CLI and registering the runtime"
+"$repo_root/_build/dev-bundle/bin/codex-loops" install --codex "$(command -v codex)"
 
-step "Installing local marketplace from this checkout"
-codex plugin marketplace add .
-codex plugin add codex-loops@codex-loops
-
-step "Verifying Codex sees the plugin installed"
-if ! codex plugin list --json | grep -q '"pluginId": "codex-loops@codex-loops"'; then
-  printf 'codex-loops@codex-loops was not found in codex plugin list --json\n' >&2
+step "Verifying direct MCP registration"
+codex mcp get codex-loops --json | grep -q '"command"' || {
+  printf 'direct codex-loops MCP registration was not found\n' >&2
   exit 1
-fi
+}
 
 cat <<'PROMPT'
 
 ==> Next manual step
-Open a NEW Codex thread so the freshly installed plugin is loaded.
+Open a NEW Codex thread so the freshly installed skill and MCP server are loaded.
 
 Paste this prompt:
 
@@ -58,6 +53,3 @@ Then use the Codex Loops MCP tools to:
 Do not use shell commands for the workflow run; this dogfood run is meant to
 exercise the MCP tools.
 PROMPT
-
-printf '\nFor CLI dogfood, launch Codex with:\n  CODEX_LOOPS_RUNTIME_ROOT=%q codex\n' \
-  "$repo_root/_build/homebrew/libexec"

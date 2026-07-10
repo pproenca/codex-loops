@@ -7,9 +7,6 @@ defmodule Workflow.CodexProviderEnvTest do
   alias Workflow.Run
   alias Workflow.Status
 
-  @codex_bin_env "CODEX_LOOPS_CODEX_BIN"
-  @codex_model_env "CODEX_LOOPS_CODEX_MODEL"
-
   defmodule EchoWorkflow do
     @moduledoc false
     use Workflow
@@ -21,22 +18,20 @@ defmodule Workflow.CodexProviderEnvTest do
   end
 
   setup do
-    previous_path = System.get_env("PATH")
-    previous_codex_bin = System.get_env(@codex_bin_env)
-    previous_codex_model = System.get_env(@codex_model_env)
+    previous_codex_command = Application.get_env(:codex_loops, :codex_command)
+    previous_codex_model = Application.get_env(:codex_loops, :codex_model)
 
     on_exit(fn ->
-      restore_env("PATH", previous_path)
-      restore_env(@codex_bin_env, previous_codex_bin)
-      restore_env(@codex_model_env, previous_codex_model)
+      restore_config(:codex_command, previous_codex_command)
+      restore_config(:codex_model, previous_codex_model)
     end)
 
     :ok
   end
 
-  test "CODEX_LOOPS_CODEX_BIN selects the production codex command without PATH lookup" do
+  test "the normalized application config selects the production codex command" do
     bin = executable_stub("codex-bin")
-    System.put_env(@codex_bin_env, bin)
+    Application.put_env(:codex_loops, :codex_command, {bin, []})
 
     assert {^bin,
             [
@@ -47,10 +42,10 @@ defmodule Workflow.CodexProviderEnvTest do
             ]} = Codex.default_command()
   end
 
-  test "CODEX_LOOPS_CODEX_MODEL overrides an incompatible user-configured model" do
+  test "the normalized application config selects the Codex model" do
     bin = executable_stub("codex-model")
-    System.put_env(@codex_bin_env, bin)
-    System.put_env(@codex_model_env, "gpt-5.5")
+    Application.put_env(:codex_loops, :codex_command, {bin, []})
+    Application.put_env(:codex_loops, :codex_model, "gpt-5.5")
 
     assert {^bin,
             [
@@ -63,18 +58,17 @@ defmodule Workflow.CodexProviderEnvTest do
             ]} = Codex.default_command()
   end
 
-  test "a missing codex CLI is journaled as an unavailable provider failure" do
-    System.put_env("PATH", empty_dir())
-    System.delete_env(@codex_bin_env)
+  test "a missing normalized Codex command is journaled as an unavailable provider failure" do
+    Application.delete_env(:codex_loops, :codex_command)
 
     id = "codex_env_missing_#{System.unique_integer([:positive])}"
 
     assert {:error, {:provider_failure, [0], :unavailable, detail}} =
              Run.run(EchoWorkflow, run_id: id, provider: Provider.select(:codex, []))
 
-    assert detail["env"] == @codex_bin_env
-    assert detail["message"] =~ "no `codex` executable"
-    assert detail["hint"] =~ @codex_bin_env
+    assert detail["config"] == "codex_command"
+    assert detail["message"] =~ "Codex command was not configured"
+    assert detail["hint"] =~ "codex-loops install --codex"
 
     assert id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :agent_failed]
 
@@ -97,7 +91,7 @@ defmodule Workflow.CodexProviderEnvTest do
                provider: {Codex, command: {"/bin/sh", ["-c", "exit 127"]}}
              )
 
-    assert detail["env"] == @codex_bin_env
+    assert detail["config"] == "codex_command"
     assert detail["message"] =~ "exit status 127"
     assert id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :agent_failed]
     assert Status.of(id).state == :failed
@@ -111,13 +105,6 @@ defmodule Workflow.CodexProviderEnvTest do
     path
   end
 
-  defp empty_dir do
-    path = Path.join(System.tmp_dir!(), "empty-path-#{System.unique_integer([:positive])}")
-    File.mkdir_p!(path)
-    on_exit(fn -> File.rm_rf(path) end)
-    path
-  end
-
-  defp restore_env(key, nil), do: System.delete_env(key)
-  defp restore_env(key, value), do: System.put_env(key, value)
+  defp restore_config(key, nil), do: Application.delete_env(:codex_loops, key)
+  defp restore_config(key, value), do: Application.put_env(:codex_loops, key, value)
 end

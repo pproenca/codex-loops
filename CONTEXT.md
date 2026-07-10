@@ -39,3 +39,13 @@ _Avoid_: plugin postinstall hook, automatic dependency install
 **Plugin lifecycle**:
 Codex-owned installation, enablement, and update state for the Codex Loops plugin, separate from the Homebrew-owned runtime package.
 _Avoid_: bundled plugin copy, Homebrew-owned plugin update
+
+**Runtime bundle**:
+A target-specific, immutable Codex Loops directory containing the native
+control plane, OTP scheduler release, and user skill at fixed relative paths.
+_Avoid_: runtime root search, Homebrew runtime, source runtime
+
+**Codex binding**:
+The persisted lexical absolute path and exact probed version of the Codex CLI
+selected during `codex-loops install`; scheduler turns never rediscover it.
+_Avoid_: Codex discovery, inherited Codex path, PATH fallback

@@ -34,32 +34,25 @@ defmodule ProofMCPValidate do
 
     temp_root = make_temp_root("codex-loops-mcp-proof")
 
-    source_plugin_root = Path.join(repo_root, "plugins/codex-loops")
-    installed_plugin_root = Path.join(temp_root, "installed-plugin/codex-loops")
-    File.mkdir_p!(Path.dirname(installed_plugin_root))
-    File.cp_r!(source_plugin_root, installed_plugin_root)
-
-    entrypoint = Path.join(installed_plugin_root, "mcp/codex-loops-mcp")
-    runtime_root = Path.join(repo_root, "_build/homebrew/libexec")
-    packaged_scheduler = Path.join(runtime_root, "scheduler/bin/agent_loops")
-    codex_stub = Path.join(repo_root, "scripts/support/codex-conformance-stub.py")
+    runtime_root = Path.join(repo_root, "_build/dev-bundle")
+    entrypoint = Path.join(runtime_root, "bin/codex-loops")
+    packaged_scheduler = Path.join(runtime_root, "libexec/scheduler/bin/agent_loops")
+    codex_stub = prepare_codex_binding!(temp_root, repo_root)
     package_version = package_version(repo_root)
 
     assert!(
       executable_file?(entrypoint),
-      "copied source plugin should include its MCP launcher"
+      "development bundle should include its native control plane"
     )
 
     assert!(
       executable_file?(packaged_scheduler),
-      "staged Homebrew runtime should include scheduler release"
+      "development bundle should include scheduler release"
     )
 
     assert!(executable_file?(codex_stub), "Codex conformance stub should be executable")
 
-    assert_missing_runtime!(entrypoint, temp_root)
-    assert_version_mismatch!(entrypoint, temp_root, package_version)
-    assert_mcp_version!(entrypoint, runtime_root, package_version)
+    assert_control_plane_version!(entrypoint, package_version)
 
     workflow_path = Path.join(temp_root, "workflow.exs")
     running_workflow_path = Path.join(temp_root, "running-workflow.exs")
@@ -81,7 +74,7 @@ defmodule ProofMCPValidate do
         temp_root,
         entrypoint,
         repo_root,
-        mcp_env(port, journal_path, runtime_root, codex_stub),
+        mcp_env(port, journal_path, temp_root),
         fn client ->
           {initialize, client} =
             request!(client, 1, "initialize", %{
@@ -246,16 +239,14 @@ defmodule ProofMCPValidate do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path, runtime_root, codex_stub) do
+  defp mcp_env(port, journal_path, temp_root) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
-      {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
-      {~c"CODEX_LOOPS_RUNTIME_ROOT", String.to_charlist(runtime_root)},
       {~c"CODEX_LOOPS_RUNTIME_DIR", String.to_charlist(Path.join(Path.dirname(journal_path), "runtime"))},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
       {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
-      {~c"CODEX_LOOPS_CODEX_BIN", String.to_charlist(codex_stub)}
+      {~c"HOME", String.to_charlist(Path.join(temp_root, "home"))}
     ]
   end
 
@@ -300,8 +291,8 @@ defmodule ProofMCPValidate do
       Port.open({:spawn_executable, "/bin/sh"}, [
         :binary,
         :exit_status,
-        {:args, ["-c", ~s(exec "$1" --stdio < "$2"), "codex-loops-mcp", entrypoint, fifo_path]},
-        {:cd, Path.dirname(Path.dirname(entrypoint))},
+        {:args, ["-c", ~s(exec "$1" mcp < "$2"), "codex-loops", entrypoint, fifo_path]},
+        {:cd, Path.dirname(entrypoint)},
         {:env, env}
       ])
 
@@ -580,76 +571,37 @@ defmodule ProofMCPValidate do
 
   defp assert_initialize!(message, _version), do: raise("initialize response was not valid: #{inspect(message)}")
 
-  defp assert_mcp_version!(entrypoint, runtime_root, version) do
-    expected = "codex-loops-mcp #{version}\n"
+  defp assert_control_plane_version!(entrypoint, version) do
+    expected = "codex-loops #{version}\n"
 
-    case System.cmd(entrypoint, ["--version"],
-           env: [{"CODEX_LOOPS_RUNTIME_ROOT", runtime_root}],
-           stderr_to_stdout: true
-         ) do
+    case System.cmd(entrypoint, ["--version"], stderr_to_stdout: true) do
       {^expected, 0} ->
         :ok
 
       {output, status} ->
-        raise("MCP --version failed with #{status}: #{inspect(output)}")
+        raise("control-plane --version failed with #{status}: #{inspect(output)}")
     end
   end
 
-  defp assert_missing_runtime!(entrypoint, temp_root) do
-    missing_root = Path.join(temp_root, "missing-runtime")
+  defp prepare_codex_binding!(temp_root, repo_root) do
+    home = Path.join(temp_root, "home")
+    codex = Path.join(temp_root, "codex-proof")
+    stub = Path.join(repo_root, "scripts/support/codex-conformance-stub.py")
+    File.mkdir_p!(Path.join(home, ".codex/workflows"))
 
-    case System.cmd(entrypoint, ["--version"],
-           env: [
-             {"CODEX_LOOPS_MCP_BIN", nil},
-             {"CODEX_LOOPS_SCHEDULER_BIN", nil},
-             {"CODEX_LOOPS_RUNTIME_ROOT", missing_root},
-             {"PATH", "/usr/bin:/bin"}
-           ],
-           stderr_to_stdout: true
-         ) do
-      {output, 1} ->
-        assert!(
-          String.contains?(output, "does not contain a usable Codex Loops runtime") and
-            String.contains?(output, "Homebrew tap is not published yet") and
-            String.contains?(output, "make package-homebrew-runtime"),
-          "missing-runtime diagnostic was not actionable: #{inspect(output)}"
-        )
+    File.write!(
+      codex,
+      "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then echo 'codex-cli proof'; else exec #{stub} \"$@\"; fi\n"
+    )
 
-      {output, status} ->
-        raise("missing-runtime proof returned #{status}: #{inspect(output)}")
-    end
-  end
+    File.chmod!(codex, 0o755)
 
-  defp assert_version_mismatch!(entrypoint, temp_root, version) do
-    mismatch_root = Path.join(temp_root, "mismatched-runtime")
-    mcp = Path.join(mismatch_root, "mcp/codex-loops-mcp")
-    scheduler = Path.join(mismatch_root, "scheduler/bin/agent_loops")
-    File.mkdir_p!(Path.dirname(mcp))
-    File.mkdir_p!(Path.dirname(scheduler))
-    File.write!(mcp, "#!/bin/sh\necho 'codex-loops-mcp 99.0.0'\n")
-    File.write!(scheduler, "#!/bin/sh\nexit 0\n")
-    File.chmod!(mcp, 0o755)
-    File.chmod!(scheduler, 0o755)
+    File.write!(
+      Path.join(home, ".codex/workflows/codex-binding.json"),
+      JSON.encode!(%{"path" => codex, "version" => "codex-cli proof"})
+    )
 
-    case System.cmd(entrypoint, ["--version"],
-           env: [
-             {"CODEX_LOOPS_MCP_BIN", nil},
-             {"CODEX_LOOPS_SCHEDULER_BIN", nil},
-             {"CODEX_LOOPS_RUNTIME_ROOT", mismatch_root}
-           ],
-           stderr_to_stdout: true
-         ) do
-      {output, 1} ->
-        assert!(
-          String.contains?(output, "plugin/runtime version mismatch") and
-            String.contains?(output, "Plugin:  #{version}") and
-            String.contains?(output, "Runtime: 99.0.0"),
-          "version-mismatch diagnostic was not actionable: #{inspect(output)}"
-        )
-
-      {output, status} ->
-        raise("version-mismatch proof returned #{status}: #{inspect(output)}")
-    end
+    codex
   end
 
   defp package_version(repo_root) do
@@ -1010,10 +962,10 @@ defmodule ProofMCPValidate do
 
     System.cmd(cli, ["stop", "--host", "127.0.0.1", "--port", to_string(port), "--json"],
       env: [
-        {"CODEX_LOOPS_RUNTIME_ROOT", runtime_root},
         {"CODEX_LOOPS_RUNTIME_DIR", runtime_dir},
         {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
-        {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)}
+        {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)},
+        {"HOME", Path.join(Path.dirname(runtime_dir), "home")}
       ],
       stderr_to_stdout: true
     )

@@ -1,153 +1,65 @@
 # Codex Loops Plugin
 
-Codex Loops provides one Codex skill plus a native Rust MCP adapter for authoring,
-validating, executing, and inspecting local Elixir workflow files. The MCP
-adapter is the Codex-facing surface: it talks to the scheduler HTTP API and can
-start the packaged scheduler release when no local scheduler is already
-reachable.
+This optional plugin distributes the Codex Loops workflow-authoring skill. It
+contains no executable, MCP launcher, scheduler, or runtime-discovery logic.
 
-## Install
+Install the runtime first. From a source checkout:
 
-The Homebrew tap is not published yet. For a local clone, build the native
-control plane and scheduler first:
-
-```bash
-make build
-make release
+```sh
+make dev-bundle
+_build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
 ```
 
-Then install the source plugin:
+Installation registers `_build/dev-bundle/bin/codex-loops mcp` directly in
+shared Codex configuration and installs the skill under
+`~/.agents/skills/codex-loops`. Restart Codex after installation.
 
-```bash
-codex plugin marketplace add .
-codex plugin add codex-loops@codex-loops
-```
-
-Start a new Codex thread after installing so the `codex-loops` skill is loaded.
-For a local source install, start Codex in this checkout; the cached plugin
-launcher resolves the configured `codex-loops` local marketplace and discovers
-the artifacts built in that checkout automatically.
-
-## Manual CLI Run
-
-Run a workflow and watch its LiveView without configuring environment
-variables or calling the HTTP API directly:
-
-```bash
-./native/codex-loops/target/release/codex-loops run .codex/workflows/codex_answer.exs --open
-./native/codex-loops/target/release/codex-loops stop
-```
-
-The defaults are the local scheduler at `127.0.0.1:47125`, the standard user
-journal, a generated run ID, and the live `codex` provider. `run` starts the
-managed scheduler automatically when needed. Optional flags
-provide custom ports, journals, models, providers, run IDs, and scheduler URLs.
+The plugin remains useful as an optional marketplace presentation of the same
+skill, but it is not the runtime bootstrap path and has no `mcpServers`
+declaration.
 
 ## MCP Surface
 
-The source-only plugin includes a tracked stdio launcher at
-`plugins/codex-loops/mcp/codex-loops-mcp`. From a source checkout, the launcher
-finds the native and scheduler artifacts created by `make build` and
-`make release` from either its own location or the configured local marketplace
-root, including when Codex has copied the plugin into its cache. It also
-supports a staged packaged runtime, enforces exact plugin/runtime version
-compatibility, and executes the native MCP command from that runtime. Homebrew
-distribution is planned but is not published. MCP starts or discovers the
-scheduler release when a tool call needs the scheduler HTTP API.
-It exposes:
+The installed native control plane exposes:
 
-- `workflow_validate`: validates a workflow through `POST /api/workflows/validate`
-- `workflow_start`: starts a run through `POST /api/runs` for an existing
-  workflow script. Inputs are `script_path`, optional `run_id`, optional
-  `provider` (`mock` or `codex`), and optional non-negative integer `budget`.
-  The scheduler API defaults to `mock`; selecting `codex` spends a real Codex
-  provider turn.
-- `workflow_status`: reads `GET /api/runs/:id` and returns the public §7.5
-  status projection: `runId`, state, result, failure, usage, agents/rejections,
-  refine summaries, tool activity, and ordered `rawRefs`.
-- `workflow_inspect`: reads `GET /api/runs/:id/events` and returns the public
-  §7.5 inspect/status projection with ordered `rawRefs.journal`; lower-level
-  event rows and scheduler-only UI/lifecycle fields are not part of this MCP
-  surface.
-- `workflow_resume`: resumes an existing scheduler-owned run through
-  `POST /api/runs/:id/resume`. Inputs are `run_id`, optional `script_path` or
-  scheduler-supported `script` alias, and optional `provider` (`mock` or
-  `codex`).
-- `workflow_open_ui`: reads the scheduler run projection and returns `uiPath`, `uiUrl`,
-  and an absolute `open_url` for the Phoenix LiveView run page.
+- `workflow_validate`
+- `workflow_start`
+- `workflow_status`
+- `workflow_inspect`
+- `workflow_resume`
+- `workflow_open_ui`
 
-Before the tool call, the MCP adapter checks `GET /api/health`. If the scheduler
-is unreachable, it discovers a packaged release from:
+MCP calls only the scheduler HTTP interface. It never reads SQLite or calls
+scheduler internals. Scheduler success envelopes become MCP structured content;
+typed scheduler failures remain typed MCP errors.
 
-1. `CODEX_LOOPS_SCHEDULER_BIN`
-2. `CODEX_LOOPS_RUNTIME_ROOT/scheduler/bin/agent_loops`
-3. `CODEX_LOOPS_REPO_ROOT/_build/prod/rel/agent_loops/bin/agent_loops` in
-   explicitly configured development environments
+The scheduler is owned by the native per-user supervisor, not by the MCP stdio
+session, and therefore survives client disconnection until an explicit
+`codex-loops stop`.
 
-The packaging stage inside `make ci` builds one production Mix release and
-stages the formula-owned `libexec` tree. It never copies generated artifacts
-into this plugin.
+## Workflow Gate
 
-When it starts the scheduler, the native control plane uses
-`CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
-per-endpoint `RELEASE_TMP`, and `RELEASE_DISTRIBUTION=none`.
-`CODEX_LOOPS_JOURNAL_PATH` is passed through when present. The scheduler is not
-owned by the MCP session and survives stdio disconnection.
-
-The MCP adapter stays on the scheduler HTTP boundary. It does not read SQLite,
-call `Workflow.Scheduler`, or reach into journal/runtime internals directly.
-Scheduler success envelopes are returned as MCP `structuredContent`; scheduler
-typed errors remain typed and are returned with `isError: true`.
-
-## Workflow Scripts
-
-Executable workflows are Elixir `.exs` files:
-
-```elixir
-defmodule ExampleWorkflow do
-  use Workflow
-
-  workflow "example" do
-    phase "scout"
-    log "starting"
-    agent "Inspect README.md and summarize the project goal."
-    return :ok
-  end
-end
-```
-
-Write repo-local workflows under `.codex/workflows/<name>.exs`, validate them,
-then mock-test before live execution:
+Author executable workflows as Elixir `.exs` files, normally under
+`.codex/workflows/`. Validate and run with `provider=mock` before selecting the
+live `codex` provider:
 
 ```text
 workflow_validate script_path=.codex/workflows/<name>.exs
 workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
 workflow_status   run_id=<id>
 workflow_inspect  run_id=<id>
-workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
-workflow_status   run_id=<id-live>
+workflow_open_ui  run_id=<id>
 ```
 
-Run data is stored in SQLite at `~/.codex/workflows/runs_1.sqlite` unless
+Run data is stored at `~/.codex/workflows/runs_1.sqlite` unless
 `CODEX_LOOPS_JOURNAL_PATH` is set.
 
-## Development
+## Privacy And Terms
 
-```bash
-make build
-make ci
-make release
-```
+The plugin itself contains instructions only. The local runtime reads workflow
+files explicitly passed to it and stores local run history in the configured
+SQLite journal. Live provider turns are sent through the exact Codex CLI bound
+during `codex-loops install` and follow that CLI's authentication and policy.
 
-`make ci` includes MCP initialize/tools, scheduler lifecycle, validation, mock
-execution, status, inspection, resume, typed errors, UI opening, and packaged
-core/dataflow/refine conformance through the Codex JSONL provider port. It is
-credential-free and does not spend a real Codex turn.
-
-## License
-
-MIT. See the repository [LICENSE](../../LICENSE).
-
-Third-party MCP/package notices are recorded in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including the Apache-2.0
-`rmcp` dependency used by the native MCP adapter.
+Use is subject to the repository's MIT license and the terms of the selected
+Codex/OpenAI account.

@@ -64,26 +64,19 @@ defmodule Workflow.SchedulerTest do
     File.write!(stub, codex_stub_source())
     File.chmod!(stub, 0o755)
 
-    previous_path = System.get_env("PATH")
-    System.put_env("PATH", dir <> path_separator() <> (previous_path || ""))
+    previous_codex_command = Application.get_env(:codex_loops, :codex_command)
+    Application.put_env(:codex_loops, :codex_command, {stub, []})
 
     try do
       fun.()
     after
-      if previous_path do
-        System.put_env("PATH", previous_path)
+      if previous_codex_command do
+        Application.put_env(:codex_loops, :codex_command, previous_codex_command)
       else
-        System.delete_env("PATH")
+        Application.delete_env(:codex_loops, :codex_command)
       end
 
       File.rm_rf(dir)
-    end
-  end
-
-  defp path_separator do
-    case :os.type() do
-      {:win32, _name} -> ";"
-      _other -> ":"
     end
   end
 
@@ -779,7 +772,7 @@ defmodule Workflow.SchedulerTest do
     assert projection.workflow_name == "scheduler-demo"
   end
 
-  test "starts a codex-provider run through the scheduler context with a hermetic CLI on PATH" do
+  test "starts a codex-provider run through the scheduler context with an injected hermetic CLI" do
     with_codex_stub(fn ->
       path = demo_workflow()
       id = run_id("scheduler_codex")

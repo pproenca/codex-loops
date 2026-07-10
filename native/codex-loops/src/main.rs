@@ -3,9 +3,10 @@ mod error;
 mod install;
 mod lifecycle;
 mod mcp;
+mod runtime;
 mod scheduler;
 
-use std::{env, path::PathBuf, process::ExitCode};
+use std::{ffi::OsString, path::PathBuf, process::ExitCode};
 
 use clap::{CommandFactory, Parser, Subcommand};
 use serde_json::Value;
@@ -36,6 +37,8 @@ enum Command {
         json: bool,
         #[arg(long)]
         verbose: bool,
+        #[arg(long, value_name = "ABSOLUTE_PATH")]
+        codex: Option<PathBuf>,
     },
     /// Validate and start a workflow through the scheduler.
     Run {
@@ -153,18 +156,21 @@ enum Command {
     },
     #[command(hide = true)]
     Daemon,
+    /// Execute the persisted Codex binding after revalidating its exact version.
+    #[command(hide = true)]
+    ProviderExec {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
 }
 
 #[tokio::main]
 async fn main() -> ExitCode {
-    if invoked_as_mcp() && env::var("CODEX_LOOPS_INTERNAL_DAEMON").as_deref() != Ok("1") {
-        return mcp_entrypoint().await;
-    }
-
     let app = App::parse();
     match app.command {
         Some(Command::Mcp { stdio: _ }) => exit_silent(mcp::run().await),
         Some(Command::Daemon) => exit_silent(lifecycle::run_supervisor().await),
+        Some(Command::ProviderExec { args }) => provider_exec(args),
         Some(Command::Run {
             script,
             provider,
@@ -236,6 +242,7 @@ async fn main() -> ExitCode {
             dry_run,
             json,
             verbose,
+            codex,
         }) => {
             let mode = if check {
                 install::Mode::Check
@@ -244,7 +251,14 @@ async fn main() -> ExitCode {
             } else {
                 install::Mode::Install
             };
-            exit_value(cli::install(install::Options { mode, verbose }), json)
+            exit_value(
+                cli::install(install::Options {
+                    mode,
+                    verbose,
+                    codex,
+                }),
+                json,
+            )
         }
         None => {
             let mut command = App::command();
@@ -258,37 +272,38 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn mcp_entrypoint() -> ExitCode {
-    let args: Vec<_> = env::args().skip(1).collect();
-    match args.as_slice() {
-        [] => exit_silent(mcp::run().await),
-        [arg] if arg == "--stdio" => exit_silent(mcp::run().await),
-        [arg] if arg == "--version" => {
-            println!("codex-loops-mcp {}", env!("CARGO_PKG_VERSION"));
-            ExitCode::SUCCESS
+fn provider_exec(args: Vec<OsString>) -> ExitCode {
+    let binding = match runtime::CodexBinding::load(&match runtime::binding_path() {
+        Ok(path) => path,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(127);
         }
-        [arg] if arg == "--help" || arg == "-h" => {
-            println!(
-                "Usage: codex-loops-mcp --stdio\n\nRuns the Codex Loops MCP server over stdio."
-            );
-            ExitCode::SUCCESS
+    }) {
+        Ok(binding) => binding,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::from(127);
         }
-        _ => {
-            eprintln!("Invalid arguments.\n\nUsage: codex-loops-mcp --stdio");
-            ExitCode::from(2)
+    };
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        let error = std::process::Command::new(binding.path).args(args).exec();
+        eprintln!("Could not execute the configured Codex command: {error}");
+        ExitCode::from(127)
+    }
+    #[cfg(not(unix))]
+    {
+        match std::process::Command::new(binding.path).args(args).status() {
+            Ok(status) => ExitCode::from(status.code().unwrap_or(1) as u8),
+            Err(error) => {
+                eprintln!("Could not execute the configured Codex command: {error}");
+                ExitCode::from(127)
+            }
         }
     }
-}
-
-fn invoked_as_mcp() -> bool {
-    env::args()
-        .next()
-        .and_then(|value| {
-            PathBuf::from(value)
-                .file_name()
-                .map(|value| value.to_string_lossy().into_owned())
-        })
-        .is_some_and(|name| name == "codex-loops-mcp")
 }
 
 fn exit_value(result: AppResult<Value>, json: bool) -> ExitCode {
@@ -400,12 +415,20 @@ fn print_human(value: &Value) {
             if let Some(scheduler) = value.pointer("/runtime/scheduler").and_then(Value::as_str) {
                 println!("Scheduler: {scheduler}");
             }
-            if let Some(mcp) = value.pointer("/runtime/mcp").and_then(Value::as_str) {
-                println!("MCP: {mcp}");
+            if let Some(control_plane) = value
+                .pointer("/runtime/control_plane")
+                .and_then(Value::as_str)
+            {
+                println!("Control plane: {control_plane}");
             }
-            match value.pointer("/plugin/id").and_then(Value::as_str) {
-                Some(plugin) => println!("Plugin: {plugin}"),
-                None => println!("Plugin: not installed"),
+            if let Some(codex) = value.pointer("/codex/path").and_then(Value::as_str) {
+                println!("Codex: {codex}");
+            }
+            if let Some(skill) = value.pointer("/skill/path").and_then(Value::as_str) {
+                println!("Skill: {skill}");
+            }
+            if let Some(mcp) = value.pointer("/mcp/name").and_then(Value::as_str) {
+                println!("MCP: {mcp}");
             }
             if let Some(next) = value.pointer("/next_steps/0").and_then(Value::as_str) {
                 println!("Next: {next}");

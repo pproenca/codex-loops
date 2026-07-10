@@ -494,13 +494,6 @@ async fn spawn_scheduler(
     let release = scheduler_bin()?
         .canonicalize()
         .map_err(io_error("runtime_invalid"))?;
-    let release_root = release.parent().and_then(Path::parent).ok_or_else(|| {
-        AppError::new(
-            6,
-            "runtime_invalid",
-            "Scheduler release path has no release root.",
-        )
-    })?;
     let port = scheduler_port(client)?;
     let bind_host = options
         .bind_host
@@ -514,11 +507,8 @@ async fn spawn_scheduler(
                 .trim_matches(['[', ']'])
                 .into()
         });
-    let mut command = Command::new(&release);
+    let mut command = scheduler_command(&release, &runtime_dir);
     command
-        .arg("start")
-        .kill_on_drop(true)
-        .current_dir(release_root)
         .env("CODEX_LOOPS_SERVER", "1")
         .env("CODEX_LOOPS_HOST", bind_host)
         .env("CODEX_LOOPS_PORT", port.to_string())
@@ -554,6 +544,19 @@ async fn spawn_scheduler(
         )
         .details(json!({"release": release, "reason": error.to_string()}))
     })
+}
+
+fn scheduler_command(release: &Path, runtime_dir: &Path) -> Command {
+    let mut command = Command::new(release);
+    command
+        .arg("start")
+        .kill_on_drop(true)
+        // Source-checkout releases are replaced in place by `make release`.
+        // Keeping a live BEAM's cwd inside that tree leaves it pointing at an
+        // unlinked directory and makes subsequent Port.open calls fail with
+        // :enoent. Runtime state is stable across release replacement.
+        .current_dir(runtime_dir);
+    command
 }
 
 async fn terminate_child(child: &mut Child) {
@@ -960,6 +963,17 @@ mod tests {
         let client = SchedulerClient::new("http://127.0.0.1:49123").unwrap();
         let path = runtime_dir(&client).unwrap();
         assert!(path.ends_with(".codex/workflows/runtime/127.0.0.1-49123"));
+    }
+
+    #[test]
+    fn scheduler_process_runs_from_the_stable_runtime_directory() {
+        let root = tempfile::tempdir().unwrap();
+        let release = root.path().join("release/bin/agent_loops");
+        let runtime = root.path().join("runtime");
+        let command = scheduler_command(&release, &runtime);
+
+        assert_eq!(command.as_std().get_current_dir(), Some(runtime.as_path()));
+        assert_ne!(command.as_std().get_current_dir(), release.parent());
     }
 
     #[test]

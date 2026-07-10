@@ -2,7 +2,7 @@ use std::{
     fs,
     io::{Read, Write},
     net::TcpListener,
-    process::Command,
+    process::{Command, Stdio},
     thread,
 };
 
@@ -104,6 +104,49 @@ fn invalid_scheduler_port_never_falls_back_to_the_default() {
         serde_json::from_slice(&output.stderr).expect("JSON error on stderr");
     assert_eq!(error["error"]["code"], "scheduler_port_invalid");
     assert_eq!(error["error"]["details"]["value"], "not-a-port");
+}
+
+#[cfg(unix)]
+#[test]
+fn force_stop_rejects_forged_runtime_identity_without_signaling_the_process() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("runtime-state");
+    fs::create_dir_all(&runtime).unwrap();
+    let mut unrelated = Command::new("/bin/sh")
+        .args(["-c", "sleep 30"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = unrelated.id();
+    fs::write(
+        runtime.join("owner.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "owner_token": "forged",
+            "supervisor_pid": pid,
+            "scheduler_pid": pid,
+            "version": env!("CARGO_PKG_VERSION"),
+            "port": 47125,
+            "scheduler_root": "sleep",
+            "config": {"bind_host": null, "journal": null, "model": null}
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["stop", "--force", "--json"])
+        .env("CODEX_LOOPS_RUNTIME_DIR", &runtime)
+        .env_remove("CODEX_LOOPS_SCHEDULER_URL")
+        .output()
+        .unwrap();
+
+    let still_running = unrelated.try_wait().unwrap().is_none();
+    let _ = unrelated.kill();
+    let _ = unrelated.wait();
+    assert!(!output.status.success());
+    assert!(still_running, "force-stop signaled an unrelated process");
 }
 
 #[cfg(unix)]

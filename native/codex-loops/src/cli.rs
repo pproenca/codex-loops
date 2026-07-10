@@ -2,6 +2,7 @@ use std::{
     net::{IpAddr, SocketAddr, TcpListener},
     path::PathBuf,
     process::Command,
+    sync::atomic::{AtomicU64, Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -255,6 +256,8 @@ pub fn install(options: install::Options) -> AppResult<Value> {
 }
 
 fn default_run_id(script: &std::path::Path) -> String {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let base = script
         .file_stem()
         .and_then(|value| value.to_str())
@@ -272,11 +275,13 @@ fn default_run_id(script: &std::path::Path) -> String {
         .collect();
     let name = name.trim_matches('-');
     let name = if name.is_empty() { "run" } else { name };
-    let millis = SystemTime::now()
+    let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
-        .as_millis();
-    format!("{name}-{millis}")
+        .as_nanos();
+    let pid = std::process::id();
+    let sequence = COUNTER.fetch_add(1, Ordering::Relaxed);
+    format!("{name}-{nanos:x}-{pid:x}-{sequence:x}")
 }
 
 fn client(server: Option<String>) -> AppResult<SchedulerClient> {
@@ -435,6 +440,8 @@ pub fn require_shared_filesystem(client: &SchedulerClient) -> AppResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
     use super::*;
 
     #[test]
@@ -446,6 +453,15 @@ mod tests {
                 |character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_')
             )
         );
+    }
+
+    #[test]
+    fn generated_run_ids_are_unique_within_one_process_burst() {
+        let ids: BTreeSet<_> = (0..1_024)
+            .map(|_| default_run_id(std::path::Path::new("burst.exs")))
+            .collect();
+
+        assert_eq!(ids.len(), 1_024);
     }
 
     #[test]

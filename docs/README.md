@@ -19,12 +19,12 @@ journal, PubSub, and LiveView.
 make dev-bundle
 _build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
 make ci
-make dist
+MINISIGN_SECRET_KEY=/path/to/key make dist
 ```
 
 `make dev-bundle` assembles the same fixed layout used by production archives.
-`make dist` emits one target-specific archive plus checksum and optional
-minisign signature.
+`make dist` emits one target-specific archive plus checksum and required
+minisign signature; it fails without a signing key.
 
 ## Supported Scope
 

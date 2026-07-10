@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -27,28 +28,34 @@ pub struct Options {
     pub codex: Option<PathBuf>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum Action {
     BindCodex,
     InstallSkill,
     AddMcp,
-    ReplaceMcp,
+    ReplaceMcp { previous: McpRegistration },
 }
 
 impl Action {
-    fn name(self) -> &'static str {
+    fn name(&self) -> &'static str {
         match self {
             Self::BindCodex => "bind_codex",
             Self::InstallSkill => "install_skill",
             Self::AddMcp => "add_mcp",
-            Self::ReplaceMcp => "replace_mcp",
+            Self::ReplaceMcp { .. } => "replace_mcp",
         }
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct McpRegistration {
+    command: String,
+    args: Vec<String>,
+}
+
 struct State {
     binding: Option<CodexBinding>,
-    skill_version: Option<String>,
+    skill_current: bool,
     mcp: Option<Value>,
 }
 
@@ -59,8 +66,13 @@ pub fn run(options: Options) -> AppResult<Value> {
     let codex = select_codex(options.codex.as_deref(), &binding_path)?;
     check_capabilities(&codex.path)?;
     let skill_destination = skill_destination()?;
-    let initial = read_state(&codex.path, &binding_path, &skill_destination)?;
-    let actions = plan(&initial, &codex, &integration_command);
+    let initial = read_state(
+        &codex.path,
+        &binding_path,
+        &bundle.skill,
+        &skill_destination,
+    )?;
+    let actions = plan(&initial, &codex, &integration_command)?;
 
     if options.mode == Mode::Check && !actions.is_empty() {
         return Err(
@@ -73,7 +85,7 @@ pub fn run(options: Options) -> AppResult<Value> {
     if options.mode == Mode::Install {
         for action in &actions {
             execute(
-                *action,
+                action,
                 &bundle,
                 &codex,
                 &binding_path,
@@ -84,8 +96,13 @@ pub fn run(options: Options) -> AppResult<Value> {
             changed = true;
         }
 
-        let final_state = read_state(&codex.path, &binding_path, &skill_destination)?;
-        let remaining = plan(&final_state, &codex, &integration_command);
+        let final_state = read_state(
+            &codex.path,
+            &binding_path,
+            &bundle.skill,
+            &skill_destination,
+        )?;
+        let remaining = plan(&final_state, &codex, &integration_command)?;
         if !remaining.is_empty() {
             return Err(AppError::new(
                 6,
@@ -160,12 +177,15 @@ fn check_capabilities(codex: &Path) -> AppResult<()> {
     Ok(())
 }
 
-fn read_state(codex: &Path, binding_path: &Path, skill_destination: &Path) -> AppResult<State> {
+fn read_state(
+    codex: &Path,
+    binding_path: &Path,
+    skill_source: &Path,
+    skill_destination: &Path,
+) -> AppResult<State> {
     Ok(State {
         binding: read_stored_binding(binding_path),
-        skill_version: fs::read_to_string(skill_destination.join(SKILL_VERSION_FILE))
-            .ok()
-            .map(|value| value.trim().to_owned()),
+        skill_current: skill_matches(skill_source, skill_destination),
         mcp: read_mcp(codex)?,
     })
 }
@@ -200,20 +220,24 @@ fn read_mcp(codex: &Path) -> AppResult<Option<Value>> {
         .find(|server| server.get("name").and_then(Value::as_str) == Some(MCP_NAME)))
 }
 
-fn plan(state: &State, codex: &CodexBinding, integration_command: &Path) -> Vec<Action> {
+fn plan(state: &State, codex: &CodexBinding, integration_command: &Path) -> AppResult<Vec<Action>> {
     let mut actions = Vec::new();
     if state.binding.as_ref() != Some(codex) {
         actions.push(Action::BindCodex);
     }
-    if state.skill_version.as_deref() != Some(env!("CARGO_PKG_VERSION")) {
+    if !state.skill_current {
         actions.push(Action::InstallSkill);
     }
     match state.mcp.as_ref() {
         None => actions.push(Action::AddMcp),
-        Some(mcp) if !mcp_matches(mcp, integration_command) => actions.push(Action::ReplaceMcp),
+        Some(mcp) if !mcp_matches(mcp, integration_command) => {
+            actions.push(Action::ReplaceMcp {
+                previous: restorable_mcp(mcp)?,
+            });
+        }
         Some(_mcp) => {}
     }
-    actions
+    Ok(actions)
 }
 
 fn mcp_matches(value: &Value, control_plane: &Path) -> bool {
@@ -223,7 +247,7 @@ fn mcp_matches(value: &Value, control_plane: &Path) -> bool {
 }
 
 fn execute(
-    action: Action,
+    action: &Action,
     bundle: &Bundle,
     codex: &CodexBinding,
     binding_path: &Path,
@@ -235,16 +259,77 @@ fn execute(
         Action::BindCodex => codex.persist(binding_path),
         Action::InstallSkill => install_skill(&bundle.skill, skill_destination),
         Action::AddMcp => add_mcp(&codex.path, integration_command, changed),
-        Action::ReplaceMcp => {
-            run_command(
-                &codex.path,
-                &["mcp", "remove", MCP_NAME],
-                changed,
-                "mcp_remove",
-            )?;
-            add_mcp(&codex.path, integration_command, true)
+        Action::ReplaceMcp { previous } => {
+            replace_mcp(&codex.path, integration_command, previous, changed)
         }
     }
+}
+
+fn restorable_mcp(value: &Value) -> AppResult<McpRegistration> {
+    let command = value
+        .pointer("/transport/command")
+        .and_then(Value::as_str)
+        .filter(|command| !command.is_empty())
+        .ok_or_else(|| {
+            AppError::new(
+                5,
+                "mcp_registration_not_restorable",
+                "The existing Codex Loops MCP registration cannot be replaced safely.",
+            )
+            .details(json!({"registration": value}))
+        })?;
+    let args = value
+        .pointer("/transport/args")
+        .and_then(Value::as_array)
+        .ok_or_else(|| {
+            AppError::new(
+                5,
+                "mcp_registration_not_restorable",
+                "The existing Codex Loops MCP registration cannot be replaced safely.",
+            )
+            .details(json!({"registration": value}))
+        })?
+        .iter()
+        .map(|argument| argument.as_str().map(ToOwned::to_owned))
+        .collect::<Option<Vec<_>>>()
+        .ok_or_else(|| {
+            AppError::new(
+                5,
+                "mcp_registration_not_restorable",
+                "The existing Codex Loops MCP registration cannot be replaced safely.",
+            )
+            .details(json!({"registration": value}))
+        })?;
+    Ok(McpRegistration {
+        command: command.to_owned(),
+        args,
+    })
+}
+
+fn replace_mcp(
+    codex: &Path,
+    integration_command: &Path,
+    previous: &McpRegistration,
+    changed: bool,
+) -> AppResult<()> {
+    run_command(codex, &["mcp", "remove", MCP_NAME], changed, "mcp_remove")?;
+    if let Err(add_error) = add_mcp(codex, integration_command, true) {
+        return match add_registration(codex, previous, true, "mcp_restore") {
+            Ok(()) => Err(add_error.changed(false)),
+            Err(restore_error) => Err(AppError::new(
+                5,
+                "mcp_rollback_failed",
+                "Codex Loops could not restore the previous MCP registration.",
+            )
+            .details(json!({
+                "replacement_error": add_error.cli_envelope(),
+                "restore_error": restore_error.cli_envelope()
+            }))
+            .changed(true)
+            .step("mcp_restore")),
+        };
+    }
+    Ok(())
 }
 
 fn add_mcp(codex: &Path, control_plane: &Path, changed: bool) -> AppResult<()> {
@@ -255,12 +340,77 @@ fn add_mcp(codex: &Path, control_plane: &Path, changed: bool) -> AppResult<()> {
             "The control-plane path is not valid UTF-8.",
         )
     })?;
-    run_command(
+    add_registration(
         codex,
-        &["mcp", "add", MCP_NAME, "--", command, "mcp"],
+        &McpRegistration {
+            command: command.to_owned(),
+            args: vec!["mcp".into()],
+        },
         changed,
         "mcp_add",
     )
+}
+
+fn add_registration(
+    codex: &Path,
+    registration: &McpRegistration,
+    changed: bool,
+    step: &'static str,
+) -> AppResult<()> {
+    let output = Command::new(codex)
+        .args(["mcp", "add", MCP_NAME, "--", &registration.command])
+        .args(&registration.args)
+        .output()
+        .map_err(|error| codex_command_error(error.to_string(), changed, step))?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(codex_command_error(
+            format!(
+                "mcp add exited {}: {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            ),
+            changed,
+            step,
+        ))
+    }
+}
+
+fn skill_matches(source: &Path, destination: &Path) -> bool {
+    let version_matches = fs::read_to_string(destination.join(SKILL_VERSION_FILE))
+        .is_ok_and(|version| version.trim() == env!("CARGO_PKG_VERSION"));
+    version_matches
+        && directory_snapshot(source, false)
+            .zip(directory_snapshot(destination, true))
+            .is_some_and(|(source, destination)| source == destination)
+}
+
+fn directory_snapshot(root: &Path, ignore_version: bool) -> Option<BTreeMap<PathBuf, Vec<u8>>> {
+    fn visit(
+        root: &Path,
+        directory: &Path,
+        ignore_version: bool,
+        snapshot: &mut BTreeMap<PathBuf, Vec<u8>>,
+    ) -> Option<()> {
+        for entry in fs::read_dir(directory).ok()? {
+            let entry = entry.ok()?;
+            let relative = entry.path().strip_prefix(root).ok()?.to_path_buf();
+            if ignore_version && relative == Path::new(SKILL_VERSION_FILE) {
+                continue;
+            }
+            if entry.file_type().ok()?.is_dir() {
+                visit(root, &entry.path(), ignore_version, snapshot)?;
+            } else {
+                snapshot.insert(relative, fs::read(entry.path()).ok()?);
+            }
+        }
+        Some(())
+    }
+
+    let mut snapshot = BTreeMap::new();
+    visit(root, root, ignore_version, &mut snapshot)?;
+    Some(snapshot)
 }
 
 fn install_skill(source: &Path, destination: &Path) -> AppResult<()> {
@@ -283,7 +433,19 @@ fn install_skill(source: &Path, destination: &Path) -> AppResult<()> {
     }
     if let Err(error) = fs::rename(&temp, destination) {
         if backup.exists() {
-            let _ = fs::rename(&backup, destination);
+            if let Err(restore_error) = fs::rename(&backup, destination) {
+                return Err(AppError::new(
+                    6,
+                    "skill_rollback_failed",
+                    "Codex Loops could not restore the previous user skill.",
+                )
+                .details(json!({
+                    "install_error": error.to_string(),
+                    "restore_error": restore_error.to_string()
+                }))
+                .changed(true)
+                .step("skill_restore"));
+            }
         }
         return Err(skill_error(error));
     }
@@ -396,7 +558,7 @@ fn action_commands(
                 "codex mcp add {MCP_NAME} -- {} mcp",
                 integration_command.display()
             ),
-            Action::ReplaceMcp => format!(
+            Action::ReplaceMcp { .. } => format!(
                 "codex mcp remove {MCP_NAME} && codex mcp add {MCP_NAME} -- {} mcp",
                 integration_command.display()
             ),
@@ -428,11 +590,11 @@ mod tests {
     fn missing_install_state_has_one_deterministic_plan() {
         let state = State {
             binding: None,
-            skill_version: None,
+            skill_current: false,
             mcp: None,
         };
         assert_eq!(
-            plan(&state, &binding(), Path::new("/runtime/bin/codex-loops")),
+            plan(&state, &binding(), Path::new("/runtime/bin/codex-loops")).unwrap(),
             [Action::BindCodex, Action::InstallSkill, Action::AddMcp]
         );
     }
@@ -443,7 +605,7 @@ mod tests {
         let codex = binding();
         let state = State {
             binding: Some(codex.clone()),
-            skill_version: Some(env!("CARGO_PKG_VERSION").into()),
+            skill_current: true,
             mcp: Some(json!({
                 "transport": {
                     "type": "stdio",
@@ -452,6 +614,27 @@ mod tests {
                 }
             })),
         };
-        assert!(plan(&state, &codex, Path::new("/runtime/bin/codex-loops")).is_empty());
+        assert!(
+            plan(&state, &codex, Path::new("/runtime/bin/codex-loops"))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn skill_integrity_requires_the_packaged_content_not_only_the_version_marker() {
+        let source = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("SKILL.md"), "expected").unwrap();
+        fs::write(
+            destination.path().join(SKILL_VERSION_FILE),
+            env!("CARGO_PKG_VERSION"),
+        )
+        .unwrap();
+
+        assert!(!skill_matches(source.path(), destination.path()));
+
+        fs::write(destination.path().join("SKILL.md"), "expected").unwrap();
+        assert!(skill_matches(source.path(), destination.path()));
     }
 }

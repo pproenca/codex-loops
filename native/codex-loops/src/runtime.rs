@@ -151,14 +151,16 @@ fn invalid_codex_binding(path: &Path, reason: &str) -> AppError {
 
 impl Bundle {
     pub fn installed() -> AppResult<Self> {
-        let executable = std::env::current_exe().map_err(|error| {
-            AppError::new(
-                6,
-                "runtime_invalid",
-                "Codex Loops could not determine its installed executable.",
-            )
-            .details(serde_json::json!({"reason": error.to_string()}))
-        })?;
+        let executable = std::env::current_exe()
+            .and_then(fs::canonicalize)
+            .map_err(|error| {
+                AppError::new(
+                    6,
+                    "runtime_invalid",
+                    "Codex Loops could not resolve its installed executable.",
+                )
+                .details(serde_json::json!({"reason": error.to_string()}))
+            })?;
         let root = development_bundle_root().unwrap_or_else(|| {
             executable
                 .parent()

@@ -39,6 +39,11 @@ struct RuntimeMetadata {
     config: StartOptions,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct VerifiedSchedulerProcess {
+    pid: u32,
+}
+
 struct StartAttempt {
     owner_token: String,
     marker: PathBuf,
@@ -347,17 +352,10 @@ async fn force_stop(client: &SchedulerClient) -> AppResult<bool> {
         .details(json!({"server": client.base_url().as_str()}))
     })?;
     validate_metadata(client, &metadata)?;
-    let scheduler_pid = metadata.scheduler_pid.ok_or_else(|| {
-        AppError::new(
-            6,
-            "scheduler_owner_unknown",
-            "The supervisor metadata has no scheduler child to force-stop.",
-        )
-    })?;
-    validate_scheduler_process(&metadata)?;
-    signal_process(scheduler_pid, libc::SIGTERM)?;
+    let verified = validate_scheduler_process(&metadata)?;
+    signal_process(verified.pid, libc::SIGTERM)?;
     for _ in 0..100 {
-        if !process_is_alive(scheduler_pid)
+        if !process_is_alive(verified.pid)
             && matches!(client.health_state().await, HealthState::Unreachable { .. })
         {
             remove_stale_metadata(client)?;
@@ -762,7 +760,7 @@ fn validate_metadata(client: &SchedulerClient, metadata: &RuntimeMetadata) -> Ap
     let expected_port = scheduler_port(client)?;
     if metadata.supervisor_pid == 0
         || metadata.port != expected_port
-        || metadata.scheduler_root.is_empty()
+        || verified_scheduler_root(metadata).is_err()
     {
         Err(AppError::new(
             6,
@@ -780,8 +778,44 @@ fn validate_metadata(client: &SchedulerClient, metadata: &RuntimeMetadata) -> Ap
     }
 }
 
+fn verified_scheduler_root(metadata: &RuntimeMetadata) -> AppResult<PathBuf> {
+    let recorded = Path::new(&metadata.scheduler_root);
+    if !recorded.is_absolute() {
+        return Err(AppError::new(
+            6,
+            "scheduler_metadata_invalid",
+            "Scheduler metadata does not contain an absolute runtime identity.",
+        )
+        .details(json!({"scheduler_root": recorded})));
+    }
+    let root = recorded.canonicalize().map_err(|error| {
+        AppError::new(
+            6,
+            "scheduler_metadata_invalid",
+            "The recorded scheduler runtime no longer exists.",
+        )
+        .details(json!({"scheduler_root": recorded, "reason": error.to_string()}))
+    })?;
+    let launcher = root.join("bin/agent_loops");
+    let release = root.join("releases").join(&metadata.version);
+    if !launcher.is_file() || !release.is_dir() {
+        return Err(AppError::new(
+            6,
+            "scheduler_metadata_invalid",
+            "The recorded process does not identify a complete scheduler runtime.",
+        )
+        .details(json!({
+            "scheduler_root": root,
+            "version": metadata.version,
+            "launcher": launcher,
+            "release": release
+        })));
+    }
+    Ok(root)
+}
+
 #[cfg(unix)]
-fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<()> {
+fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<VerifiedSchedulerProcess> {
     let pid = metadata.scheduler_pid.ok_or_else(|| {
         AppError::new(
             6,
@@ -789,13 +823,15 @@ fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<()> {
             "Scheduler metadata has no active child process.",
         )
     })?;
+    let root = verified_scheduler_root(metadata)?;
     let output = std::process::Command::new("ps")
         .args(["-p", &pid.to_string(), "-o", "command="])
         .output()
         .map_err(io_error("scheduler_process_check_failed"))?;
     let command = String::from_utf8_lossy(&output.stdout);
-    if output.status.success() && command.contains(&metadata.scheduler_root) {
-        Ok(())
+    let runtime_prefix = format!("{}/", root.display());
+    if output.status.success() && command.contains(&runtime_prefix) {
+        Ok(VerifiedSchedulerProcess { pid })
     } else {
         Err(AppError::new(
             6,
@@ -807,7 +843,7 @@ fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<()> {
 }
 
 #[cfg(not(unix))]
-fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<()> {
+fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<VerifiedSchedulerProcess> {
     Err(AppError::new(
         6,
         "force_stop_unsupported",

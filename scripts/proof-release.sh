@@ -19,25 +19,12 @@ if [ ! -x "$release_cli" ]; then
 fi
 
 tmpdir=$(mktemp -d)
-server_pid=
-server_started=0
+scheduler_managed=0
 
 cleanup() {
-  if [ "${server_started:-0}" = "1" ]; then
-    CODEX_LOOPS_SERVER=1 \
-      CODEX_LOOPS_HOST="$host" \
-      CODEX_LOOPS_PORT="$port" \
-      PORT="$port" \
-      CODEX_LOOPS_JOURNAL_PATH="$journal" \
-      RELEASE_DISTRIBUTION=none \
-      RELEASE_NODE="$release_node" \
-      RELEASE_TMP="$release_tmp" \
-      "$release_ctl" stop >/dev/null 2>&1 || true
-  fi
-
-  if [ -n "${server_pid:-}" ] && kill -0 "$server_pid" 2>/dev/null; then
-    kill "$server_pid" 2>/dev/null || true
-    wait "$server_pid" 2>/dev/null || true
+  if [ "${scheduler_managed:-0}" = "1" ]; then
+    CODEX_LOOPS_SCHEDULER_URL="$base_url" \
+      "$release_cli" stop >/dev/null 2>&1 || true
   fi
 
   rm -rf "$tmpdir"
@@ -51,9 +38,6 @@ host="${CODEX_LOOPS_PROOF_HOST:-127.0.0.1}"
 port="${CODEX_LOOPS_PROOF_PORT:-47125}"
 base_url="http://$host:$port"
 run_id="run_release_proof_$(date +%s)_$$"
-server_log="$tmpdir/scheduler.log"
-release_node="agent_loops_proof_$(date +%s)_$$"
-release_tmp="$tmpdir/release"
 
 cat > "$workflow" <<'EOF'
 defmodule ReleaseProofWorkflow do
@@ -111,7 +95,6 @@ echo "workflow=$workflow"
 echo "journal=$journal"
 echo "run_id=$run_id"
 echo "url=$base_url"
-echo "release_node=$release_node"
 
 if [ "$("$release_cli" --version)" != "codex-loops $package_version" ]; then
   echo "release CLI --version did not report $package_version" >&2
@@ -124,37 +107,23 @@ if curl -fsS "$base_url/api/health" >/dev/null 2>&1; then
   exit 2
 fi
 
-echo "-- start scheduler release"
-CODEX_LOOPS_SERVER=1 \
-  CODEX_LOOPS_HOST="$host" \
-  CODEX_LOOPS_PORT="$port" \
-  PORT="$port" \
+echo "-- auto-start scheduler through user CLI"
+bootstrap_run_id="${run_id}_bootstrap"
+bootstrap_output="$tmpdir/bootstrap-run.txt"
+scheduler_managed=1
+CODEX_LOOPS_SCHEDULER_URL="$base_url" \
   CODEX_LOOPS_JOURNAL_PATH="$journal" \
-  RELEASE_DISTRIBUTION=none \
-  RELEASE_NODE="$release_node" \
-  RELEASE_TMP="$release_tmp" \
-  "$release_ctl" start >"$server_log" 2>&1 &
-server_pid=$!
-server_started=1
+  "$release_cli" run "$workflow" \
+  --provider mock \
+  --run-id "$bootstrap_run_id" >"$bootstrap_output"
+assert_contains "$bootstrap_output" "Codex Loops started at $base_url" "CLI auto-starts scheduler"
+assert_contains "$bootstrap_output" "Run accepted: $bootstrap_run_id" "CLI accepts bootstrap run"
 
 health="$tmpdir/health.json"
-for _ in $(seq 1 100); do
-  if curl_get "/api/health" "$health" 2>/dev/null; then
-    break
-  fi
-
-  if ! kill -0 "$server_pid" 2>/dev/null; then
-    echo "scheduler release exited before becoming healthy" >&2
-    sed 's/^/  /' "$server_log" >&2
-    exit 1
-  fi
-
-  sleep 0.1
-done
+curl_get "/api/health" "$health"
 
 if [ ! -s "$health" ]; then
   echo "scheduler release did not become healthy at $base_url" >&2
-  sed 's/^/  /' "$server_log" >&2
   exit 1
 fi
 
@@ -248,5 +217,16 @@ assert_contains "$cli_status" '"state":"completed"' "CLI-started run completed"
 cli_ui="$tmpdir/cli-run.html"
 curl_get "/runs/$cli_run_id" "$cli_ui"
 assert_contains "$cli_ui" "data-run-id=\"$cli_run_id\"" "CLI-started run UI is reachable"
+
+echo "-- stop scheduler through user CLI"
+stop_output="$tmpdir/stop.txt"
+CODEX_LOOPS_SCHEDULER_URL="$base_url" "$release_cli" stop >"$stop_output"
+scheduler_managed=0
+assert_contains "$stop_output" "Codex Loops stopped." "CLI stops managed scheduler"
+
+if curl -fsS "$base_url/api/health" >/dev/null 2>&1; then
+  echo "CLI-managed scheduler remained healthy after stop" >&2
+  exit 1
+fi
 
 echo "-- proof complete"

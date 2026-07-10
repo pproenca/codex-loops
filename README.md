@@ -1,14 +1,14 @@
 # Codex Loops
 
 Codex Loops is a local, path-first workflow scheduler for Codex. The product
-surface is a Codex plugin with an Elixir MCP adapter plus a packaged
-Elixir/Phoenix scheduler. MCP manages local lifecycle and tool calls; Elixir
-owns runtime supervision, workflow workers, Phoenix PubSub/LiveView, and the
-SQLite journal.
+surface is a Codex plugin with a native Rust CLI/MCP control plane plus a
+packaged Elixir/Phoenix scheduler. Rust owns installation, OS-process lifecycle,
+stdio MCP, and scheduler HTTP calls; Elixir owns OTP supervision, workflow
+workers, Phoenix PubSub/LiveView, and the SQLite journal.
 
-The packaged `agent_loops` Mix release owns the scheduler, the user CLI, and the
-MCP stdio command. The Codex plugin is source-only and discovers that runtime
-through Homebrew.
+The packaged `agent_loops` Mix release owns only the scheduler. One native
+binary is installed as `codex-loops` for users and `codex-loops-mcp` for Codex
+stdio. The source-only plugin discovers that runtime through Homebrew.
 
 ## Install
 
@@ -35,7 +35,7 @@ errors. `make ci` is the complete deterministic gate: formatting, audits,
 Credo, Sobelow, the full Elixir suite, Dialyzer, browser LiveView E2E, plugin
 validation, packaged release/API/CLI proof, and packaged MCP conformance across
 the documented workflow variants. `make release` produces the distributable
-self-contained runtime.
+self-contained scheduler; `make native-build` produces the control plane.
 
 ## Run From The CLI
 
@@ -60,7 +60,14 @@ Customize only when needed:
 ```sh
 codex-loops serve --port 48100 --journal /tmp/loops.sqlite --model gpt-5.5
 codex-loops run workflow.exs --provider mock --run-id dry-run --server http://127.0.0.1:48100
+codex-loops logs --port 48100
+codex-loops restart --port 48100
 ```
+
+Use `codex-loops serve --foreground` for container/process-manager integration.
+The ordinary background supervisor restarts a crashed scheduler with bounded
+backoff; `codex-loops stop --force` safely recovers an orphan only when its
+recorded process still matches the packaged scheduler.
 
 The CI gate is credential-free and does not spend a Codex turn. Real-provider
 smokes are maintainer-run diagnostics; the same provider protocol and streaming
@@ -109,15 +116,18 @@ journal summaries and raw refs.
 ```sh
 make build    # compile from a clean checkout
 make ci       # run the entire deterministic validation stack end-to-end
-make release  # build the self-contained distributable runtime
+make release        # build the self-contained scheduler
+make native-build   # build the native CLI/MCP control plane
 ```
 
 The narrower Make targets are implementation details used by `make ci`; normal
 contributors should not need to compose them manually.
 
-The repository includes `.tool-versions` for `mise`/`asdf` users. The release
-contains the scheduler, user CLI, and MCP command in one ERTS payload; no Zig or
-XZ toolchain is required.
+The repository includes `.tool-versions` for `mise`/`asdf` users, including the
+Rust 1.88 MSRV also declared by `rust-toolchain.toml`. Distribution
+combines an OTP scheduler release with one native Rust binary installed under
+the `codex-loops` and `codex-loops-mcp` names; no Zig or XZ toolchain is
+required.
 
 ## Runtime Data
 
@@ -131,8 +141,10 @@ default `127.0.0.1:47125` proof server and temporary journal.
 
 The MCP adapter uses `CODEX_LOOPS_RUNTIME_ROOT`, `CODEX_LOOPS_SCHEDULER_HOST`,
 `CODEX_LOOPS_SCHEDULER_PORT`, `CODEX_LOOPS_SCHEDULER_URL`, and
-`CODEX_LOOPS_SCHEDULER_BIN` when you need to point it at a specific local
-scheduler. The plugin launcher resolves the Homebrew runtime and sets
+`CODEX_LOOPS_SCHEDULER_BIN` when you need to select its scheduler. Host/port
+configuration identifies a locally managed scheduler; an explicit URL
+identifies an externally managed scheduler that is health/version checked but
+never started or stopped by this client. The plugin launcher resolves the Homebrew runtime and sets
 `CODEX_LOOPS_RUNTIME_ROOT` plus `CODEX_LOOPS_SCHEDULER_BIN` before starting MCP.
 Source-tree fallback requires an explicit `CODEX_LOOPS_REPO_ROOT`.
 

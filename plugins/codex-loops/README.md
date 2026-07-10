@@ -1,6 +1,6 @@
 # Codex Loops Plugin
 
-Codex Loops provides one Codex skill plus a local Elixir MCP adapter for authoring,
+Codex Loops provides one Codex skill plus a native Rust MCP adapter for authoring,
 validating, executing, and inspecting local Elixir workflow files. The MCP
 adapter is the Codex-facing surface: it talks to the scheduler HTTP API and can
 start the packaged scheduler release when no local scheduler is already
@@ -42,7 +42,7 @@ provide custom ports, journals, models, providers, run IDs, and scheduler URLs.
 The source-only plugin includes a tracked stdio launcher at
 `plugins/codex-loops/mcp/codex-loops-mcp`. The launcher finds the
 Homebrew-owned runtime, enforces exact plugin/runtime version compatibility,
-and executes the Anubis MCP command from that runtime. MCP starts or discovers
+and executes the native MCP command from that runtime. MCP starts or discovers
 the scheduler release when a tool call needs the scheduler HTTP API.
 It exposes:
 
@@ -78,10 +78,11 @@ The packaging stage inside `make ci` builds one production Mix release and
 stages the formula-owned `libexec` tree. It never copies generated artifacts
 into this plugin.
 
-When it owns the scheduler lifecycle, it starts the release with
+When it starts the scheduler, the native control plane uses
 `CODEX_LOOPS_SERVER=1`, `CODEX_LOOPS_HOST`, `CODEX_LOOPS_PORT`, `PORT`, unique
-`RELEASE_NODE`, and unique `RELEASE_TMP`. `CODEX_LOOPS_JOURNAL_PATH` is passed
-through when present.
+per-endpoint `RELEASE_TMP`, and `RELEASE_DISTRIBUTION=none`.
+`CODEX_LOOPS_JOURNAL_PATH` is passed through when present. The scheduler is not
+owned by the MCP session and survives stdio disconnection.
 
 The MCP adapter stays on the scheduler HTTP boundary. It does not read SQLite,
 call `Workflow.Scheduler`, or reach into journal/runtime internals directly.
@@ -138,6 +139,5 @@ credential-free and does not spend a real Codex turn.
 MIT. See the repository [LICENSE](../../LICENSE).
 
 Third-party MCP/package notices are recorded in
-[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including the accepted Anubis
-LGPL-3.0 distribution gate for this local plugin and Homebrew-oriented package
-model.
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), including the Apache-2.0
+`rmcp` dependency used by the native MCP adapter.

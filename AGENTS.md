@@ -5,15 +5,17 @@ This file provides guidance to coding agents when working with code in this repo
 ## What this is
 
 Codex Loops is a local, path-first workflow scheduler for Codex. The product
-surface is a Codex plugin with an Elixir MCP adapter plus a packaged
-Elixir/Phoenix scheduler. MCP manages local lifecycle and tool calls; Elixir
-owns runtime supervision, workflow workers, Phoenix PubSub/LiveView, and the
-SQLite journal.
+surface is a Codex plugin with a native Rust CLI/MCP control plane plus a
+packaged Elixir/Phoenix scheduler. Rust owns installation, OS-process lifecycle,
+stdio MCP, and scheduler HTTP calls; Elixir owns OTP supervision, workflow
+workers, Phoenix PubSub/LiveView, and the SQLite journal.
 
 ## Layout
 
 - `lib/workflow/**` — Elixir scheduler, workflow DSL/compiler, providers,
-  journal, MCP adapter, Phoenix API, and LiveView UI.
+  journal, Phoenix API, and LiveView UI.
+- `native/codex-loops/**` — Rust CLI, stdio MCP adapter, scheduler HTTP client,
+  and local lifecycle coordination.
 - `test/workflow/**` — scheduler/API/UI test suite.
 - `plugins/codex-loops` — Codex plugin exposing one `codex-loops` skill plus
   the local MCP entrypoint.
@@ -25,6 +27,7 @@ SQLite journal.
 make build
 make ci
 make release
+make native-test
 ```
 
 `make ci` is the complete deterministic gate: quality, full Elixir tests,

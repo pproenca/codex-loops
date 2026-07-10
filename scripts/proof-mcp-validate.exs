@@ -66,6 +66,7 @@ defmodule ProofMCPValidate do
     invalid_workflow_path = Path.join(temp_root, "invalid-workflow.exs")
     missing_path = Path.join(temp_root, "missing-workflow.exs")
     journal_path = Path.join(temp_root, "runs.sqlite")
+    runtime_dir = Path.join(temp_root, "runtime")
     run_id = "mcp:proof_#{System.unique_integer([:positive])}"
     running_run_id = "mcp:proof_running_#{System.unique_integer([:positive])}"
     unknown_run_id = "mcp:proof_missing_#{System.unique_integer([:positive])}"
@@ -85,7 +86,7 @@ defmodule ProofMCPValidate do
           {initialize, client} =
             request!(client, 1, "initialize", %{
               "protocolVersion" => "2024-11-05",
-              "capabilities" => %{},
+              "capabilities" => %{"roots" => %{}},
               "clientInfo" => %{"name" => "proof-mcp-validate", "version" => "0.0.0"}
             })
 
@@ -94,6 +95,29 @@ defmodule ProofMCPValidate do
 
           {tools, client} = request!(client, 2, "tools/list", %{})
           assert_tools_list!(tools)
+
+          {invalid_call, client} = call_tool!(client, 8_999, "workflow_start", %{})
+
+          assert!(
+            get_in(invalid_call, ["error", "code"]) == -32_602,
+            "invalid MCP arguments should return JSON-RPC invalid params"
+          )
+
+          assert!(
+            match?({:error, _reason}, http_health(scheduler_url)),
+            "invalid MCP arguments must not start the scheduler"
+          )
+
+          relative_path = ".codex/workflows/conformance_core.exs"
+
+          {relative_validation, client} =
+            call_tool!(client, 9_000, "workflow_validate", %{"script_path" => relative_path})
+
+          assert_successful_validation!(
+            relative_validation,
+            Path.join(repo_root, relative_path),
+            "conformance-core"
+          )
 
           {validation, client} =
             call_tool!(client, 3, "workflow_validate", %{"script_path" => workflow_path})
@@ -198,9 +222,12 @@ defmodule ProofMCPValidate do
         end
       )
 
+      assert_scheduler_running!(scheduler_url)
+      stop_scheduler!(runtime_root, runtime_dir, port)
       assert_scheduler_stopped!(scheduler_url)
       IO.puts("MCP validate/start/status/inspect/resume/open-ui proof passed on #{scheduler_url}")
     after
+      stop_scheduler(runtime_root, runtime_dir, port)
       File.rm_rf(temp_root)
     end
   end
@@ -224,6 +251,7 @@ defmodule ProofMCPValidate do
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
       {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
       {~c"CODEX_LOOPS_RUNTIME_ROOT", String.to_charlist(runtime_root)},
+      {~c"CODEX_LOOPS_RUNTIME_DIR", String.to_charlist(Path.join(Path.dirname(journal_path), "runtime"))},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
       {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
@@ -273,7 +301,7 @@ defmodule ProofMCPValidate do
         :binary,
         :exit_status,
         {:args, ["-c", ~s(exec "$1" --stdio < "$2"), "codex-loops-mcp", entrypoint, fifo_path]},
-        {:cd, repo_root},
+        {:cd, Path.dirname(Path.dirname(entrypoint))},
         {:env, env}
       ])
 
@@ -281,7 +309,8 @@ defmodule ProofMCPValidate do
       %{
         port: port,
         input: File.open!(fifo_path, [:write, :binary]),
-        buffer: ""
+        buffer: "",
+        workspace_root: repo_root
       }
 
     try do
@@ -300,9 +329,14 @@ defmodule ProofMCPValidate do
       )
 
     File.mkdir!(path)
-    path
+    canonical_path(path)
   rescue
     _error in File.Error -> make_temp_root(prefix)
+  end
+
+  defp canonical_path(path) do
+    {resolved, 0} = System.cmd("realpath", [path])
+    String.trim(resolved)
   end
 
   defp request!(client, id, method, params) do
@@ -345,10 +379,24 @@ defmodule ProofMCPValidate do
   defp do_await_response!(client, id, deadline) do
     {message, client} = receive_message!(client, deadline)
 
-    if message["id"] == id do
-      {message, client}
-    else
-      do_await_response!(client, id, deadline)
+    cond do
+      message["id"] == id ->
+        {message, client}
+
+      message["method"] == "roots/list" and not is_nil(message["id"]) ->
+        client =
+          send_message!(client, %{
+            "jsonrpc" => "2.0",
+            "id" => message["id"],
+            "result" => %{
+              "roots" => [%{"uri" => "file://#{client.workspace_root}", "name" => "workspace"}]
+            }
+          })
+
+        do_await_response!(client, id, deadline)
+
+      true ->
+        do_await_response!(client, id, deadline)
     end
   end
 
@@ -396,7 +444,10 @@ defmodule ProofMCPValidate do
   defp await_port_exit!(client) do
     receive do
       {port, {:exit_status, 0}} when port == client.port ->
-        :ok
+        assert!(
+          String.trim(client.buffer) == "",
+          "MCP adapter emitted trailing non-protocol stdout: #{inspect(client.buffer)}"
+        )
 
       {port, {:exit_status, status}} when port == client.port ->
         raise("MCP adapter exited with status #{status}")
@@ -699,17 +750,17 @@ defmodule ProofMCPValidate do
     payload = error_tool_payload!(response, "workflow_validate")
 
     assert!(
-      payload["api_version"] == "scheduler.v1",
-      "missing workflow should return scheduler envelope"
+      payload["api_version"] == "codex-loops.mcp.v1",
+      "missing workflow should return native MCP envelope"
     )
 
     assert!(
-      payload["error"]["code"] == "scheduler.validation.script_not_found",
-      "missing workflow should preserve typed scheduler error"
+      payload["error"]["code"] == "script_not_found",
+      "missing workflow should preserve typed native error"
     )
 
     assert!(
-      payload["error"]["details"]["path"] == missing_path,
+      payload["error"]["details"]["script_path"] == missing_path,
       "missing path should be preserved"
     )
   end
@@ -821,17 +872,17 @@ defmodule ProofMCPValidate do
     payload = error_tool_payload!(response, "workflow_resume")
 
     assert!(
-      payload["api_version"] == "scheduler.v1",
-      "missing resume script should return scheduler envelope"
+      payload["api_version"] == "codex-loops.mcp.v1",
+      "missing resume script should return native MCP envelope"
     )
 
     assert!(
-      payload["error"]["code"] == "scheduler.validation.script_not_found",
-      "missing resume script should preserve typed scheduler error"
+      payload["error"]["code"] == "script_not_found",
+      "missing resume script should preserve typed native error"
     )
 
     assert!(
-      payload["error"]["details"]["path"] == missing_path,
+      payload["error"]["details"]["script_path"] == missing_path,
       "missing resume script path should be preserved"
     )
   end
@@ -860,7 +911,7 @@ defmodule ProofMCPValidate do
 
     assert!(
       payload["api_version"] == "scheduler.v1",
-      "already-running resume should return scheduler envelope"
+      "already-running resume should return scheduler envelope: #{inspect(payload)}"
     )
 
     assert!(
@@ -904,7 +955,11 @@ defmodule ProofMCPValidate do
   end
 
   defp successful_tool_payload!(%{"result" => result}, tool_name) do
-    assert!(result["isError"] == false, "#{tool_name} should not be an MCP error")
+    assert!(
+      result["isError"] == false,
+      "#{tool_name} should not be an MCP error: #{inspect(result)}"
+    )
+
     result["structuredContent"]
   end
 
@@ -934,7 +989,35 @@ defmodule ProofMCPValidate do
         end
       end)
 
-    assert!(stopped?, "scheduler still responded at #{scheduler_url} after MCP shutdown")
+    assert!(stopped?, "scheduler still responded at #{scheduler_url} after explicit stop")
+  end
+
+  defp assert_scheduler_running!(scheduler_url) do
+    assert!(
+      match?({:ok, _response}, http_health(scheduler_url)),
+      "scheduler should survive MCP shutdown at #{scheduler_url}"
+    )
+  end
+
+  defp stop_scheduler!(runtime_root, runtime_dir, port) do
+    {output, status} = stop_scheduler(runtime_root, runtime_dir, port)
+    assert!(status == 0, "native CLI could not stop scheduler: #{output}")
+  end
+
+  defp stop_scheduler(runtime_root, runtime_dir, port) do
+    cli = Path.join(runtime_root, "bin/codex-loops")
+
+    System.cmd(cli, ["stop", "--host", "127.0.0.1", "--port", to_string(port), "--json"],
+      env: [
+        {"CODEX_LOOPS_RUNTIME_ROOT", runtime_root},
+        {"CODEX_LOOPS_RUNTIME_DIR", runtime_dir},
+        {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
+        {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)}
+      ],
+      stderr_to_stdout: true
+    )
+  rescue
+    error -> {Exception.message(error), 1}
   end
 
   defp http_health(scheduler_url) do

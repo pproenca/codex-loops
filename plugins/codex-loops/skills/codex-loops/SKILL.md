@@ -11,10 +11,10 @@ workflows, fanout/multi-agent orchestration, ultracode-style work, workflow
 lifecycle inspection, an executable workflow script, or a reusable Codex skill
 that captures a workflow-shaped operating procedure.
 
-The product surface is the Codex plugin MCP adapter plus the local
-Elixir/Phoenix scheduler. MCP manages lifecycle and calls the scheduler HTTP
-API. Elixir owns runtime supervision, workflow workers, Phoenix PubSub/LiveView,
-and the SQLite journal. Run data is stored at
+The product surface is the Codex plugin's native Rust MCP adapter plus the local
+Elixir/Phoenix scheduler. The native control plane manages OS-process lifecycle
+and calls the scheduler HTTP interface. Elixir owns OTP supervision, workflow
+workers, Phoenix PubSub/LiveView, and the SQLite journal. Run data is stored at
 `~/.codex/workflows/runs_1.sqlite` by default, or at `CODEX_LOOPS_JOURNAL_PATH`
 when set.
 

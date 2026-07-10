@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted. Supersedes the Burrito packaging part of ADR 0001.
+Superseded by ADR 0003.
 
 ## Context
 

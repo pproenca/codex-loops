@@ -45,6 +45,7 @@ defmodule ProofMCPLive do
 
     workflow_path = Path.join(temp_root, "live-workflow.exs")
     journal_path = Path.join(temp_root, "runs.sqlite")
+    runtime_dir = Path.join(temp_root, "runtime")
     run_id = "mcp:live_proof_#{System.unique_integer([:positive])}"
     scheduler_url = "http://127.0.0.1:#{port}"
 
@@ -102,9 +103,12 @@ defmodule ProofMCPLive do
         end
       )
 
+      assert_scheduler_running!(scheduler_url)
+      stop_scheduler!(runtime_root, runtime_dir, port)
       assert_scheduler_stopped!(scheduler_url)
       IO.puts("MCP live Codex proof passed on #{scheduler_url}")
     after
+      stop_scheduler(runtime_root, runtime_dir, port)
       File.rm_rf(temp_root)
     end
   end
@@ -128,6 +132,7 @@ defmodule ProofMCPLive do
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
       {~c"CODEX_LOOPS_SCHEDULER_BIN", false},
       {~c"CODEX_LOOPS_RUNTIME_ROOT", String.to_charlist(runtime_root)},
+      {~c"CODEX_LOOPS_RUNTIME_DIR", String.to_charlist(Path.join(Path.dirname(journal_path), "runtime"))},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
       {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
@@ -174,9 +179,14 @@ defmodule ProofMCPLive do
       )
 
     File.mkdir!(path)
-    path
+    canonical_path(path)
   rescue
     _error in File.Error -> make_temp_root(prefix)
+  end
+
+  defp canonical_path(path) do
+    {resolved, 0} = System.cmd("realpath", [path])
+    String.trim(resolved)
   end
 
   defp request!(client, id, method, params) do
@@ -532,7 +542,35 @@ defmodule ProofMCPLive do
         end
       end)
 
-    assert!(stopped?, "scheduler still responded at #{scheduler_url} after MCP shutdown")
+    assert!(stopped?, "scheduler still responded at #{scheduler_url} after explicit stop")
+  end
+
+  defp assert_scheduler_running!(scheduler_url) do
+    assert!(
+      match?({:ok, _response}, http_health(scheduler_url)),
+      "scheduler should survive MCP shutdown at #{scheduler_url}"
+    )
+  end
+
+  defp stop_scheduler!(runtime_root, runtime_dir, port) do
+    {output, status} = stop_scheduler(runtime_root, runtime_dir, port)
+    assert!(status == 0, "native CLI could not stop scheduler: #{output}")
+  end
+
+  defp stop_scheduler(runtime_root, runtime_dir, port) do
+    cli = Path.join(runtime_root, "bin/codex-loops")
+
+    System.cmd(cli, ["stop", "--host", "127.0.0.1", "--port", to_string(port), "--json"],
+      env: [
+        {"CODEX_LOOPS_RUNTIME_ROOT", runtime_root},
+        {"CODEX_LOOPS_RUNTIME_DIR", runtime_dir},
+        {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
+        {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)}
+      ],
+      stderr_to_stdout: true
+    )
+  rescue
+    error -> {Exception.message(error), 1}
   end
 
   defp http_health(scheduler_url) do

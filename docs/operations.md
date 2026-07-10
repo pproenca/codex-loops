@@ -6,6 +6,7 @@
 make build
 make ci
 make release
+make native-build
 ```
 
 `make build` installs missing dependencies and compiles with warnings as
@@ -115,13 +116,69 @@ codex-loops stop
 Use `codex-loops serve` when you want to start or customize the scheduler
 separately. Configuration is progressively disclosed through `serve --host`, `--port`,
 `--journal`, and `--model`, or `run --provider`, `--run-id`, and `--server`.
+The native control plane is the single scheduler owner. It supervises the
+foreground OTP release from a per-user runtime directory under
+`~/.codex/workflows/runtime`; MCP sessions never own or stop that supervisor.
+Unexpected scheduler exits are restarted with bounded backoff while the native
+supervisor retains its owner lock. Startup is transactional: a scheduler is
+terminated if owner metadata cannot be committed. Stable supervisor metadata
+remains addressable while a child is in crash backoff, and a failed initial
+health deadline stops the supervisor so a corrected command can retry
+immediately. A healthy HTTP endpoint is only reported as managed-ready while
+that durable owner lock is still held; a scheduler that outlives its supervisor
+returns a typed ownership error instead of a successful start result.
+
+An explicit `--server URL` or `CODEX_LOOPS_SCHEDULER_URL` selects an externally
+managed scheduler. The client requires a compatible `scheduler.v1` health
+envelope but does not create local owner state, autostart it, or control its
+lifecycle and logs. Status, inspection, UI, and pathless resume use the HTTP
+seam directly. Validation, start, or resume with a workflow path additionally
+requires `CODEX_LOOPS_SHARED_FILESYSTEM=1` when the URL is remote; set that only
+when the client and scheduler resolve the same absolute paths.
+
+Power-user lifecycle controls use the same host/port identity and honor
+`CODEX_LOOPS_SCHEDULER_HOST` plus `CODEX_LOOPS_SCHEDULER_PORT`:
+
+```sh
+codex-loops logs --lines 500
+codex-loops restart --journal /tmp/isolated.sqlite
+codex-loops serve --foreground
+codex-loops stop --force
+```
+
+`--foreground` is intended for an external process manager and exits on
+SIGINT/SIGTERM. `--force` is a recovery tool for an orphaned scheduler: it
+requires valid owner metadata and verifies the recorded process belongs to the
+packaged release before signaling it. It does not kill arbitrary services on a
+configured port. Ordinary stop preserves verified orphan metadata and returns
+`scheduler_orphaned` with explicit force-stop guidance.
+
+`restart` inherits the active bind address, journal path, and model unless a
+replacement flag or environment value is supplied. This prevents a restart of
+a custom-journal scheduler from silently switching to the default database.
+Concurrent cold starts coordinate through an owner token: exactly one caller
+reports `started: true`, compatible callers join with `started: false`, and a
+caller requesting a different bind, journal, or model receives the typed
+`scheduler_configuration_conflict` error without changing the winner.
+Timeout cleanup is owner-token scoped, so a short-timeout joiner cannot stop a
+slower lock winner.
+
+Power-user reads use the same scheduler HTTP seam:
+
+```sh
+codex-loops status RUN_ID --json
+codex-loops inspect RUN_ID --json
+codex-loops resume RUN_ID --provider codex
+codex-loops open RUN_ID
+codex-loops doctor --json
+```
 
 ## Manual MCP Smoke
 
-Build the external runtime first:
+Build the scheduler and native control plane first:
 
 ```sh
-make release
+make package-homebrew-runtime
 ```
 
 Then, from a Codex thread with the local plugin installed, run a non-mutating
@@ -154,6 +211,13 @@ Agents should use the Codex plugin MCP tools. The MCP adapter starts or
 discovers the scheduler, health-checks it, and talks to the scheduler HTTP API.
 The Elixir/Phoenix scheduler owns the workflow workers, PubSub/LiveView, and
 SQLite journal.
+
+Relative MCP script paths resolve against the client's workspace root, so the
+usual `.codex/workflows/<name>.exs` form works even though the plugin launcher
+runs from its own directory. Clients without MCP roots may set
+`CODEX_LOOPS_WORKSPACE_ROOT` explicitly. Sending workflow paths to a non-local
+scheduler is rejected unless `CODEX_LOOPS_SHARED_FILESYSTEM=1` confirms that the
+same absolute paths exist on both sides.
 
 ```text
 workflow_validate script_path=.codex/workflows/example.exs

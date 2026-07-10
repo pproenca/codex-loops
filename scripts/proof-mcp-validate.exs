@@ -610,7 +610,8 @@ defmodule ProofMCPValidate do
       {output, 1} ->
         assert!(
           String.contains?(output, "does not contain a usable Codex Loops runtime") and
-            String.contains?(output, "brew install pproenca/codex-loops/codex-loops"),
+            String.contains?(output, "Homebrew tap is not published yet") and
+            String.contains?(output, "make package-homebrew-runtime"),
           "missing-runtime diagnostic was not actionable: #{inspect(output)}"
         )
 

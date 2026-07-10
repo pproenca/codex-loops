@@ -8,6 +8,7 @@ HOMEBREW_RUNTIME_ROOT = $(HOMEBREW_PACKAGE_DIR)/libexec
 CARGO ?= cargo
 NATIVE_MANIFEST = native/codex-loops/Cargo.toml
 NATIVE_BIN = native/codex-loops/target/release/codex-loops
+NATIVE_MCP_BIN = native/codex-loops/target/release/codex-loops-mcp
 
 setup:
 	mix local.hex --if-missing --force
@@ -27,6 +28,7 @@ format-check:
 
 native-build:
 	$(CARGO) build --locked --release --manifest-path $(NATIVE_MANIFEST)
+	ln -sf codex-loops "$(NATIVE_MCP_BIN)"
 
 native-test:
 	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST)

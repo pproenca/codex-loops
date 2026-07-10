@@ -79,6 +79,7 @@ fn doctor_fails_when_the_packaged_runtime_is_invalid() {
 #[test]
 fn source_checkout_discovers_the_built_scheduler_without_installation_environment() {
     let checkout = tempfile::tempdir().unwrap();
+    let outside_checkout = tempfile::tempdir().unwrap();
     fs::write(checkout.path().join("mix.exs"), "source checkout").unwrap();
     fs::create_dir_all(checkout.path().join("native/codex-loops")).unwrap();
     fs::write(
@@ -91,14 +92,19 @@ fn source_checkout_discovers_the_built_scheduler_without_installation_environmen
         .join("_build/prod/rel/agent_loops/bin/agent_loops");
     fs::create_dir_all(scheduler.parent().unwrap()).unwrap();
     fs::write(&scheduler, "source checkout scheduler").unwrap();
+    let checkout_cli = checkout
+        .path()
+        .join("native/codex-loops/target/release/codex-loops");
+    fs::create_dir_all(checkout_cli.parent().unwrap()).unwrap();
+    fs::copy(env!("CARGO_BIN_EXE_codex-loops"), &checkout_cli).unwrap();
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let server = format!("http://{}", listener.local_addr().unwrap());
     drop(listener);
 
-    let output = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+    let output = Command::new(checkout_cli)
         .args(["doctor", "--json"])
-        .current_dir(checkout.path())
+        .current_dir(outside_checkout.path())
         .env_remove("CODEX_LOOPS_SCHEDULER_BIN")
         .env_remove("CODEX_LOOPS_RUNTIME_ROOT")
         .env("CODEX_LOOPS_SCHEDULER_URL", server)
@@ -110,9 +116,11 @@ fn source_checkout_discovers_the_built_scheduler_without_installation_environmen
     let error: serde_json::Value =
         serde_json::from_slice(&output.stderr).expect("JSON error on stderr");
     assert_eq!(error["error"]["code"], "scheduler_stopped");
+    let discovered =
+        std::path::PathBuf::from(error["error"]["details"]["scheduler_bin"].as_str().unwrap());
     assert_eq!(
-        error["error"]["details"]["scheduler_bin"],
-        scheduler.canonicalize().unwrap().to_string_lossy().as_ref()
+        discovered.canonicalize().unwrap(),
+        scheduler.canonicalize().unwrap()
     );
 }
 

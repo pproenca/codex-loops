@@ -8,8 +8,8 @@ workers, Phoenix PubSub/LiveView, and the SQLite journal.
 
 The packaged `agent_loops` Mix release owns only the scheduler. One native
 binary is installed as `codex-loops` for users and `codex-loops-mcp` for Codex
-stdio. The source-checkout CLI discovers the adjacent built scheduler release;
-the source-only plugin uses the packaged runtime layout during CI and future
+stdio. The source-checkout CLI and plugin discover the adjacent built scheduler
+release; CI also proves the packaged runtime layout used for future
 distribution.
 
 ## Source Checkout
@@ -63,10 +63,12 @@ Customize only when needed:
 ./native/codex-loops/target/release/codex-loops restart --port 48100
 ```
 
-Use `codex-loops serve --foreground` for container/process-manager integration.
+Use `./native/codex-loops/target/release/codex-loops serve --foreground` for
+container/process-manager integration.
 The ordinary background supervisor restarts a crashed scheduler with bounded
-backoff; `codex-loops stop --force` safely recovers an orphan only when its
-recorded process still matches the packaged scheduler.
+backoff; `./native/codex-loops/target/release/codex-loops stop --force` safely
+recovers an orphan only when its recorded process still matches the packaged
+scheduler.
 
 The CI gate is credential-free and does not spend a Codex turn. Real-provider
 smokes are maintainer-run diagnostics; the same provider protocol and streaming

@@ -646,15 +646,26 @@ pub fn scheduler_bin() -> AppResult<PathBuf> {
 }
 
 fn source_checkout_scheduler_bin() -> Option<PathBuf> {
-    let root = env::current_dir().ok()?;
-    let mix_project = root.join("mix.exs");
-    let native_project = root.join("native/codex-loops/Cargo.toml");
+    let root = env::current_exe()
+        .ok()
+        .and_then(|executable| source_checkout_root(&executable))
+        .or_else(|| {
+            env::current_dir()
+                .ok()
+                .and_then(|directory| source_checkout_root(&directory))
+        })?;
 
-    if mix_project.is_file() && native_project.is_file() {
-        Some(root.join("_build/prod/rel/agent_loops/bin/agent_loops"))
-    } else {
-        None
-    }
+    Some(root.join("_build/prod/rel/agent_loops/bin/agent_loops"))
+}
+
+fn source_checkout_root(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|candidate| {
+        let root = candidate.to_path_buf();
+        let mix_project = root.join("mix.exs");
+        let native_project = root.join("native/codex-loops/Cargo.toml");
+
+        (mix_project.is_file() && native_project.is_file()).then_some(root)
+    })
 }
 
 pub fn read_logs(client: &SchedulerClient, lines: usize) -> AppResult<String> {

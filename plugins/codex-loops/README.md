@@ -24,6 +24,9 @@ codex plugin add codex-loops@codex-loops
 ```
 
 Start a new Codex thread after installing so the `codex-loops` skill is loaded.
+For a local source install, start Codex in this checkout; the cached plugin
+launcher resolves the configured `codex-loops` local marketplace and discovers
+the artifacts built in that checkout automatically.
 
 ## Manual CLI Run
 
@@ -43,10 +46,14 @@ provide custom ports, journals, models, providers, run IDs, and scheduler URLs.
 ## MCP Surface
 
 The source-only plugin includes a tracked stdio launcher at
-`plugins/codex-loops/mcp/codex-loops-mcp`. The launcher finds the
-Homebrew-owned runtime, enforces exact plugin/runtime version compatibility,
-and executes the native MCP command from that runtime. MCP starts or discovers
-the scheduler release when a tool call needs the scheduler HTTP API.
+`plugins/codex-loops/mcp/codex-loops-mcp`. From a source checkout, the launcher
+finds the native and scheduler artifacts created by `make build` and
+`make release` from either its own location or the configured local marketplace
+root, including when Codex has copied the plugin into its cache. It also
+supports a staged packaged runtime, enforces exact plugin/runtime version
+compatibility, and executes the native MCP command from that runtime. Homebrew
+distribution is planned but is not published. MCP starts or discovers the
+scheduler release when a tool call needs the scheduler HTTP API.
 It exposes:
 
 - `workflow_validate`: validates a workflow through `POST /api/workflows/validate`

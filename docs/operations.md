@@ -113,9 +113,10 @@ the local endpoint is not already healthy.
 ./native/codex-loops/target/release/codex-loops stop
 ```
 
-Use `codex-loops serve` when you want to start or customize the scheduler
-separately. Configuration is progressively disclosed through `serve --host`, `--port`,
-`--journal`, and `--model`, or `run --provider`, `--run-id`, and `--server`.
+Use `./native/codex-loops/target/release/codex-loops serve` when you want to
+start or customize the scheduler separately. Configuration is progressively
+disclosed through `serve --host`, `--port`, `--journal`, and `--model`, or
+`run --provider`, `--run-id`, and `--server`.
 The native control plane is the single scheduler owner. It supervises the
 foreground OTP release from a per-user runtime directory under
 `~/.codex/workflows/runtime`; MCP sessions never own or stop that supervisor.
@@ -140,8 +141,8 @@ Power-user lifecycle controls use the same host/port identity and honor
 `CODEX_LOOPS_SCHEDULER_HOST` plus `CODEX_LOOPS_SCHEDULER_PORT`:
 
 ```sh
-codex-loops logs --lines 500
-codex-loops restart --journal /tmp/isolated.sqlite
+./native/codex-loops/target/release/codex-loops logs --lines 500
+./native/codex-loops/target/release/codex-loops restart --journal /tmp/isolated.sqlite
 ./native/codex-loops/target/release/codex-loops serve --foreground
 ./native/codex-loops/target/release/codex-loops stop --force
 ```
@@ -166,11 +167,11 @@ slower lock winner.
 Power-user reads use the same scheduler HTTP seam:
 
 ```sh
-codex-loops status RUN_ID --json
-codex-loops inspect RUN_ID --json
-codex-loops resume RUN_ID --provider codex
-codex-loops open RUN_ID
-codex-loops doctor --json
+./native/codex-loops/target/release/codex-loops status RUN_ID --json
+./native/codex-loops/target/release/codex-loops inspect RUN_ID --json
+./native/codex-loops/target/release/codex-loops resume RUN_ID --provider codex
+./native/codex-loops/target/release/codex-loops open RUN_ID
+./native/codex-loops/target/release/codex-loops doctor --json
 ```
 
 ## Manual MCP Smoke

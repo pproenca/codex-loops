@@ -218,6 +218,13 @@ impl Bundle {
             _other => self.control_plane.clone(),
         }
     }
+
+    pub fn scheduler_root(&self) -> &Path {
+        self.scheduler
+            .parent()
+            .and_then(Path::parent)
+            .expect("validated scheduler path has a release root")
+    }
 }
 
 pub fn binding_path() -> AppResult<PathBuf> {

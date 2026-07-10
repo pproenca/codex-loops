@@ -471,7 +471,7 @@ async fn supervise(
             }
             signal_result = termination_signal() => {
                 signal_result?;
-                terminate_child(&mut child).await;
+                terminate_child(&mut child).await?;
                 remove_stale_metadata(&client)?;
                 return Ok(());
             }
@@ -562,16 +562,49 @@ fn scheduler_command(release: &Path, runtime_dir: &Path) -> Command {
     command
 }
 
-async fn terminate_child(child: &mut Child) {
+async fn terminate_child(child: &mut Child) -> AppResult<()> {
+    terminate_child_with_timeout(child, Duration::from_secs(5)).await
+}
+
+async fn terminate_child_with_timeout(child: &mut Child, timeout: Duration) -> AppResult<()> {
     if let Some(pid) = child.id() {
         let _ = signal_process(pid, libc::SIGTERM);
     }
-    if tokio::time::timeout(Duration::from_secs(5), child.wait())
-        .await
-        .is_err()
-    {
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+    match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(_status)) => Ok(()),
+        Ok(Err(wait_error)) => {
+            let kill_error = child.start_kill().err().map(|error| error.to_string());
+            let final_wait_error = child.wait().await.err().map(|error| error.to_string());
+            Err(AppError::new(
+                6,
+                "scheduler_wait_failed",
+                "Could not observe scheduler termination reliably.",
+            )
+            .details(json!({
+                "wait_error": wait_error.to_string(),
+                "kill_error": kill_error,
+                "final_wait_error": final_wait_error
+            })))
+        }
+        Err(_elapsed) => {
+            child.start_kill().map_err(|error| {
+                AppError::new(
+                    6,
+                    "scheduler_kill_failed",
+                    "The scheduler ignored SIGTERM and could not be killed.",
+                )
+                .details(json!({"reason": error.to_string()}))
+            })?;
+            child.wait().await.map_err(|error| {
+                AppError::new(
+                    6,
+                    "scheduler_wait_failed",
+                    "Could not wait for the killed scheduler process.",
+                )
+                .details(json!({"reason": error.to_string()}))
+            })?;
+            Ok(())
+        }
     }
 }
 
@@ -580,7 +613,17 @@ async fn publish_metadata(
     writer: impl FnOnce() -> AppResult<()>,
 ) -> AppResult<()> {
     if let Err(error) = writer() {
-        terminate_child(child).await;
+        if let Err(cleanup_error) = terminate_child(child).await {
+            return Err(AppError::new(
+                6,
+                "scheduler_cleanup_failed",
+                "Scheduler startup failed and its child cleanup also failed.",
+            )
+            .details(json!({
+                "startup_error": error.cli_envelope(),
+                "cleanup_error": cleanup_error.cli_envelope()
+            })));
+        }
         return Err(error);
     }
     Ok(())
@@ -855,10 +898,9 @@ fn validate_scheduler_process(metadata: &RuntimeMetadata) -> AppResult<VerifiedS
 fn scheduler_release_root() -> AppResult<PathBuf> {
     Runtime::installed()?
         .bundle
-        .scheduler
-        .parent()
-        .and_then(Path::parent)
-        .and_then(|path| path.canonicalize().ok())
+        .scheduler_root()
+        .canonicalize()
+        .ok()
         .ok_or_else(|| AppError::new(6, "runtime_invalid", "Scheduler release path is invalid."))
 }
 
@@ -998,6 +1040,23 @@ mod tests {
         .await
         .unwrap_err();
         assert_eq!(error.code.as_ref(), "scheduler_metadata_invalid");
+        assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stubborn_scheduler_is_killed_after_the_graceful_shutdown_deadline() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "trap '' TERM; while :; do sleep 1; done"])
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let pid = child.id().unwrap();
+
+        terminate_child_with_timeout(&mut child, Duration::from_millis(50))
+            .await
+            .unwrap();
+
         assert_eq!(unsafe { libc::kill(pid as i32, 0) }, -1);
     }
 

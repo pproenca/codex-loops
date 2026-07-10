@@ -15,6 +15,10 @@ MINISIGN_SECRET_KEY=/path/to/key make dist
 `_build/dist/`. The command requires `MINISIGN_SECRET_KEY` and writes a minisign
 signature; an unsigned canonical artifact cannot be produced. Publish the
 archive, checksum, and signature on the matching GitHub release tag.
+The same command emits a concrete `codex-loops-<target>.rb` thin formula with
+the release URL and SHA-256 already filled in. Copy that generated adapter into
+the tap; it installs the archive unchanged beneath Homebrew's versioned Cellar
+and exposes only the stable `codex-loops` command.
 
 ## Tap/Cask Contract
 

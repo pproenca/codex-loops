@@ -50,6 +50,14 @@ next_version="${version}-next"
 next_stage="$tmpdir/codex-loops-$next_version-test"
 cp -R "$stage" "$next_stage"
 printf '%s\n' "$next_version" >"$next_stage/VERSION"
+mkdir -p "$share_root/$next_version/bin"
+cp "$stage/bin/codex-loops" "$share_root/$next_version/bin/codex-loops"
+if HOME="$home" "$next_stage/install" >/dev/null 2>&1; then
+  echo "installer activated an incomplete existing immutable bundle" >&2
+  exit 1
+fi
+test "$(readlink "$share_root/current")" = "$version"
+rm -rf "$share_root/$next_version"
 HOME="$home" "$next_stage/install" >/dev/null
 
 test -x "$share_root/$version/bin/codex-loops"
@@ -120,5 +128,10 @@ if PATH="$fake_bin:$PATH" DIST_TARGET=proof MINISIGN_SECRET_KEY="$tmpdir/key" \
 fi
 test "$(cat "$partial_archive.sha256")" = "partial checksum"
 test "$(cat "$partial_archive.minisig")" = "partial signature"
+
+formula="$tmpdir/codex-loops-proof.rb"
+"$repo_root/scripts/write-homebrew-formula.sh" "$formula" "$version" proof deadbeef
+grep -Fq "codex-loops-$version-proof.tar.gz" "$formula"
+grep -Fq 'sha256 "deadbeef"' "$formula"
 
 printf 'Versioned bundle install proof passed\n'

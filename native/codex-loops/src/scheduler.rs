@@ -6,6 +6,7 @@ use std::{
 
 use percent_encoding::{AsciiSet, CONTROLS, utf8_percent_encode};
 use reqwest::{Client, StatusCode};
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
@@ -30,6 +31,81 @@ const PATH_SEGMENT: &AsciiSet = &CONTROLS
     .add(b'{')
     .add(b'|')
     .add(b'}');
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+pub struct RunId(String);
+
+impl RunId {
+    pub fn new(value: impl Into<String>) -> AppResult<Self> {
+        let value = value.into();
+        if value.is_empty() {
+            Err(AppError::new(
+                2,
+                "run_id_invalid",
+                "Run ID must be a non-empty string.",
+            ))
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl<'de> Deserialize<'de> for RunId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::new(value).map_err(serde::de::Error::custom)
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SchedulerSuccessEnvelope {
+    api_version: String,
+    data: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SchedulerFailureEnvelope {
+    api_version: String,
+    error: SchedulerFailure,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct SchedulerFailure {
+    code: String,
+    message: String,
+    #[serde(default)]
+    details: Value,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(untagged)]
+enum SchedulerEnvelope {
+    Success(SchedulerSuccessEnvelope),
+    Failure(SchedulerFailureEnvelope),
+}
+
+impl SchedulerEnvelope {
+    fn api_version(&self) -> &str {
+        match self {
+            Self::Success(envelope) => &envelope.api_version,
+            Self::Failure(envelope) => &envelope.api_version,
+        }
+    }
+
+    fn into_value(self) -> Value {
+        serde_json::to_value(self).unwrap_or_else(|error| {
+            json!({"api_version": "scheduler.v1", "error": {"code": "serialization_failed", "message": error.to_string()}})
+        })
+    }
+}
 
 #[derive(Debug)]
 pub enum HealthState {
@@ -211,38 +287,38 @@ impl SchedulerClient {
             .await
     }
 
-    pub async fn status(&self, run_id: &str) -> AppResult<Value> {
+    pub async fn status(&self, run_id: &RunId) -> AppResult<Value> {
         self.scheduler_request(
             reqwest::Method::GET,
-            &format!("/api/runs/{}", segment(run_id)),
+            &format!("/api/runs/{}", segment(run_id.as_str())),
             None,
         )
         .await
     }
 
-    pub async fn inspect(&self, run_id: &str) -> AppResult<Value> {
+    pub async fn inspect(&self, run_id: &RunId) -> AppResult<Value> {
         self.scheduler_request(
             reqwest::Method::GET,
-            &format!("/api/runs/{}/events", segment(run_id)),
+            &format!("/api/runs/{}/events", segment(run_id.as_str())),
             None,
         )
         .await
     }
 
-    pub async fn resume(&self, run_id: &str, attrs: Value) -> AppResult<Value> {
+    pub async fn resume(&self, run_id: &RunId, attrs: Value) -> AppResult<Value> {
         self.scheduler_request(
             reqwest::Method::POST,
-            &format!("/api/runs/{}/resume", segment(run_id)),
+            &format!("/api/runs/{}/resume", segment(run_id.as_str())),
             Some(attrs),
         )
         .await
     }
 
-    pub fn ui_url(&self, run_id: &str) -> String {
+    pub fn ui_url(&self, run_id: &RunId) -> String {
         format!(
             "{}/runs/{}",
             self.base_url.as_str().trim_end_matches('/'),
-            segment(run_id)
+            segment(run_id.as_str())
         )
     }
 
@@ -253,27 +329,25 @@ impl SchedulerClient {
         body: Option<Value>,
     ) -> AppResult<Value> {
         let (status, envelope) = self.request_with_status(method, path, body).await?;
-        if envelope.get("api_version").and_then(Value::as_str) != Some("scheduler.v1") {
-            return Err(unexpected(status, envelope));
+        if envelope.api_version() != "scheduler.v1" {
+            return Err(unexpected(status, envelope.into_value()));
         }
-        if envelope.get("data").is_some() && status.is_success() {
-            Ok(envelope)
-        } else if let Some(error) = envelope.get("error") {
-            Err(AppError::new(
-                4,
-                error
-                    .get("code")
-                    .and_then(Value::as_str)
-                    .unwrap_or("scheduler_error"),
-                error
-                    .get("message")
-                    .and_then(Value::as_str)
-                    .unwrap_or("The scheduler rejected the request."),
-            )
-            .details(error.get("details").cloned().unwrap_or(Value::Null))
-            .mcp_api_version("scheduler.v1"))
-        } else {
-            Err(unexpected(status, envelope))
+        match envelope {
+            SchedulerEnvelope::Success(envelope) if status.is_success() => {
+                Ok(serde_json::to_value(envelope)
+                    .map_err(|error| AppError::new(6, "scheduler_response", error.to_string()))?)
+            }
+            SchedulerEnvelope::Success(envelope) => Err(unexpected(
+                status,
+                serde_json::to_value(envelope).unwrap_or(Value::Null),
+            )),
+            SchedulerEnvelope::Failure(envelope) => {
+                Err(
+                    AppError::new(4, envelope.error.code, envelope.error.message)
+                        .details(envelope.error.details)
+                        .mcp_api_version("scheduler.v1"),
+                )
+            }
         }
     }
 
@@ -282,7 +356,7 @@ impl SchedulerClient {
         method: reqwest::Method,
         path: &str,
         body: Option<Value>,
-    ) -> AppResult<(StatusCode, Value)> {
+    ) -> AppResult<(StatusCode, SchedulerEnvelope)> {
         let url = self.base_url.join(path).map_err(|error| {
             AppError::new(
                 6,

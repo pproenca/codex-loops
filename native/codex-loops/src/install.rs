@@ -5,6 +5,7 @@ use std::{
     process::Command,
 };
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::{
@@ -53,10 +54,25 @@ struct McpRegistration {
     args: Vec<String>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ListedMcp {
+    name: String,
+    transport: McpTransport,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct McpTransport {
+    #[serde(rename = "type")]
+    kind: String,
+    command: Option<String>,
+    #[serde(default)]
+    args: Vec<String>,
+}
+
 struct State {
     binding: Option<CodexBinding>,
     skill_current: bool,
-    mcp: Option<Value>,
+    mcp: Option<ListedMcp>,
 }
 
 pub fn run(options: Options) -> AppResult<Value> {
@@ -196,7 +212,7 @@ fn read_stored_binding(path: &Path) -> Option<CodexBinding> {
         .and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
 
-fn read_mcp(codex: &Path) -> AppResult<Option<Value>> {
+fn read_mcp(codex: &Path) -> AppResult<Option<ListedMcp>> {
     let output = Command::new(codex)
         .args(["mcp", "list", "--json"])
         .output()
@@ -208,16 +224,14 @@ fn read_mcp(codex: &Path) -> AppResult<Option<Value>> {
             "mcp_read",
         ));
     }
-    let servers: Vec<Value> = serde_json::from_slice(&output.stdout).map_err(|error| {
+    let servers: Vec<ListedMcp> = serde_json::from_slice(&output.stdout).map_err(|error| {
         codex_command_error(
             format!("Codex returned invalid MCP JSON: {error}"),
             false,
             "mcp_read",
         )
     })?;
-    Ok(servers
-        .into_iter()
-        .find(|server| server.get("name").and_then(Value::as_str) == Some(MCP_NAME)))
+    Ok(servers.into_iter().find(|server| server.name == MCP_NAME))
 }
 
 fn plan(state: &State, codex: &CodexBinding, integration_command: &Path) -> AppResult<Vec<Action>> {
@@ -240,10 +254,10 @@ fn plan(state: &State, codex: &CodexBinding, integration_command: &Path) -> AppR
     Ok(actions)
 }
 
-fn mcp_matches(value: &Value, control_plane: &Path) -> bool {
-    value.pointer("/transport/type").and_then(Value::as_str) == Some("stdio")
-        && value.pointer("/transport/command").and_then(Value::as_str) == control_plane.to_str()
-        && value.pointer("/transport/args") == Some(&json!(["mcp"]))
+fn mcp_matches(value: &ListedMcp, control_plane: &Path) -> bool {
+    value.transport.kind == "stdio"
+        && value.transport.command.as_deref() == control_plane.to_str()
+        && value.transport.args == ["mcp"]
 }
 
 fn execute(
@@ -265,33 +279,12 @@ fn execute(
     }
 }
 
-fn restorable_mcp(value: &Value) -> AppResult<McpRegistration> {
+fn restorable_mcp(value: &ListedMcp) -> AppResult<McpRegistration> {
     let command = value
-        .pointer("/transport/command")
-        .and_then(Value::as_str)
+        .transport
+        .command
+        .as_deref()
         .filter(|command| !command.is_empty())
-        .ok_or_else(|| {
-            AppError::new(
-                5,
-                "mcp_registration_not_restorable",
-                "The existing Codex Loops MCP registration cannot be replaced safely.",
-            )
-            .details(json!({"registration": value}))
-        })?;
-    let args = value
-        .pointer("/transport/args")
-        .and_then(Value::as_array)
-        .ok_or_else(|| {
-            AppError::new(
-                5,
-                "mcp_registration_not_restorable",
-                "The existing Codex Loops MCP registration cannot be replaced safely.",
-            )
-            .details(json!({"registration": value}))
-        })?
-        .iter()
-        .map(|argument| argument.as_str().map(ToOwned::to_owned))
-        .collect::<Option<Vec<_>>>()
         .ok_or_else(|| {
             AppError::new(
                 5,
@@ -302,7 +295,7 @@ fn restorable_mcp(value: &Value) -> AppResult<McpRegistration> {
         })?;
     Ok(McpRegistration {
         command: command.to_owned(),
-        args,
+        args: value.transport.args.clone(),
     })
 }
 
@@ -315,7 +308,7 @@ fn replace_mcp(
     run_command(codex, &["mcp", "remove", MCP_NAME], changed, "mcp_remove")?;
     if let Err(add_error) = add_mcp(codex, integration_command, true) {
         return match add_registration(codex, previous, true, "mcp_restore") {
-            Ok(()) => Err(add_error.changed(false)),
+            Ok(()) => Err(add_error.changed(changed)),
             Err(restore_error) => Err(AppError::new(
                 5,
                 "mcp_rollback_failed",
@@ -606,13 +599,14 @@ mod tests {
         let state = State {
             binding: Some(codex.clone()),
             skill_current: true,
-            mcp: Some(json!({
-                "transport": {
-                    "type": "stdio",
-                    "command": runtime.control_plane,
-                    "args": ["mcp"]
-                }
-            })),
+            mcp: Some(ListedMcp {
+                name: MCP_NAME.into(),
+                transport: McpTransport {
+                    kind: "stdio".into(),
+                    command: Some(runtime.control_plane.to_string_lossy().into_owned()),
+                    args: vec!["mcp".into()],
+                },
+            }),
         };
         assert!(
             plan(&state, &codex, Path::new("/runtime/bin/codex-loops"))

@@ -8,14 +8,23 @@ bin_root=${CODEX_LOOPS_BIN_ROOT:-"$HOME/.local/bin"}
 destination="$share_root/$version"
 stage="$share_root/.${version}.$$"
 
-test -x "$source_root/bin/codex-loops"
-test -x "$source_root/libexec/scheduler/bin/agent_loops"
-test -f "$source_root/share/skills/codex-loops/SKILL.md"
+validate_bundle() {
+  root=$1
+  test -x "$root/bin/codex-loops" &&
+    test -x "$root/libexec/scheduler/bin/agent_loops" &&
+    test -f "$root/share/skills/codex-loops/SKILL.md" &&
+    test -f "$root/share/codex-loops/runtime.json"
+}
+
+validate_bundle "$source_root" || {
+  echo "runtime bundle is incomplete: $source_root" >&2
+  exit 1
+}
 
 mkdir -p "$share_root" "$bin_root"
 if [ -e "$destination" ]; then
-  test -x "$destination/bin/codex-loops" || {
-    echo "existing immutable bundle is incomplete: $destination" >&2
+  validate_bundle "$destination" && diff -qr "$source_root" "$destination" >/dev/null || {
+    echo "existing immutable bundle is incomplete or differs from the signed source: $destination" >&2
     exit 1
   }
 else

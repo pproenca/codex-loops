@@ -86,6 +86,7 @@ exposes `~/.local/bin/codex-loops`. The canonical artifact layout is:
 bin/codex-loops
 libexec/scheduler/
 share/skills/codex-loops/
+share/codex-loops/runtime.json
 install
 VERSION
 ```

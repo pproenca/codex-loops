@@ -26,7 +26,7 @@ struct App {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Install or verify the Codex plugin and runtime integration.
+    /// Install or verify the Codex binding, user skill, and MCP integration.
     #[command(alias = "setup")]
     Install {
         #[arg(long, conflicts_with = "dry_run")]
@@ -90,7 +90,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Start or discover the managed local scheduler.
+    /// Start or join the managed local scheduler.
     Serve {
         #[arg(long)]
         host: Option<String>,
@@ -144,7 +144,7 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Inspect runtime discovery and scheduler health.
+    /// Inspect runtime binding and scheduler health.
     Doctor {
         #[arg(long)]
         json: bool,

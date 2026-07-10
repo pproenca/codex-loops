@@ -33,12 +33,14 @@ A client-safe pointer to a journal event, usually sequence, type, and address; i
 _Avoid_: raw event, raw payload
 
 **Install command**:
-A user-invoked Codex Loops setup operation that installs or enables the Codex plugin and verifies the local runtime is available.
+A user-invoked reconciliation operation that persists the exact Codex binding,
+installs the user skill, and directly registers the runtime's MCP command.
 _Avoid_: plugin postinstall hook, automatic dependency install
 
 **Plugin lifecycle**:
-Codex-owned installation, enablement, and update state for the Codex Loops plugin, separate from the Homebrew-owned runtime package.
-_Avoid_: bundled plugin copy, Homebrew-owned plugin update
+Optional Codex-owned installation, enablement, and update state for the
+skill-only presentation plugin; it never owns or discovers the runtime.
+_Avoid_: runtime installation, MCP registration, bundled executable
 
 **Runtime bundle**:
 A target-specific, immutable Codex Loops directory containing the native

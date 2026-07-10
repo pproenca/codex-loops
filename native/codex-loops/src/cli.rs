@@ -14,7 +14,7 @@ use crate::{
     install,
     lifecycle::{self, StartOptions},
     runtime::Runtime,
-    scheduler::{HealthState, SchedulerClient, local_url},
+    scheduler::{HealthState, RunId, SchedulerClient, local_url},
 };
 
 pub async fn run_workflow(
@@ -33,9 +33,9 @@ pub async fn run_workflow(
     let scheduler_started = lifecycle::ensure_ready(&client).await?;
     let script_path = script.to_string_lossy();
     client.validate(&script_path).await?;
-    let run_id = run_id.unwrap_or_else(|| default_run_id(&script));
+    let run_id = RunId::new(run_id.unwrap_or_else(|| default_run_id(&script)))?;
     let started = client
-        .start(json!({"script_path": script_path, "run_id": run_id, "provider": provider}))
+        .start(json!({"script_path": script_path, "run_id": &run_id, "provider": provider}))
         .await?;
     let ui_url = client.ui_url(&run_id);
     let mut warning = Value::Null;
@@ -180,12 +180,14 @@ pub async fn stop(
 }
 
 pub async fn status(run_id: String, server: Option<String>) -> AppResult<Value> {
+    let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
     client.status(&run_id).await
 }
 
 pub async fn inspect(run_id: String, server: Option<String>) -> AppResult<Value> {
+    let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
     client.inspect(&run_id).await
@@ -197,6 +199,7 @@ pub async fn resume(
     provider: String,
     server: Option<String>,
 ) -> AppResult<Value> {
+    let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     if script.is_some() {
         require_shared_filesystem(&client)?;
@@ -215,6 +218,7 @@ pub async fn resume(
 }
 
 pub async fn open(run_id: String, server: Option<String>) -> AppResult<Value> {
+    let run_id = RunId::new(run_id)?;
     let client = client(server)?;
     lifecycle::ensure_ready(&client).await?;
     client.status(&run_id).await?;

@@ -59,5 +59,7 @@ mv "$pending_checksum" "$checksum"
 mv "$pending_archive" "$archive"
 trap - EXIT INT TERM
 rmdir "$lock"
+"$(dirname -- "$0")/write-homebrew-formula.sh" \
+  "$dist_root/codex-loops-$target.rb" "$version" "$target" "$hash"
 
 printf 'Created %s\n' "$archive"

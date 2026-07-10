@@ -1,5 +1,4 @@
 use std::{
-    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -14,18 +13,179 @@ use rmcp::{
     service::RequestContext,
     transport::stdio,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::{
     cli::{require_shared_filesystem, resolve_script_from},
     error::{AppError, AppResult},
     lifecycle,
-    scheduler::SchedulerClient,
+    scheduler::{RunId, SchedulerClient},
 };
 
 #[derive(Clone)]
 struct CodexLoopsServer {
     client: SchedulerClient,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+enum Provider {
+    Mock,
+    Codex,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ValidateArgs {
+    script_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct StartArgs {
+    script_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    budget: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RunArgs {
+    run_id: RunId,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct ResumeArgs {
+    run_id: RunId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script_path: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    script: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<Provider>,
+}
+
+#[derive(Debug)]
+enum ToolCall {
+    Validate(ValidateArgs),
+    Start(StartArgs),
+    Status(RunArgs),
+    Inspect(RunArgs),
+    Resume(ResumeArgs),
+    OpenUi(RunArgs),
+}
+
+impl ToolCall {
+    fn parse(name: &str, arguments: JsonObject) -> AppResult<Self> {
+        let value = Value::Object(arguments);
+        let parsed = match name {
+            "workflow_validate" => serde_json::from_value(value).map(Self::Validate),
+            "workflow_start" => serde_json::from_value(value).map(Self::Start),
+            "workflow_status" => serde_json::from_value(value).map(Self::Status),
+            "workflow_inspect" => serde_json::from_value(value).map(Self::Inspect),
+            "workflow_resume" => serde_json::from_value(value).map(Self::Resume),
+            "workflow_open_ui" => serde_json::from_value(value).map(Self::OpenUi),
+            unknown => {
+                return Err(AppError::new(
+                    2,
+                    "unknown_tool",
+                    format!("Unknown tool: {unknown}"),
+                ));
+            }
+        }
+        .map_err(|error| invalid_args(name, error.to_string()))?;
+        parsed.validate(name)?;
+        Ok(parsed)
+    }
+
+    fn validate(&self, name: &str) -> AppResult<()> {
+        let invalid = match self {
+            Self::Validate(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
+            Self::Start(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
+            Self::Start(args) if args.run_id.as_deref() == Some("") => Some("run_id"),
+            Self::Resume(args)
+                if args
+                    .script_path
+                    .as_ref()
+                    .is_some_and(|path| path.as_os_str().is_empty()) =>
+            {
+                Some("script_path")
+            }
+            Self::Resume(args)
+                if args
+                    .script
+                    .as_ref()
+                    .is_some_and(|path| path.as_os_str().is_empty()) =>
+            {
+                Some("script")
+            }
+            Self::Validate(_)
+            | Self::Start(_)
+            | Self::Status(_)
+            | Self::Inspect(_)
+            | Self::Resume(_)
+            | Self::OpenUi(_) => None,
+        };
+        match invalid {
+            Some(field) => Err(invalid_args(
+                name,
+                format!("{field} must be a non-empty string"),
+            )),
+            None => Ok(()),
+        }
+    }
+
+    fn contains_relative_script_path(&self) -> bool {
+        match self {
+            Self::Validate(args) => !args.script_path.is_absolute(),
+            Self::Start(args) => !args.script_path.is_absolute(),
+            Self::Resume(args) => args
+                .script_path
+                .iter()
+                .chain(args.script.iter())
+                .any(|path| !path.is_absolute()),
+            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => false,
+        }
+    }
+
+    fn requires_shared_filesystem(&self) -> bool {
+        match self {
+            Self::Validate(_) | Self::Start(_) => true,
+            Self::Resume(args) => args.script_path.is_some() || args.script.is_some(),
+            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => false,
+        }
+    }
+
+    fn resolve_scripts(&mut self, workspace_root: Option<&Path>) -> AppResult<()> {
+        match self {
+            Self::Validate(args) => {
+                args.script_path = resolve_script_from(&args.script_path, workspace_root)?;
+            }
+            Self::Start(args) => {
+                args.script_path = resolve_script_from(&args.script_path, workspace_root)?;
+            }
+            Self::Resume(args) => {
+                args.script_path = args
+                    .script_path
+                    .take()
+                    .map(|path| resolve_script_from(&path, workspace_root))
+                    .transpose()?;
+                args.script = args
+                    .script
+                    .take()
+                    .map(|path| resolve_script_from(&path, workspace_root))
+                    .transpose()?;
+            }
+            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => {}
+        }
+        Ok(())
+    }
 }
 
 impl CodexLoopsServer {
@@ -35,45 +195,53 @@ impl CodexLoopsServer {
         })
     }
 
-    async fn execute(&self, name: &str, args: Value) -> CallToolResult {
-        if let Err(error) = require_shared_filesystem_for_tool(&self.client, name, &args) {
+    async fn execute(&self, call: ToolCall) -> CallToolResult {
+        if call.requires_shared_filesystem()
+            && let Err(error) = require_shared_filesystem(&self.client)
+        {
             return structured_error(error.mcp_envelope());
         }
         if let Err(error) = lifecycle::ensure_ready(&self.client).await {
             return structured_error(error.mcp_envelope());
         }
 
-        let result = match name {
-            "workflow_validate" => {
+        let result = match call {
+            ToolCall::Validate(args) => {
                 self.client
-                    .validate(args["script_path"].as_str().unwrap())
+                    .validate(&args.script_path.to_string_lossy())
                     .await
             }
-            "workflow_start" => self.client.start(args).await,
-            "workflow_status" => self
+            ToolCall::Start(args) => match serde_json::to_value(args) {
+                Ok(value) => self.client.start(value).await,
+                Err(error) => Err(invalid_args("workflow_start", error.to_string())),
+            },
+            ToolCall::Status(args) => self
                 .client
-                .status(args["run_id"].as_str().unwrap())
+                .status(&args.run_id)
                 .await
                 .map(conform_projection),
-            "workflow_inspect" => self
+            ToolCall::Inspect(args) => self
                 .client
-                .inspect(args["run_id"].as_str().unwrap())
+                .inspect(&args.run_id)
                 .await
                 .map(conform_projection),
-            "workflow_resume" => {
-                let run_id = args["run_id"].as_str().unwrap().to_owned();
-                self.client
-                    .resume(&run_id, take(&args, &["script_path", "script", "provider"]))
-                    .await
+            ToolCall::Resume(args) => {
+                let run_id = args.run_id.clone();
+                match serde_json::to_value(args) {
+                    Ok(mut value) => {
+                        if let Some(object) = value.as_object_mut() {
+                            object.remove("run_id");
+                        }
+                        self.client.resume(&run_id, value).await
+                    }
+                    Err(error) => Err(invalid_args("workflow_resume", error.to_string())),
+                }
             }
-            "workflow_open_ui" => {
-                let run_id = args["run_id"].as_str().unwrap();
-                self.client
-                    .status(run_id)
-                    .await
-                    .map(|envelope| open_ui_envelope(envelope, &self.client))
-            }
-            _ => unreachable!("tool name was validated before execution"),
+            ToolCall::OpenUi(args) => self
+                .client
+                .status(&args.run_id)
+                .await
+                .map(|envelope| open_ui_envelope(envelope, &self.client)),
         };
         match result {
             Ok(value) => CallToolResult::structured(value),
@@ -102,20 +270,20 @@ impl ServerHandler for CodexLoopsServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, McpError> {
-        let args = validate_argument_shape(&request.name, request.arguments.unwrap_or_default())
+        let mut call = ToolCall::parse(&request.name, request.arguments.unwrap_or_default())
             .map_err(|error| {
                 McpError::invalid_params(error.message.to_string(), Some(*error.details))
             })?;
-        let workspace_root = if contains_relative_script_path(&args) {
+        let workspace_root = if call.contains_relative_script_path() {
             workspace_root(&context).await
         } else {
             None
         };
-        let args = match resolve_script_arguments(&request.name, args, workspace_root.as_deref()) {
-            Ok(args) => args,
+        match call.resolve_scripts(workspace_root.as_deref()) {
+            Ok(()) => {}
             Err(error) => return Ok(structured_error(error.mcp_envelope())),
-        };
-        Ok(self.execute(&request.name, args).await)
+        }
+        Ok(self.execute(call).await)
     }
 }
 
@@ -129,89 +297,6 @@ pub async fn run() -> AppResult<()> {
         .await
         .map_err(|error| AppError::new(6, "mcp_transport_failed", error.to_string()))?;
     Ok(())
-}
-
-fn validate_argument_shape(name: &str, arguments: JsonObject) -> AppResult<Value> {
-    let (allowed, required): (&[&str], &[&str]) = match name {
-        "workflow_validate" => (&["script_path"], &["script_path"]),
-        "workflow_start" => (
-            &["script_path", "run_id", "provider", "budget"],
-            &["script_path"],
-        ),
-        "workflow_status" | "workflow_inspect" | "workflow_open_ui" => (&["run_id"], &["run_id"]),
-        "workflow_resume" => (
-            &["run_id", "script_path", "script", "provider"],
-            &["run_id"],
-        ),
-        _ => {
-            return Err(AppError::new(
-                2,
-                "unknown_tool",
-                format!("Unknown tool: {name}"),
-            ));
-        }
-    };
-
-    let unknown: Vec<_> = arguments
-        .keys()
-        .filter(|key| !allowed.contains(&key.as_str()))
-        .cloned()
-        .collect();
-    if !unknown.is_empty() {
-        return Err(invalid_args(
-            name,
-            format!("Unknown arguments: {}", unknown.join(", ")),
-        ));
-    }
-    for key in required {
-        required_non_empty_string(&arguments, key)
-            .map_err(|message| invalid_args(name, message))?;
-    }
-    for key in ["run_id", "script_path", "script"] {
-        if let Some(value) = arguments.get(key)
-            && value.as_str().is_none_or(str::is_empty)
-        {
-            return Err(invalid_args(
-                name,
-                format!("{key} must be a non-empty string"),
-            ));
-        }
-    }
-    if let Some(provider) = arguments.get("provider")
-        && !matches!(provider.as_str(), Some("mock" | "codex"))
-    {
-        return Err(invalid_args(name, "provider must be mock or codex"));
-    }
-    if let Some(budget) = arguments.get("budget")
-        && budget.as_u64().is_none()
-    {
-        return Err(invalid_args(name, "budget must be a non-negative integer"));
-    }
-
-    Ok(Value::Object(arguments))
-}
-
-fn resolve_script_arguments(
-    _name: &str,
-    mut normalized: Value,
-    workspace_root: Option<&Path>,
-) -> AppResult<Value> {
-    for key in ["script_path", "script"] {
-        if let Some(raw) = normalized.get(key).and_then(Value::as_str) {
-            let path = resolve_script_from(Path::new(raw), workspace_root)?;
-            normalized[key] = Value::String(path.to_string_lossy().into_owned());
-        }
-    }
-    Ok(normalized)
-}
-
-fn contains_relative_script_path(arguments: &Value) -> bool {
-    ["script_path", "script"].iter().any(|key| {
-        arguments
-            .get(key)
-            .and_then(Value::as_str)
-            .is_some_and(|path| !Path::new(path).is_absolute())
-    })
 }
 
 #[allow(deprecated)]
@@ -234,37 +319,8 @@ async fn workspace_root(context: &RequestContext<RoleServer>) -> Option<PathBuf>
     })
 }
 
-fn required_non_empty_string(arguments: &JsonObject, key: &str) -> Result<(), String> {
-    if arguments
-        .get(key)
-        .and_then(Value::as_str)
-        .is_some_and(|value| !value.is_empty())
-    {
-        Ok(())
-    } else {
-        Err(format!("{key} must be a non-empty string"))
-    }
-}
-
 fn invalid_args(tool: &str, message: impl Into<String>) -> AppError {
     AppError::new(2, "invalid_params", message).details(json!({"tool": tool}))
-}
-
-fn require_shared_filesystem_for_tool(
-    client: &SchedulerClient,
-    name: &str,
-    arguments: &Value,
-) -> AppResult<()> {
-    if matches!(name, "workflow_validate" | "workflow_start")
-        || (name == "workflow_resume"
-            && ["script_path", "script"]
-                .iter()
-                .any(|key| arguments.get(key).is_some()))
-    {
-        require_shared_filesystem(client)
-    } else {
-        Ok(())
-    }
 }
 
 fn tools() -> Vec<Tool> {
@@ -337,19 +393,6 @@ fn schema(fields: &[(&str, &str, bool)]) -> JsonObject {
     }
     object(
         json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false}),
-    )
-}
-
-fn take(value: &Value, keys: &[&str]) -> Value {
-    let allowed: BTreeSet<_> = keys.iter().copied().collect();
-    Value::Object(
-        value
-            .as_object()
-            .into_iter()
-            .flatten()
-            .filter(|(key, _)| allowed.contains(key.as_str()))
-            .map(|(key, value)| (key.clone(), value.clone()))
-            .collect(),
     )
 }
 
@@ -432,9 +475,9 @@ mod tests {
 
     #[test]
     fn invalid_arguments_are_rejected_before_execution() {
-        let error = validate_argument_shape("workflow_start", JsonObject::new()).unwrap_err();
+        let error = ToolCall::parse("workflow_start", JsonObject::new()).unwrap_err();
         assert_eq!(error.code.as_ref(), "invalid_params");
-        let error = validate_argument_shape(
+        let error = ToolCall::parse(
             "workflow_start",
             object(json!({"script_path": "/missing", "unexpected": true})),
         )
@@ -459,19 +502,23 @@ mod tests {
     fn remote_resume_requires_shared_paths_only_when_a_script_is_supplied() {
         let client = SchedulerClient::new("https://scheduler.example.test").unwrap();
         assert!(
-            require_shared_filesystem_for_tool(
-                &client,
+            !ToolCall::parse(
                 "workflow_resume",
-                &json!({"run_id": "run-1", "provider": "mock"})
+                object(json!({"run_id": "run-1", "provider": "mock"}))
             )
-            .is_ok()
+            .unwrap()
+            .requires_shared_filesystem()
         );
-        let error = require_shared_filesystem_for_tool(
-            &client,
+        let call = ToolCall::parse(
             "workflow_resume",
-            &json!({"run_id": "run-1", "script_path": "/shared/workflow.exs"}),
+            object(json!({"run_id": "run-1", "script_path": "/shared/workflow.exs"})),
         )
-        .unwrap_err();
+        .unwrap();
+        let error = if call.requires_shared_filesystem() {
+            require_shared_filesystem(&client).unwrap_err()
+        } else {
+            panic!("resume with a script must require a shared filesystem")
+        };
         assert_eq!(
             error.code.as_ref(),
             "remote_scheduler_requires_shared_filesystem"

@@ -25,6 +25,7 @@ Codex Loops ships one immutable, versioned directory bundle:
 bin/codex-loops
 libexec/scheduler/
 share/skills/codex-loops/
+share/codex-loops/runtime.json
 ```
 
 The native control plane derives this root only from its installed executable.
@@ -36,6 +37,9 @@ CLI, persists its lexical path and exact version, installs the user skill, and
 registers the native `codex-loops mcp` command directly through `codex mcp`.
 The binding preserves symlink paths such as mise shims. A missing, moved, or
 version-changed command fails closed until installation is rerun.
+The bundle's machine-readable runtime manifest declares its package target,
+binding model, and required Codex CLI protocol; the user-specific path and
+probed version remain persisted outside the immutable artifact.
 
 The native scheduler launcher injects a normalized command tuple pointing back
 to the versioned control plane. Its private `provider-exec` boundary reloads and

@@ -322,6 +322,63 @@ esac
     assert_eq!(check["plan"], serde_json::json!([]));
 }
 
+#[cfg(unix)]
+#[test]
+fn failed_mcp_replacement_restores_the_previous_registration() {
+    let temp = tempfile::tempdir().unwrap();
+    let runtime = temp.path().join("runtime");
+    let home = temp.path().join("home");
+    let codex = temp.path().join("codex");
+    let mcp_state = temp.path().join("mcp.json");
+    runtime_bundle(&runtime);
+    fs::write(
+        &mcp_state,
+        r#"{"name":"codex-loops","transport":{"type":"stdio","command":"/old/codex-loops","args":["mcp"]}}"#,
+    )
+    .unwrap();
+    executable(
+        &codex,
+        &format!(
+            r#"#!/bin/sh
+set -eu
+state='{}'
+case "$*" in
+  "--version") echo "codex-cli 9.9.9" ;;
+  "mcp list --help") echo "--json" ;;
+  "mcp add --help") echo "-- COMMAND" ;;
+  "mcp list --json") printf '['; cat "$state"; printf ']\n' ;;
+  "mcp remove codex-loops") rm -f "$state" ;;
+  "mcp add codex-loops -- /old/codex-loops mcp")
+    printf '%s\n' '{{"name":"codex-loops","transport":{{"type":"stdio","command":"/old/codex-loops","args":["mcp"]}}}}' > "$state"
+    ;;
+  "mcp add codex-loops -- "*) echo "replacement failed" >&2; exit 7 ;;
+  *) echo "unexpected fake codex invocation: $*" >&2; exit 9 ;;
+esac
+"#,
+            mcp_state.display()
+        ),
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["install", "--codex", codex.to_str().unwrap(), "--json"])
+        .env("HOME", &home)
+        .env("CODEX_LOOPS_DEV_BUNDLE", &runtime)
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(5));
+    let error: serde_json::Value = serde_json::from_slice(&output.stderr).unwrap();
+    assert_eq!(error["error"]["code"], "codex_command_failed");
+    let restored: serde_json::Value =
+        serde_json::from_slice(&fs::read(&mcp_state).unwrap()).unwrap();
+    assert_eq!(
+        restored
+            .pointer("/transport/command")
+            .and_then(|value| value.as_str()),
+        Some("/old/codex-loops")
+    );
+}
+
 #[test]
 fn compatible_external_endpoints_support_read_and_pathless_resume_commands() {
     let cases: &[(&[&str], &str)] = &[

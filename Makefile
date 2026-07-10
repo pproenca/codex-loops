@@ -87,9 +87,11 @@ dev-bundle: release native-build
 	cp "$(NATIVE_BIN)" "$(DEV_BUNDLE_DIR)/bin/codex-loops"
 	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(DEV_BUNDLE_DIR)/libexec/scheduler/"
 	cp -R plugins/codex-loops/skills/codex-loops "$(DEV_BUNDLE_DIR)/share/skills/codex-loops"
+	scripts/write-runtime-manifest.sh "$(DEV_BUNDLE_DIR)/share/codex-loops/runtime.json" "$$(tr -d '[:space:]' < VERSION)" "$$(rustc -vV | sed -n 's/^host: //p')"
 	test -x "$(DEV_BUNDLE_DIR)/bin/codex-loops"
 	test -x "$(DEV_BUNDLE_DIR)/libexec/scheduler/bin/agent_loops"
 	test -f "$(DEV_BUNDLE_DIR)/share/skills/codex-loops/SKILL.md"
+	test -f "$(DEV_BUNDLE_DIR)/share/codex-loops/runtime.json"
 
 dist: dev-bundle
 	scripts/package-dist.sh "$(abspath $(DEV_BUNDLE_DIR))" "$(abspath $(DIST_DIR))" "$$(tr -d '[:space:]' < VERSION)"

@@ -303,7 +303,6 @@ defmodule Workflow.Status do
     tick(%{s | state: :completed, result: p.value})
   end
 
-<<<<<<< HEAD
   defp apply_known_event(%Event{type: :run_failed, payload: p}, s) do
     tick(%{s | state: :failed, failure: %{address: nil, iteration: 0, attempts: 0, reason: {:run_crashed, p.reason}}})
   end
@@ -633,9 +632,6 @@ defmodule Workflow.Status do
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)
-=======
-  defp apply_event(%Event{}, s), do: tick(s)
->>>>>>> codex/run-inspector-followups
 
   defp tick(%__MODULE__{} = s), do: %{s | event_count: s.event_count + 1}
 

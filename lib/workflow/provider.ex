@@ -30,7 +30,6 @@ defmodule Workflow.Provider do
   alias Workflow.Provider.Usage
 
   @type result :: term()
-<<<<<<< HEAD
   @type failure_kind :: :quota_exceeded | :model_limit | :timeout | :unavailable | :backend
   @type failure_detail ::
           nil
@@ -48,11 +47,6 @@ defmodule Workflow.Provider do
             optional(:status) => String.t()
           }
         ]
-=======
-  @type activity_key :: :kind | :label | :summary | :status | String.t()
-  @type activity_entry :: %{optional(activity_key()) => term()}
-  @type activity :: [activity_entry()]
->>>>>>> codex/run-inspector-followups
 
   @callback run_agent(
               prompt :: String.t(),

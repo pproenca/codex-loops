@@ -1,4 +1,8 @@
-use std::{collections::BTreeMap, fs, path::{Path, PathBuf}};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde_json::json;
 
@@ -115,4 +119,3 @@ fn skill_error(error: std::io::Error) -> InstallError {
     )
     .details(json!({"reason": error.to_string()}))
 }
-

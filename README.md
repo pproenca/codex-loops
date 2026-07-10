@@ -47,14 +47,14 @@ test -x _build/prod/rel/agent_loops/bin/agent_loops
 The normal manual path has no required configuration:
 
 ```sh
-codex-loops serve
 codex-loops run .codex/workflows/codex_answer.exs --open
 ```
 
-`serve` starts the local scheduler at `http://127.0.0.1:47125` using the
-default journal at `~/.codex/workflows/runs_1.sqlite`. `run` validates the
-script, generates a run ID, uses the live Codex provider, prints the LiveView
-URL, and opens it when `--open` is present. Stop the managed scheduler with:
+`run` starts the managed local scheduler when needed, validates the script,
+generates a run ID, uses the live Codex provider, prints the LiveView URL, and
+opens it when `--open` is present. The scheduler defaults to
+`http://127.0.0.1:47125` and `~/.codex/workflows/runs_1.sqlite`. Stop it later
+with:
 
 ```sh
 codex-loops stop

@@ -3,6 +3,7 @@ defmodule Workflow.CLI.ServeCommand do
 
   import Bitwise, only: [band: 2]
 
+  alias Workflow.CLI
   alias Workflow.MCP.SchedulerClient
 
   @default_host "127.0.0.1"
@@ -31,7 +32,7 @@ defmodule Workflow.CLI.ServeCommand do
 
   @spec stop([String.t()], keyword()) :: result()
   def stop(args, opts \\ []) do
-    with {:ok, config} <- parse(args),
+    with {:ok, config} <- parse_stop(args),
          {:ok, scheduler_bin} <- scheduler_bin(opts),
          {:ok, stopped?} <- ensure_stopped(scheduler_bin, config, opts) do
       {:ok,
@@ -47,6 +48,28 @@ defmodule Workflow.CLI.ServeCommand do
     end
   end
 
+  defp parse_stop(args) do
+    {flags, positional, invalid} = OptionParser.parse(args, strict: [json: :boolean])
+
+    cond do
+      invalid != [] ->
+        usage_error("Unknown stop option: #{invalid |> hd() |> elem(0)}", :stop)
+
+      positional != [] ->
+        usage_error("stop does not accept positional arguments.", :stop)
+
+      true ->
+        {:ok,
+         %{
+           host: @default_host,
+           port: @default_port,
+           journal: nil,
+           model: nil,
+           json?: flags[:json] || false
+         }}
+    end
+  end
+
   defp parse(args) do
     {flags, positional, invalid} =
       OptionParser.parse(args,
@@ -58,16 +81,16 @@ defmodule Workflow.CLI.ServeCommand do
 
     cond do
       invalid != [] ->
-        usage_error("Unknown serve option: #{invalid |> hd() |> elem(0)}")
+        usage_error("Unknown serve option: #{invalid |> hd() |> elem(0)}", :serve)
 
       positional != [] ->
-        usage_error("serve does not accept positional arguments.")
+        usage_error("serve does not accept positional arguments.", :serve)
 
       not valid_host?(host) ->
-        usage_error("--host must be an IP address or localhost.")
+        usage_error("--host must be an IP address or localhost.", :serve)
 
       port not in 1..65_535 ->
-        usage_error("--port must be between 1 and 65535.")
+        usage_error("--port must be between 1 and 65535.", :serve)
 
       true ->
         {:ok,
@@ -90,7 +113,7 @@ defmodule Workflow.CLI.ServeCommand do
     if executable?(candidate) do
       {:ok, Path.expand(candidate)}
     else
-      error(
+      CLI.error(
         6,
         "runtime_invalid",
         "The packaged scheduler was not found. Build or reinstall Codex Loops first.",
@@ -134,7 +157,15 @@ defmodule Workflow.CLI.ServeCommand do
 
   defp ensure_running(scheduler_bin, config, opts) do
     if healthy?(config, opts) do
-      {:ok, false}
+      if runtime_overrides?(config) do
+        CLI.error(
+          2,
+          "scheduler_already_running",
+          "Codex Loops is already running, so --journal and --model cannot be applied. Stop it first with: codex-loops stop"
+        )
+      else
+        {:ok, false}
+      end
     else
       with :ok <- command(scheduler_bin, "daemon", config, opts),
            :ok <- wait_for(config, opts, & &1) do
@@ -144,15 +175,13 @@ defmodule Workflow.CLI.ServeCommand do
   end
 
   defp ensure_stopped(scheduler_bin, config, opts) do
-    if healthy?(config, opts) do
-      with :ok <- command(scheduler_bin, "stop", config, opts),
-           :ok <- wait_for(config, opts, &(not &1)) do
-        {:ok, true}
-      end
-    else
-      {:ok, false}
+    case command(scheduler_bin, "stop", config, opts) do
+      :ok -> {:ok, true}
+      {:error, _status, _error} = failure -> if healthy?(config, opts), do: failure, else: {:ok, false}
     end
   end
+
+  defp runtime_overrides?(config), do: config.journal not in [nil, ""] or config.model not in [nil, ""]
 
   defp command(scheduler_bin, action, config, opts) do
     runner = Keyword.get(opts, :command, &System.cmd/3)
@@ -190,7 +219,7 @@ defmodule Workflow.CLI.ServeCommand do
   defp command_status(0, _output), do: :ok
 
   defp command_status(status, output) do
-    error(6, "scheduler_start_failed", "The scheduler exited unexpectedly.", %{
+    CLI.error(6, "scheduler_start_failed", "The scheduler exited unexpectedly.", %{
       status: status,
       output: String.trim(output)
     })
@@ -199,7 +228,7 @@ defmodule Workflow.CLI.ServeCommand do
   defp wait_for(config, opts, predicate, attempts \\ 100)
 
   defp wait_for(_config, _opts, _predicate, 0) do
-    error(6, "scheduler_timeout", "The scheduler did not reach the expected lifecycle state.")
+    CLI.error(6, "scheduler_timeout", "The scheduler did not reach the expected lifecycle state.")
   end
 
   defp wait_for(config, opts, predicate, attempts) do
@@ -219,15 +248,7 @@ defmodule Workflow.CLI.ServeCommand do
     end
   end
 
-  defp server_url(config), do: "http://#{format_host(config.host)}:#{config.port}"
-
-  defp format_host(host) do
-    if String.contains?(host, ":") and not String.starts_with?(host, "[") do
-      "[" <> host <> "]"
-    else
-      host
-    end
-  end
+  defp server_url(config), do: SchedulerClient.local_base_url(config.host, config.port)
 
   defp valid_host?("localhost"), do: true
 
@@ -248,13 +269,11 @@ defmodule Workflow.CLI.ServeCommand do
   defp maybe_put(env, _key, ""), do: env
   defp maybe_put(env, key, value), do: [{key, value} | env]
 
-  defp usage_error(message), do: error(2, "usage", message <> "\n\n" <> usage())
+  defp usage_error(message, command), do: CLI.error(2, "usage", message <> "\n\n" <> usage(command))
 
-  defp error(status, code, message, details \\ nil) do
-    {:error, status, %{ok: false, changed: false, code: code, message: message, details: details, step: nil}}
-  end
-
-  defp usage do
+  defp usage(:serve) do
     "Usage: codex-loops serve [--host HOST] [--port PORT] [--journal PATH] [--model MODEL]"
   end
+
+  defp usage(:stop), do: "Usage: codex-loops stop"
 end

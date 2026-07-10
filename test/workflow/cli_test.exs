@@ -65,6 +65,58 @@ defmodule Workflow.CLITest do
       assert start_request =~ ~s("run_id":"answer-test-run")
       assert start_request =~ Jason.encode!(script)
     end
+
+    @tag :tmp_dir
+    test "starts a missing local scheduler before launching the workflow", %{tmp_dir: tmp_dir} do
+      script = Path.join(tmp_dir, "answer.exs")
+      scheduler_bin = Path.join(tmp_dir, "agent_loops")
+      File.write!(script, "workflow fixture")
+      File.write!(scheduler_bin, "#!/bin/sh\nexit 0\n")
+      File.chmod!(scheduler_bin, 0o755)
+
+      unhealthy = %{
+        "api_version" => "scheduler.v1",
+        "data" => %{"status" => "ok", "version" => "not-ready"}
+      }
+
+      healthy = %{
+        "api_version" => "scheduler.v1",
+        "data" => %{"status" => "ok", "version" => @version}
+      }
+
+      validation = %{
+        "api_version" => "scheduler.v1",
+        "data" => %{"valid" => true, "workflow_name" => "answer", "script" => %{"path" => script}}
+      }
+
+      started = %{
+        "api_version" => "scheduler.v1",
+        "data" => %{"run_id" => "answer-autostart", "state" => "accepted"}
+      }
+
+      server_url = serve_http([unhealthy, unhealthy, healthy, validation, started])
+      parent = self()
+
+      command = fn executable, args, opts ->
+        send(parent, {:scheduler_command, executable, args, opts})
+        {"", 0}
+      end
+
+      assert {:ok, result} =
+               CLI.run(["run", script, "--server", server_url],
+                 scheduler_bin: scheduler_bin,
+                 command: command,
+                 announce: fn _server -> :ok end,
+                 run_id: fn _script -> "answer-autostart" end
+               )
+
+      assert result.run_id == "answer-autostart"
+      assert_received {:scheduler_command, ^scheduler_bin, ["daemon"], command_opts}
+
+      assert {"CODEX_LOOPS_PORT", server_url |> URI.parse() |> Map.fetch!(:port) |> Integer.to_string()} in command_opts[
+               :env
+             ]
+    end
   end
 
   describe "serve" do
@@ -100,6 +152,31 @@ defmodule Workflow.CLITest do
       assert {"PORT", "47125"} in command_opts[:env]
       assert {"RELEASE_DISTRIBUTION", "sname"} in command_opts[:env]
       assert {"RELEASE_NODE", "codex_loops"} in command_opts[:env]
+    end
+
+    @tag :tmp_dir
+    test "rejects runtime overrides that cannot affect an existing scheduler", %{tmp_dir: tmp_dir} do
+      scheduler_bin = Path.join(tmp_dir, "agent_loops")
+      File.write!(scheduler_bin, "#!/bin/sh\nexit 0\n")
+      File.chmod!(scheduler_bin, 0o755)
+
+      assert {:error, 2, error} =
+               CLI.run(["serve", "--journal", "/tmp/other.sqlite"],
+                 scheduler_bin: scheduler_bin,
+                 health: fn -> :ok end,
+                 announce: fn _server -> flunk("serve must fail before announcing") end
+               )
+
+      assert error.code == "scheduler_already_running"
+      assert error.message =~ "cannot be applied"
+      assert error.message =~ "codex-loops stop"
+    end
+
+    test "stop rejects serve-only options" do
+      assert {:error, 2, error} = CLI.run(["stop", "--model", "gpt-example"])
+      assert error.code == "usage"
+      assert error.message =~ "Unknown stop option"
+      assert error.message =~ "Usage: codex-loops stop"
     end
 
     @tag :tmp_dir

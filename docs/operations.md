@@ -149,22 +149,24 @@ surface remains the LiveView URL returned by `workflow_open_ui`.
 ## Manual CLI Run
 
 For a normal interactive run, start the managed local scheduler and launch the
-workflow directly. No environment variables or raw HTTP calls are required:
+workflow directly with one command. No environment variables or raw HTTP calls
+are required:
 
 ```sh
-codex-loops serve
 codex-loops run .codex/workflows/codex_answer.exs --open
 ```
 
 The CLI defaults to `127.0.0.1:47125`, the standard user journal, a generated
-run ID, and the live `codex` provider. `run` validates before starting and
-prints the LiveView URL even without `--open`.
+run ID, and the live `codex` provider. `run` validates before starting, prints
+the LiveView URL even without `--open`, and starts the managed scheduler when
+the local endpoint is not already healthy.
 
 ```sh
 codex-loops stop
 ```
 
-Configuration is progressively disclosed through `serve --host`, `--port`,
+Use `codex-loops serve` when you want to start or customize the scheduler
+separately. Configuration is progressively disclosed through `serve --host`, `--port`,
 `--journal`, and `--model`, or `run --provider`, `--run-id`, and `--server`.
 
 ## Manual MCP Smoke

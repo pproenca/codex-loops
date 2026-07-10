@@ -1,5 +1,5 @@
 defmodule Workflow.CLI do
-  @moduledoc "User-facing setup command for the Homebrew-owned Codex Loops runtime."
+  @moduledoc "User-facing command dispatcher for installing, serving, and running Codex Loops."
 
   import Bitwise, only: [band: 2]
 
@@ -47,7 +47,7 @@ defmodule Workflow.CLI do
     :ok
   end
 
-  @doc "Runs the installer contract without halting the VM."
+  @doc "Runs one user CLI command without halting the VM."
   @spec run([String.t()], keyword()) :: result()
   def run(args, opts \\ [])
 
@@ -469,7 +469,8 @@ defmodule Workflow.CLI do
 
   defp usage_error(message), do: error(2, "usage", message <> "\n\n" <> help())
 
-  defp error(status, code, message, details \\ nil, step \\ nil) do
+  @doc false
+  def error(status, code, message, details \\ nil, step \\ nil) do
     {:error, status, %{ok: false, changed: false, code: code, message: message, details: details, step: step}}
   end
 

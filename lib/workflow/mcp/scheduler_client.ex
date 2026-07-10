@@ -31,6 +31,23 @@ defmodule Workflow.MCP.SchedulerClient do
     end
   end
 
+  @spec local?(config()) :: boolean()
+  def local?(%{protocol: "http:", host: host}) do
+    host in ["localhost", "127.0.0.1", "::1"] or String.starts_with?(host, "127.")
+  end
+
+  def local?(_config), do: false
+
+  @spec local_base_url(String.t(), pos_integer()) :: String.t()
+  def local_base_url(host, port) when is_binary(host) and is_integer(port) and port > 0 do
+    "http://" <> format_host(host) <> ":#{port}"
+  end
+
+  @spec run_ui_url(String.t(), keyword()) :: String.t()
+  def run_ui_url(run_id, opts \\ []) when is_binary(run_id) do
+    config(opts).base_url <> "/runs/" <> path_segment(run_id)
+  end
+
   @spec health(keyword()) :: {:ok, map()} | {:error, String.t()}
   def health(opts \\ []) do
     case request(:get, "/api/health", nil, opts) do

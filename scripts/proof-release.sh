@@ -212,12 +212,25 @@ assert_contains "$ui" "scheduler-release-proof" "run UI renders workflow project
 echo "-- run workflow through user CLI"
 cli_run_id="${run_id}_cli"
 cli_output="$tmpdir/cli-run.txt"
-"$release_cli" run "$workflow" \
+open_log="$tmpdir/open-url.txt"
+open_stub="$tmpdir/open-url"
+cat >"$open_stub" <<'EOF'
+#!/bin/sh
+set -eu
+printf '%s' "$1" >"$CODEX_LOOPS_OPEN_LOG"
+EOF
+chmod 755 "$open_stub"
+
+CODEX_LOOPS_OPEN_BIN="$open_stub" \
+  CODEX_LOOPS_OPEN_LOG="$open_log" \
+  "$release_cli" run "$workflow" \
   --provider mock \
   --run-id "$cli_run_id" \
-  --server "$base_url" >"$cli_output"
+  --server "$base_url" \
+  --open >"$cli_output"
 assert_contains "$cli_output" "Run accepted: $cli_run_id" "CLI reports accepted run"
 assert_contains "$cli_output" "UI: $base_url/runs/$cli_run_id" "CLI reports LiveView URL"
+assert_contains "$open_log" "$base_url/runs/$cli_run_id" "CLI opens the LiveView URL"
 
 cli_status="$tmpdir/cli-status.json"
 for _ in $(seq 1 100); do

@@ -31,8 +31,9 @@ User CLI:
 
 - `codex-loops serve` starts or discovers the managed local scheduler at
   `127.0.0.1:47125` by default
-- `codex-loops run WORKFLOW.exs` validates and starts a generated-ID live Codex
-  run; `--open` launches the LiveView run page
+- `codex-loops run WORKFLOW.exs` starts a missing managed local scheduler,
+  validates the workflow, and starts a generated-ID live Codex run; `--open`
+  launches the LiveView run page
 - `codex-loops stop` stops the managed local scheduler
 - host, port, journal, model, provider, run ID, and scheduler URL customization
   are optional flags rather than required environment setup

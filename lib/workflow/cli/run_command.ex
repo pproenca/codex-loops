@@ -1,6 +1,8 @@
 defmodule Workflow.CLI.RunCommand do
   @moduledoc "Runs one workflow through the public scheduler API."
 
+  alias Workflow.CLI
+  alias Workflow.CLI.ServeCommand
   alias Workflow.MCP.SchedulerClient
 
   @type result :: {:ok, map()} | {:error, 1..6, map()}
@@ -10,7 +12,7 @@ defmodule Workflow.CLI.RunCommand do
     with {:ok, input} <- parse(args),
          {:ok, script_path} <- script_path(input.script),
          client_opts = client_opts(input.server),
-         :ok <- scheduler_ready(client_opts),
+         :ok <- scheduler_ready(client_opts, opts),
          {:ok, _validation} <- scheduler_result(SchedulerClient.validate_workflow(script_path, client_opts)),
          run_id = input.run_id || run_id(script_path, opts),
          {:ok, started} <- start(script_path, run_id, input.provider, client_opts),
@@ -67,22 +69,35 @@ defmodule Workflow.CLI.RunCommand do
     if File.regular?(expanded) do
       {:ok, expanded}
     else
-      error(2, "script_not_found", "Workflow script does not exist: #{expanded}", %{script_path: expanded})
+      CLI.error(2, "script_not_found", "Workflow script does not exist: #{expanded}", %{script_path: expanded})
     end
   end
 
-  defp scheduler_ready(client_opts) do
+  defp scheduler_ready(client_opts, opts) do
     case SchedulerClient.health(client_opts) do
       {:ok, _payload} ->
         :ok
 
       {:error, reason} ->
-        error(
-          6,
-          "scheduler_unavailable",
-          "Codex Loops is not running. Start it with: codex-loops serve",
-          %{reason: reason, server: SchedulerClient.config(client_opts).base_url}
-        )
+        start_local_scheduler(client_opts, opts, reason)
+    end
+  end
+
+  defp start_local_scheduler(client_opts, opts, health_error) do
+    config = SchedulerClient.config(client_opts)
+
+    if SchedulerClient.local?(config) do
+      case ServeCommand.run(["--host", config.host, "--port", Integer.to_string(config.port)], opts) do
+        {:ok, _result} -> :ok
+        {:error, _status, _error} = failure -> failure
+      end
+    else
+      CLI.error(
+        6,
+        "scheduler_unavailable",
+        "The configured scheduler is not reachable and cannot be started locally.",
+        %{reason: health_error, server: config.base_url}
+      )
     end
   end
 
@@ -95,7 +110,7 @@ defmodule Workflow.CLI.RunCommand do
   defp scheduler_result({:ok, payload}), do: {:ok, payload}
 
   defp scheduler_result({:scheduler_error, %{"error" => scheduler_error}}) do
-    error(
+    CLI.error(
       4,
       scheduler_error["code"] || "scheduler_error",
       scheduler_error["message"] || "The scheduler rejected the request.",
@@ -104,14 +119,14 @@ defmodule Workflow.CLI.RunCommand do
   end
 
   defp scheduler_result({:unexpected, status, payload}) do
-    error(6, "scheduler_response", "The scheduler returned an unexpected response.", %{
+    CLI.error(6, "scheduler_response", "The scheduler returned an unexpected response.", %{
       status: status,
       payload: payload
     })
   end
 
   defp scheduler_result({:error, reason}) do
-    error(6, "scheduler_unavailable", "Could not reach the Codex Loops scheduler.", %{reason: reason})
+    CLI.error(6, "scheduler_unavailable", "Could not reach the Codex Loops scheduler.", %{reason: reason})
   end
 
   defp run_id(script_path, opts) do
@@ -133,7 +148,7 @@ defmodule Workflow.CLI.RunCommand do
   end
 
   defp ui_url(client_opts, run_id) do
-    SchedulerClient.config(client_opts).base_url <> "/runs/" <> path_segment(run_id)
+    SchedulerClient.run_ui_url(run_id, client_opts)
   end
 
   defp maybe_open(_url, false, _opts), do: {:ok, false, nil}
@@ -148,7 +163,9 @@ defmodule Workflow.CLI.RunCommand do
   end
 
   defp open_url(url) do
-    command = if match?({:unix, :darwin}, :os.type()), do: "open", else: "xdg-open"
+    command =
+      System.get_env("CODEX_LOOPS_OPEN_BIN") ||
+        if(match?({:unix, :darwin}, :os.type()), do: "open", else: "xdg-open")
 
     case System.find_executable(command) do
       nil -> {:error, "#{command} was not found on PATH"}
@@ -162,18 +179,7 @@ defmodule Workflow.CLI.RunCommand do
   defp client_opts(nil), do: []
   defp client_opts(server), do: [base_url: server]
 
-  defp path_segment(value), do: URI.encode(value, &path_segment_unreserved?/1)
-
-  defp path_segment_unreserved?(character)
-       when character in ?a..?z or character in ?A..?Z or character in ?0..?9 or character in [?-, ?., ?_, ?~], do: true
-
-  defp path_segment_unreserved?(_character), do: false
-
-  defp usage_error(message), do: error(2, "usage", message <> "\n\n" <> usage())
-
-  defp error(status, code, message, details \\ nil) do
-    {:error, status, %{ok: false, changed: false, code: code, message: message, details: details, step: nil}}
-  end
+  defp usage_error(message), do: CLI.error(2, "usage", message <> "\n\n" <> usage())
 
   defp usage do
     "Usage: codex-loops run WORKFLOW.exs [--open] [--provider codex|mock] [--run-id ID] [--server URL]"

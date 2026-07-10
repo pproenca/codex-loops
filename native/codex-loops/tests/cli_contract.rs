@@ -77,6 +77,46 @@ fn doctor_fails_when_the_packaged_runtime_is_invalid() {
 }
 
 #[test]
+fn source_checkout_discovers_the_built_scheduler_without_installation_environment() {
+    let checkout = tempfile::tempdir().unwrap();
+    fs::write(checkout.path().join("mix.exs"), "source checkout").unwrap();
+    fs::create_dir_all(checkout.path().join("native/codex-loops")).unwrap();
+    fs::write(
+        checkout.path().join("native/codex-loops/Cargo.toml"),
+        "source checkout",
+    )
+    .unwrap();
+    let scheduler = checkout
+        .path()
+        .join("_build/prod/rel/agent_loops/bin/agent_loops");
+    fs::create_dir_all(scheduler.parent().unwrap()).unwrap();
+    fs::write(&scheduler, "source checkout scheduler").unwrap();
+
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let server = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+
+    let output = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
+        .args(["doctor", "--json"])
+        .current_dir(checkout.path())
+        .env_remove("CODEX_LOOPS_SCHEDULER_BIN")
+        .env_remove("CODEX_LOOPS_RUNTIME_ROOT")
+        .env("CODEX_LOOPS_SCHEDULER_URL", server)
+        .output()
+        .expect("run doctor from source checkout");
+
+    assert_eq!(output.status.code(), Some(1));
+    assert!(output.stdout.is_empty());
+    let error: serde_json::Value =
+        serde_json::from_slice(&output.stderr).expect("JSON error on stderr");
+    assert_eq!(error["error"]["code"], "scheduler_stopped");
+    assert_eq!(
+        error["error"]["details"]["scheduler_bin"],
+        scheduler.canonicalize().unwrap().to_string_lossy().as_ref()
+    );
+}
+
+#[test]
 fn invalid_scheduler_port_never_falls_back_to_the_default() {
     let output = Command::new(env!("CARGO_BIN_EXE_codex-loops"))
         .args(["doctor", "--json"])

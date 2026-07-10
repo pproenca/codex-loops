@@ -8,12 +8,15 @@ reachable.
 
 ## Install
 
+The Homebrew tap is not published yet. For a local clone, build the native
+control plane and scheduler first:
+
 ```bash
-brew install pproenca/codex-loops/codex-loops
-codex-loops install
+make build
+make release
 ```
 
-For a local clone:
+Then install the source plugin:
 
 ```bash
 codex plugin marketplace add .
@@ -28,8 +31,8 @@ Run a workflow and watch its LiveView without configuring environment
 variables or calling the HTTP API directly:
 
 ```bash
-codex-loops run .codex/workflows/codex_answer.exs --open
-codex-loops stop
+./native/codex-loops/target/release/codex-loops run .codex/workflows/codex_answer.exs --open
+./native/codex-loops/target/release/codex-loops stop
 ```
 
 The defaults are the local scheduler at `127.0.0.1:47125`, the standard user

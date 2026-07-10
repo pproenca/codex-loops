@@ -628,7 +628,8 @@ pub fn scheduler_bin() -> AppResult<PathBuf> {
                 .ok()
                 .filter(|value| !value.is_empty())
                 .map(|root| PathBuf::from(root).join("scheduler/bin/agent_loops"))
-        });
+        })
+        .or_else(source_checkout_scheduler_bin);
     match candidate {
         Some(path) if path.is_file() => Ok(path),
         Some(path) => Err(AppError::new(
@@ -639,8 +640,20 @@ pub fn scheduler_bin() -> AppResult<PathBuf> {
         .details(json!({"scheduler_bin": path}))),
         None => Err(
             AppError::new(6, "runtime_invalid", "Codex Loops runtime was not found.")
-                .next_steps(["Run `brew reinstall pproenca/codex-loops/codex-loops`."]),
+                .next_steps(["From a source checkout, run `make build && make release`."]),
         ),
+    }
+}
+
+fn source_checkout_scheduler_bin() -> Option<PathBuf> {
+    let root = env::current_dir().ok()?;
+    let mix_project = root.join("mix.exs");
+    let native_project = root.join("native/codex-loops/Cargo.toml");
+
+    if mix_project.is_file() && native_project.is_file() {
+        Some(root.join("_build/prod/rel/agent_loops/bin/agent_loops"))
+    } else {
+        None
     }
 }
 

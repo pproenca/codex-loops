@@ -8,19 +8,18 @@ workers, Phoenix PubSub/LiveView, and the SQLite journal.
 
 The packaged `agent_loops` Mix release owns only the scheduler. One native
 binary is installed as `codex-loops` for users and `codex-loops-mcp` for Codex
-stdio. The source-only plugin discovers that runtime through Homebrew.
+stdio. The source-checkout CLI discovers the adjacent built scheduler release;
+the source-only plugin uses the packaged runtime layout during CI and future
+distribution.
 
-## Install
+## Source Checkout
 
-The release install path is:
+The Homebrew tap is not published yet. Build the current checkout with:
 
 ```sh
-brew install pproenca/codex-loops/codex-loops
-codex-loops install
+make build
+make release
 ```
-
-The tap is published as a separate release step. Until the first public formula
-is published, use the development path below.
 
 ## Development
 
@@ -42,7 +41,7 @@ self-contained scheduler; `make native-build` produces the control plane.
 The normal manual path has no required configuration:
 
 ```sh
-codex-loops run .codex/workflows/codex_answer.exs --open
+./native/codex-loops/target/release/codex-loops run .codex/workflows/codex_answer.exs --open
 ```
 
 `run` starts the managed local scheduler when needed, validates the script,
@@ -52,16 +51,16 @@ opens it when `--open` is present. The scheduler defaults to
 with:
 
 ```sh
-codex-loops stop
+./native/codex-loops/target/release/codex-loops stop
 ```
 
 Customize only when needed:
 
 ```sh
-codex-loops serve --port 48100 --journal /tmp/loops.sqlite --model gpt-5.5
-codex-loops run workflow.exs --provider mock --run-id dry-run --server http://127.0.0.1:48100
-codex-loops logs --port 48100
-codex-loops restart --port 48100
+./native/codex-loops/target/release/codex-loops serve --port 48100 --journal /tmp/loops.sqlite --model gpt-5.5
+./native/codex-loops/target/release/codex-loops run workflow.exs --provider mock --run-id dry-run --server http://127.0.0.1:48100
+./native/codex-loops/target/release/codex-loops logs --port 48100
+./native/codex-loops/target/release/codex-loops restart --port 48100
 ```
 
 Use `codex-loops serve --foreground` for container/process-manager integration.

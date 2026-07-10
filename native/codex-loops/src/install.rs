@@ -28,7 +28,7 @@ pub struct Options {
 pub fn run(options: Options) -> AppResult<Value> {
     let runtime = runtime().map_err(|error| {
         AppError::new(6, "runtime_invalid", error.to_string())
-            .next_steps(["Run `brew reinstall pproenca/codex-loops/codex-loops`."])
+            .next_steps(["From a source checkout, run `make build && make release`."])
     })?;
     let codex = which::which("codex").map_err(|_| {
         AppError::new(3, "codex_missing", "Codex CLI was not found on PATH.")

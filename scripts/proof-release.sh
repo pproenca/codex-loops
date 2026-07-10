@@ -5,18 +5,17 @@ repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 release_ctl="$repo_root/_build/prod/rel/agent_loops/bin/agent_loops"
 release_cli="$repo_root/native/codex-loops/target/release/codex-loops"
 package_version="$(tr -d '[:space:]' < "$repo_root/VERSION")"
-CODEX_LOOPS_SCHEDULER_BIN="$release_ctl"
-export CODEX_LOOPS_SCHEDULER_BIN
+cd "$repo_root"
 
 if [ ! -x "$release_ctl" ]; then
   echo "release control script not found: $release_ctl" >&2
-  echo "run: make native-build" >&2
+  echo "run: make release" >&2
   exit 2
 fi
 
 if [ ! -x "$release_cli" ]; then
   echo "release CLI not found: $release_cli" >&2
-  echo "run: make release" >&2
+  echo "run: make build" >&2
   exit 2
 fi
 

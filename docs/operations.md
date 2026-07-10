@@ -101,7 +101,7 @@ workflow directly with one command. No environment variables or raw HTTP calls
 are required:
 
 ```sh
-codex-loops run .codex/workflows/codex_answer.exs --open
+./native/codex-loops/target/release/codex-loops run .codex/workflows/codex_answer.exs --open
 ```
 
 The CLI defaults to `127.0.0.1:47125`, the standard user journal, a generated
@@ -110,7 +110,7 @@ the LiveView URL even without `--open`, and starts the managed scheduler when
 the local endpoint is not already healthy.
 
 ```sh
-codex-loops stop
+./native/codex-loops/target/release/codex-loops stop
 ```
 
 Use `codex-loops serve` when you want to start or customize the scheduler
@@ -142,8 +142,8 @@ Power-user lifecycle controls use the same host/port identity and honor
 ```sh
 codex-loops logs --lines 500
 codex-loops restart --journal /tmp/isolated.sqlite
-codex-loops serve --foreground
-codex-loops stop --force
+./native/codex-loops/target/release/codex-loops serve --foreground
+./native/codex-loops/target/release/codex-loops stop --force
 ```
 
 `--foreground` is intended for an external process manager and exits on

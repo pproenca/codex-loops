@@ -43,8 +43,8 @@ For a user-driven manual run from the shell, prefer the progressive CLI over
 environment variables or raw HTTP calls:
 
 ```bash
-codex-loops run .codex/workflows/<name>.exs --open
-codex-loops stop
+./native/codex-loops/target/release/codex-loops run .codex/workflows/<name>.exs --open
+./native/codex-loops/target/release/codex-loops stop
 ```
 
 The defaults are the local scheduler, standard journal, generated run ID, and

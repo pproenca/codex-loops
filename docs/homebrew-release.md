@@ -1,6 +1,6 @@
 # Homebrew Release
 
-The user install path is:
+The following user install path is planned but not published yet:
 
 ```sh
 brew install pproenca/codex-loops/codex-loops

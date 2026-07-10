@@ -25,6 +25,18 @@
       "skillPath": "skills/.experimental/language-spec-author/SKILL.md",
       "computedHash": "0e531f2bedb3394e9ec3536335e923128cf5204d4be2a8bf68bf959a7b6d3394"
     },
+    "rust-implement": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.curated/rust-implement/SKILL.md",
+      "computedHash": "3fc36da94bab98d0cbcc460a7c713b366accfe6a637d67f76a3b4a2cda3c9fdb"
+    },
+    "rust-refactor": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.curated/rust-refactor/SKILL.md",
+      "computedHash": "f7f8e5d6b292b908edac066e318ec7af15a1b17b0346e7028dcfd2e271f83d9d"
+    },
     "setup-matt-pocock-skills": {
       "source": "mattpocock/skills",
       "sourceType": "github",

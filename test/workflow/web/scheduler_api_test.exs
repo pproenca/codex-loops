@@ -5,10 +5,15 @@ defmodule Workflow.Web.SchedulerAPITest do
   import Phoenix.ConnTest
   import Plug.Conn, only: [put_req_header: 3]
 
+<<<<<<< HEAD
   alias Workflow.Journal
   alias Workflow.Provider.Mock
   alias Workflow.Run
   alias Workflow.Script
+=======
+  alias Workflow.Provider.Usage
+  alias Workflow.{Event, IdempotencyKey, Journal, Run, Script}
+>>>>>>> codex/run-inspector-followups
   alias Workflow.Test.GateProvider
 
   @endpoint Workflow.Web.Endpoint
@@ -347,6 +352,35 @@ defmodule Workflow.Web.SchedulerAPITest do
   end
 
   defp run_id(prefix), do: "#{prefix}_#{System.unique_integer([:positive])}"
+
+  defp usage(input_tokens \\ 1, output_tokens \\ 1),
+    do: %Usage{
+      input_tokens: input_tokens,
+      output_tokens: output_tokens,
+      total_tokens: input_tokens + output_tokens
+    }
+
+  defp inspector_tree(name \\ "scheduler-api-inspector"),
+    do: %Workflow.Tree{name: name, nodes: []}
+
+  defp inspector_phase(name),
+    do: %Workflow.Node.Phase{address: [0], name: name}
+
+  defp inspector_agent(address, prompt),
+    do: %Workflow.Node.Agent{address: address, prompt: prompt}
+
+  defp idempotency_key(run_id, address, iteration),
+    do: %IdempotencyKey{run_id: run_id, node_path: address, iteration: iteration}
+
+  defp append_events(run_id, events) do
+    :ok = Journal.register_run(run_id)
+
+    events
+    |> Enum.with_index()
+    |> Enum.each(fn {%Event{} = event, seq} ->
+      :ok = Journal.append(run_id, seq, %{event | run_id: run_id, seq: seq})
+    end)
+  end
 
   defp await_lease_released(run_id, tries \\ 200) do
     cond do
@@ -753,6 +787,353 @@ defmodule Workflow.Web.SchedulerAPITest do
              %{"seq" => 3, "type" => "agent_committed", "address" => [2]},
              %{"seq" => 4, "type" => "run_completed"}
            ] = events
+  end
+
+  test "GET /api/runs/:id/events tolerates unknown journal events without exposing payloads" do
+    id = run_id("scheduler_api_events_unknown")
+    agent = inspector_agent([2], "known work")
+
+    append_events(id, [
+      Event.run_started(inspector_tree(), nil, "/tmp/inspector_unknown.exs"),
+      Event.phase_entered(inspector_phase("build")),
+      %Event{
+        type: :future_event,
+        payload: %{
+          address: [999],
+          private: "must-not-leak",
+          raw: %{"type" => "codex.private"}
+        }
+      },
+      Event.agent_committed(
+        agent,
+        0,
+        idempotency_key(id, [2], 0),
+        %{"label" => "ok"},
+        usage()
+      ),
+      Event.run_completed(:ok)
+    ])
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+
+    assert %{
+             "data" => %{
+               "run_id" => ^id,
+               "events" => events,
+               "inspector" => inspector
+             }
+           } = json_response(conn, 200)
+
+    assert Enum.map(events, & &1["type"]) == [
+             "run_started",
+             "phase_entered",
+             "future_event",
+             "agent_committed",
+             "run_completed"
+           ]
+
+    assert %{"seq" => 2, "type" => "future_event", "address" => [999]} = Enum.at(events, 2)
+    assert Enum.all?(events, &(Map.drop(&1, ["address", "seq", "type"]) == %{}))
+    assert inspector["event_count"] == 5
+    assert [%{"id" => "agent-2-i0"}] = inspector["agents"]
+    refute inspect(events) =~ "must-not-leak"
+    refute inspect(inspector) =~ "codex.private"
+  end
+
+  test "GET /api/runs/:id includes inspector-grade successful agent activity" do
+    id = run_id("scheduler_api_inspector_success")
+    agent = inspector_agent([2], "ship with activity")
+
+    append_events(id, [
+      Event.run_started(inspector_tree(), nil, "/tmp/inspector_success.exs"),
+      Event.phase_entered(inspector_phase("build")),
+      Event.agent_committed(
+        agent,
+        0,
+        idempotency_key(id, [2], 0),
+        %{"label" => "done"},
+        usage(3, 5),
+        [
+          %{
+            "kind" => "tool",
+            "label" => "Runner",
+            "summary" => "built successfully",
+            "status" => "completed",
+            "raw" => %{"type" => "item.completed"}
+          }
+        ]
+      ),
+      Event.run_completed(:ok)
+    ])
+
+    conn = get(json_conn(), "/api/runs/#{id}")
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "data" => %{
+               "run_id" => ^id,
+               "state" => "completed",
+               "agent_count" => 1,
+               "event_count" => 4,
+               "usage" => %{
+                 "input_tokens" => 3,
+                 "output_tokens" => 5,
+                 "total_tokens" => 8
+               },
+               "inspector" => inspector
+             }
+           } = json_response(conn, 200)
+
+    assert %{
+             "run_id" => ^id,
+             "event_count" => 4,
+             "usage" => %{
+               "input_tokens" => 3,
+               "output_tokens" => 5,
+               "total_tokens" => 8
+             },
+             "failure" => nil,
+             "rejected_attempts" => [],
+             "failed_rejected_attempts" => []
+           } = inspector
+
+    assert [
+             %{
+               "id" => "phase-0",
+               "name" => "build",
+               "address" => [0],
+               "agents" => [phase_agent]
+             }
+           ] = inspector["phases"]
+
+    assert [projected_agent] = inspector["agents"]
+    assert projected_agent == phase_agent
+
+    expected_idempotency_key = %{
+      "run_id" => id,
+      "node_path" => [2],
+      "iteration" => 0,
+      "attempt" => 0
+    }
+
+    assert projected_agent["idempotency_key"] == expected_idempotency_key
+    assert phase_agent["idempotency_key"] == expected_idempotency_key
+
+    assert %{
+             "id" => "agent-2-i0",
+             "slug" => "ship-with-activity-i0",
+             "address" => [2],
+             "iteration" => 0,
+             "idempotency_key" => ^expected_idempotency_key,
+             "prompt" => "ship with activity",
+             "outcome" => %{"label" => "done"},
+             "result" => %{"label" => "done"},
+             "usage" => %{
+               "input_tokens" => 3,
+               "output_tokens" => 5,
+               "total_tokens" => 8
+             },
+             "activity" => [
+               %{
+                 "kind" => "tool",
+                 "label" => "Runner",
+                 "summary" => "built successfully",
+                 "status" => "completed"
+               }
+             ],
+             "phase_id" => "phase-0",
+             "phase_name" => "build"
+           } = projected_agent
+
+    refute Map.has_key?(hd(projected_agent["activity"]), "raw")
+    refute inspect(inspector) =~ "item.completed"
+  end
+
+  test "GET /api/runs/:id/events includes rejected attempts without raw payload dumps" do
+    id = run_id("scheduler_api_inspector_rejected")
+    agent = inspector_agent([1], "classify")
+
+    append_events(id, [
+      Event.run_started(inspector_tree(), nil, "/tmp/inspector_rejected.exs"),
+      Event.phase_entered(inspector_phase("review")),
+      Event.agent_attempt_rejected(
+        agent,
+        0,
+        0,
+        %{"bad" => true},
+        {:missing_required, "label"},
+        usage(1, 2),
+        [
+          %{
+            kind: :tool,
+            label: "Validator",
+            summary: "missing label",
+            status: :rejected,
+            transcript: [%{"type" => "raw-jsonl"}]
+          }
+        ]
+      ),
+      Event.agent_committed(
+        agent,
+        0,
+        idempotency_key(id, [1], 0),
+        %{"label" => "accepted"},
+        usage(2, 3)
+      ),
+      Event.run_completed(:ok)
+    ])
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+
+    assert %{
+             "api_version" => "scheduler.v1",
+             "data" => %{
+               "run_id" => ^id,
+               "events" => events,
+               "inspector" => inspector
+             }
+           } = json_response(conn, 200)
+
+    assert Enum.all?(events, &(Map.drop(&1, ["address", "seq", "type"]) == %{}))
+
+    assert [
+             %{
+               "id" => "rejection-1-i0-a0",
+               "address" => [1],
+               "iteration" => 0,
+               "attempt" => 0,
+               "prompt" => "classify",
+               "output" => %{"bad" => true},
+               "reason" => "{:missing_required, \"label\"}",
+               "activity" => [
+                 %{
+                   "kind" => "tool",
+                   "label" => "Validator",
+                   "summary" => "missing label",
+                   "status" => "rejected"
+                 }
+               ],
+               "phase_id" => "phase-0",
+               "phase_name" => "review"
+             }
+           ] = inspector["rejected_attempts"]
+
+    assert inspector["failed_rejected_attempts"] == []
+    refute inspect(events) =~ "missing label"
+    refute inspect(inspector["rejected_attempts"]) =~ "raw-jsonl"
+  end
+
+  test "GET /api/runs/:id/events exposes failed rejected-only attempts" do
+    id = run_id("scheduler_api_inspector_failed_rejected")
+    agent = inspector_agent([1], "loop work")
+
+    append_events(id, [
+      Event.run_started(inspector_tree(), nil, "/tmp/inspector_failed.exs"),
+      Event.phase_entered(inspector_phase("loop")),
+      Event.agent_committed(
+        agent,
+        0,
+        idempotency_key(id, [1], 0),
+        %{"label" => "first"},
+        usage()
+      ),
+      Event.agent_attempt_rejected(
+        agent,
+        1,
+        0,
+        %{"bad" => 1},
+        {:missing_required, "label"},
+        usage(),
+        [%{kind: "tool", label: "Validator", summary: "failed iteration", status: "rejected"}]
+      ),
+      Event.agent_failed(agent, 1, 1, {:missing_required, "label"})
+    ])
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+
+    assert %{
+             "data" => %{
+               "run_id" => ^id,
+               "inspector" => %{
+                 "failure" => %{
+                   "address" => [1],
+                   "attempts" => 1,
+                   "reason" => "{:missing_required, \"label\"}"
+                 },
+                 "agents" => [%{"id" => "agent-1-i0"}],
+                 "failed_rejected_attempts" => failed_rejections
+               }
+             }
+           } = json_response(conn, 200)
+
+    assert [
+             %{
+               "id" => "rejection-1-i1-a0",
+               "address" => [1],
+               "iteration" => 1,
+               "attempt" => 0,
+               "prompt" => "loop work",
+               "output" => %{"bad" => 1},
+               "reason" => "{:missing_required, \"label\"}",
+               "activity" => [
+                 %{
+                   "kind" => "tool",
+                   "label" => "Validator",
+                   "summary" => "failed iteration",
+                   "status" => "rejected"
+                 }
+               ]
+             }
+           ] = failed_rejections
+  end
+
+  test "GET /api/runs/:id/events handles legacy committed and rejected events with empty activity" do
+    id = run_id("scheduler_api_inspector_legacy_activity")
+
+    legacy_rejected = %Event{
+      type: :agent_attempt_rejected,
+      payload: %{
+        address: [1],
+        iteration: 0,
+        attempt: 0,
+        prompt: "legacy",
+        output: %{"bad" => true},
+        reason: {:missing_required, "label"},
+        usage: usage()
+      }
+    }
+
+    legacy_committed = %Event{
+      type: :agent_committed,
+      payload: %{
+        address: [1],
+        iteration: 0,
+        idempotency_key: idempotency_key(id, [1], 0),
+        prompt: "legacy",
+        result: %{"label" => "ok"},
+        usage: usage()
+      }
+    }
+
+    append_events(id, [
+      Event.run_started(inspector_tree(), nil, "/tmp/inspector_legacy.exs"),
+      Event.phase_entered(inspector_phase("legacy")),
+      legacy_rejected,
+      legacy_committed,
+      Event.run_completed(:ok)
+    ])
+
+    conn = get(json_conn(), "/api/runs/#{id}/events")
+
+    assert %{
+             "data" => %{
+               "inspector" => %{
+                 "agents" => [%{"activity" => []}],
+                 "rejected_attempts" => [%{"activity" => []}],
+                 "failed_rejected_attempts" => []
+               }
+             }
+           } = json_response(conn, 200)
   end
 
   test "GET /api/runs/:id/events returns a typed not-found error for unknown runs" do

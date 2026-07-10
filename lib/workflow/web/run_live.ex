@@ -20,11 +20,15 @@ defmodule Workflow.Web.RunLive do
   """
   use Phoenix.LiveView
 
+<<<<<<< HEAD
   alias Workflow.Event
   alias Workflow.Run.Stream, as: RunStream
   alias Workflow.Scheduler
   alias Workflow.Scheduler.RunProjection
   alias Workflow.Status
+=======
+  alias Workflow.{RunInspector, Status}
+>>>>>>> codex/run-inspector-followups
 
   @refresh_ms 1_000
 
@@ -70,6 +74,7 @@ defmodule Workflow.Web.RunLive do
 
   # The single point where state enters the socket: one scheduler-owned snapshot.
   defp assign_projection(socket, run_id) do
+<<<<<<< HEAD
     %{status: status, run_projection: run_projection} = scheduler_snapshot(run_id)
     assign_projection(socket, run_id, status, run_projection)
   end
@@ -92,19 +97,31 @@ defmodule Workflow.Web.RunLive do
       user_focused_phase_id ||
         valid_phase_id(status, status.current_phase_id) ||
         first_phase_id(status)
+=======
+    status = Status.of(run_id)
+    inspector = RunInspector.from_status(status)
+>>>>>>> codex/run-inspector-followups
 
-    agent_id =
-      valid_agent_id(status, phase_id, socket.assigns[:selected_agent_id]) ||
-        first_agent_id(status, phase_id)
+    selection =
+      RunInspector.selection(
+        inspector,
+        socket.assigns[:focused_phase_id],
+        socket.assigns[:selected_agent_id]
+      )
 
     assign(socket,
       run_id: run_id,
       status: status,
+<<<<<<< HEAD
       run_projection: run_projection,
       focused_phase_id: phase_id,
       user_focused_phase_id: user_focused_phase_id,
       selected_agent_id: agent_id
+=======
+      inspector: inspector
+>>>>>>> codex/run-inspector-followups
     )
+    |> assign_selection(selection)
   end
 
   defp scheduler_snapshot(run_id) do
@@ -117,6 +134,7 @@ defmodule Workflow.Web.RunLive do
   defp schedule_refresh, do: Process.send_after(self(), :refresh, @refresh_ms)
 
   defp focus_phase(socket, phase_id) do
+<<<<<<< HEAD
     status = socket.assigns.status
     phase_id = valid_phase_id(status, phase_id) || first_phase_id(status)
 
@@ -130,11 +148,29 @@ defmodule Workflow.Web.RunLive do
   defp select_agent(socket, phase_id, agent_id) do
     status = socket.assigns.status
     phase_id = valid_phase_id(status, phase_id) || socket.assigns.focused_phase_id
+=======
+    socket.assigns.inspector
+    |> RunInspector.selection(phase_id, nil)
+    |> then(&assign_selection(socket, &1))
+  end
 
+  defp select_agent(socket, agent_id) do
+    socket.assigns.inspector
+    |> RunInspector.selection(socket.assigns.focused_phase_id, agent_id)
+    |> then(&assign_selection(socket, &1))
+  end
+>>>>>>> codex/run-inspector-followups
+
+  defp assign_selection(socket, %{focused_phase_id: phase_id, selected_agent_id: agent_id}) do
     assign(socket,
       focused_phase_id: phase_id,
+<<<<<<< HEAD
       user_focused_phase_id: phase_id,
       selected_agent_id: valid_agent_id(status, phase_id, agent_id) || first_agent_id(status, phase_id)
+=======
+      selected_agent_id: agent_id,
+      inspector_detail: RunInspector.detail(socket.assigns.inspector, phase_id, agent_id)
+>>>>>>> codex/run-inspector-followups
     )
   end
 
@@ -159,6 +195,7 @@ defmodule Workflow.Web.RunLive do
     <link rel="stylesheet" href="/assets/codex-loops/run.css?v=3" />
     <main id="run" data-run-id={@run_id}>
       <header data-testid="run-header">
+<<<<<<< HEAD
         <p class="product-label">Codex Loops <span>Run monitor</span></p>
         <h1>{@run_projection.tree_name || "Run"}</h1>
         <section data-testid="status-strip" class="status-strip" aria-label="Run status">
@@ -234,6 +271,55 @@ defmodule Workflow.Web.RunLive do
                 aria-pressed={phase.id == @focused_phase_id}
                 aria-expanded={to_string(phase.id == @focused_phase_id)}
                 aria-controls={"phase-agents-" <> phase.id}
+=======
+        <h1>{@status.tree_name || "Run"} <code data-testid="run-id">{@run_id}</code></h1>
+        <dl>
+          <dt>state</dt>
+          <dd data-testid="run-state">{@status.state}</dd>
+          <dt :if={@status.tree_name}>workflow</dt>
+          <dd :if={@status.tree_name} data-testid="tree-name">{@status.tree_name}</dd>
+          <dt :if={@status.phase}>phase</dt>
+          <dd :if={@status.phase} data-testid="phase">{@status.phase}</dd>
+          <dt>agents</dt>
+          <dd data-testid="agent-count">{plural_count(length(@inspector.agents), "agent")}</dd>
+          <dt>tokens</dt>
+          <dd data-testid="usage">{@status.usage.total_tokens}</dd>
+          <dt>events</dt>
+          <dd data-testid="event-count">{@status.event_count}</dd>
+        </dl>
+      </header>
+
+      <section data-testid="inspector">
+        <nav data-testid="phase-list" aria-label="Phases">
+          <button
+            :for={phase <- @inspector.phases}
+            type="button"
+            phx-click="focus_phase"
+            phx-value-id={phase.id}
+            data-testid="phase-item"
+            aria-pressed={phase.id == @focused_phase_id}
+          >
+            {phase.name} ({length(phase.agents)})
+          </button>
+          <p :if={@inspector.phases == []}>No phases yet</p>
+        </nav>
+
+        <section data-testid="agents">
+          <% agents = @inspector_detail.agents %>
+          <h2>Agents ({length(agents)})</h2>
+          <ol data-testid="phase-agents">
+            <li
+              :for={agent <- agents}
+              data-address={inspect(agent.address)}
+              data-iteration={agent.iteration}
+              data-testid={"phase-agent-#{agent.slug}"}
+            >
+              <button
+                type="button"
+                phx-click="select_agent"
+                phx-value-id={agent.id}
+                aria-pressed={agent.id == @selected_agent_id}
+>>>>>>> codex/run-inspector-followups
               >
                 <span class="phase-main">
                   <span class="phase-name">{phase.name}</span>
@@ -314,6 +400,7 @@ defmodule Workflow.Web.RunLive do
         </nav>
 
         <section data-testid="agent-detail">
+<<<<<<< HEAD
           <% agent = selected_agent(@status, @focused_phase_id, @selected_agent_id) %>
           <% active_agent = active_agent(@status) %>
           <% rejections = detail_rejections(@status, @focused_phase_id, @selected_agent_id) %>
@@ -384,6 +471,27 @@ defmodule Workflow.Web.RunLive do
               </div>
               <p :if={agent.activity == []}>No activity recorded</p>
             </details>
+=======
+          <% agent = @inspector_detail.agent %>
+          <% rejections = @inspector_detail.rejected_attempts %>
+          <% failed_rejections = @inspector_detail.failed_rejected_attempts %>
+          <%= if agent do %>
+            <h2>Agent {inspect(agent.address)}</h2>
+            <p>iteration {agent.iteration}</p>
+            <h3>Prompt</h3>
+            <pre>{agent.prompt}</pre>
+            <h3>Activity</h3>
+            <ol>
+              <li :for={entry <- agent.activity}>
+                <strong>{entry.label}</strong>
+                <span :if={entry.status}> {entry.status}</span>
+                <span :if={entry.summary}> {entry.summary}</span>
+              </li>
+            </ol>
+            <p :if={agent.activity == []}>No activity recorded</p>
+            <h3>Outcome</h3>
+            <pre>{inspect(agent.outcome)}</pre>
+>>>>>>> codex/run-inspector-followups
           <% else %>
             <p :if={rejections == []}>No agent selected</p>
           <% end %>
@@ -397,9 +505,9 @@ defmodule Workflow.Web.RunLive do
                 <pre>{inspect(rejection.output)}</pre>
                 <ol :if={rejection.activity != []}>
                   <li :for={entry <- rejection.activity}>
-                    <strong>{activity_label(entry)}</strong>
-                    <span :if={activity_status(entry)}> {activity_status(entry)}</span>
-                    <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
+                    <strong>{entry.label}</strong>
+                    <span :if={entry.status}> {entry.status}</span>
+                    <span :if={entry.summary}> {entry.summary}</span>
                   </li>
                 </ol>
                 <p :if={rejection.activity == []}>No activity recorded</p>
@@ -416,9 +524,9 @@ defmodule Workflow.Web.RunLive do
                 <pre>{inspect(rejection.output)}</pre>
                 <ol :if={rejection.activity != []}>
                   <li :for={entry <- rejection.activity}>
-                    <strong>{activity_label(entry)}</strong>
-                    <span :if={activity_status(entry)}> {activity_status(entry)}</span>
-                    <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
+                    <strong>{entry.label}</strong>
+                    <span :if={entry.status}> {entry.status}</span>
+                    <span :if={entry.summary}> {entry.summary}</span>
                   </li>
                 </ol>
                 <p :if={rejection.activity == []}>No activity recorded</p>
@@ -455,6 +563,7 @@ defmodule Workflow.Web.RunLive do
     """
   end
 
+<<<<<<< HEAD
   defp first_phase_id(%Status{phases: [%{id: id} | _]}), do: id
   defp first_phase_id(%Status{}), do: nil
 
@@ -662,6 +771,8 @@ defmodule Workflow.Web.RunLive do
   defp phase_label(""), do: "No phase"
   defp phase_label(phase), do: phase
 
+=======
+>>>>>>> codex/run-inspector-followups
   defp plural_count(1, word), do: "1 #{word}"
   defp plural_count(count, word), do: "#{count} #{plural_word(word)}"
 
@@ -674,6 +785,7 @@ defmodule Workflow.Web.RunLive do
   end
 
   defp csrf_token, do: Plug.CSRFProtection.get_csrf_token()
+<<<<<<< HEAD
 
   defp agent_title(%{label: label}) when is_binary(label) and label != "", do: label
 
@@ -850,4 +962,6 @@ defmodule Workflow.Web.RunLive do
   defp blank?(nil), do: true
   defp blank?(""), do: true
   defp blank?(_value), do: false
+=======
+>>>>>>> codex/run-inspector-followups
 end

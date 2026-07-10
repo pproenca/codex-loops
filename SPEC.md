@@ -1591,7 +1591,12 @@ partial progress**:
   failure.** In `parallel`/`pipeline`/`verify`/`judge`/`fan_out` the provider call runs
   off-thread inside `BuildAgent`/`RunLane`/`ScoreLane`, whose result contract is only
   `{:ok, …}` or the schema-`{:failed, …}` lane result (§6.9). A **provider-level** crash —
+<<<<<<< HEAD
   `CallProvider` returning malformed data, raising, or exiting (§6.4.1) — is
+=======
+  `CallProvider` returning a shape that cannot normalize to `{:ok, output, usage, activity}`
+  or raising (§6.4.1) — is
+>>>>>>> codex/run-inspector-followups
   **not** a schema `{:failed, …}`: it is not caught and converted, it **propagates** off the
   lane task and **crashes the live writer**, exactly as a top-level provider crash does.
   Because the region commits nothing until every lane result is gathered and `CommitLanes`
@@ -1903,12 +1908,16 @@ ResolveIdempotency(events, node_path, iteration):
 ```
 CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Let {key} be IdempotencyKey(run_id, node.address, iteration, attempt).
+<<<<<<< HEAD
   - Let {provider_outcome} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
   - If {provider_outcome} is {:provider_failure, kind, detail, usage, activity}:
     - Let {reason} be {:provider_failure, kind, detail}.
     - Let {ctx} be Commit(Event.agent_failed(node, iteration, attempt + 1, reason, usage, activity), ctx).
     - Return {:halt, ctx, {:provider_failure, node.address, kind, detail}}.
   - Otherwise {provider_outcome} is {:ok, output, usage, activity}.
+=======
+  - Let {:ok, output, usage, activity} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
+>>>>>>> codex/run-inspector-followups
   - If {node.schema} is nil:                                 ; schemaless
     - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, output, usage, activity), ctx).
     - Return {:cont, ctx with last_result = output}.
@@ -1916,7 +1925,12 @@ CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - If {v} is {:ok, validated}:
     - Let {ctx} be Commit(Event.agent_committed(node, iteration, key, validated, usage, activity), ctx).
     - Return {:cont, ctx with last_result = validated}.
+<<<<<<< HEAD
   - Let {ctx} be Commit(Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity), ctx).
+=======
+  - If {v} is {:error, reason}:
+    - Let {ctx} be Commit(Event.agent_attempt_rejected(node, iteration, attempt, output, reason, usage, activity), ctx).
+>>>>>>> codex/run-inspector-followups
   - If {attempt} < node.retries:
     - Return CommitAttempt(node, run_id, provider, iteration, attempt + 1, ctx).  ; recurse with the advanced cursor
   - Let {ctx} be Commit(Event.agent_failed(node, iteration, attempt + 1, reason, nil, []), ctx).
@@ -1944,13 +1958,28 @@ deterministic runner and a non-deterministic backend:
 
 ```
 CallProvider({module, opts}, prompt, schema, key):
+<<<<<<< HEAD
   - Let {raw} be module.run_agent(prompt, schema, key, opts).
   - Return NormalizeProviderOutcome(raw).
+=======
+  - Let {r} be module.run_agent(prompt, schema, key, opts).
+  - Return NormalizeProviderResult(r).
+```
+
+```
+NormalizeProviderResult(r):
+  - If {r} is {:ok, result, usage}:
+    - Return {:ok, result, usage, []}.
+  - If {r} is {:ok, result, usage, activity}:
+    - Return {:ok, result, usage, activity}.
+  - Return {r}.        ; the caller hard-matches {:ok, result, usage, activity}; otherwise provider crash
+>>>>>>> codex/run-inspector-followups
 ```
 
 - **Inputs.** `prompt :: String.t()` (this node's literal prompt — never a splice of any
   other node's output), `schema :: map() | nil` (the node's JSON-schema map, or `nil` for a
   schemaless turn), `key :: IdempotencyKey` (§6.5), and the backend-specific `opts`.
+<<<<<<< HEAD
 - **Provider return.** A conforming backend MUST return either a `ProviderSuccess` or an
   `ExpectedProviderFailure`.
 
@@ -2052,6 +2081,41 @@ CallProvider({module, opts}, prompt, schema, key):
   structured-output strictness; it does not mutate `%Agent{schema}` in the inert tree, and
   the writer still validates the returned value against the original schema map.
 - **Turn independence and idempotency.** Because `CallProvider` receives only `(prompt, schema, key,
+=======
+- **Success return.** A conforming backend MUST return either legacy
+  `{:ok, result, usage}` or activity-bearing `{:ok, result, usage, activity}`. `result` is
+  the decoded provider output (`term()`; for a schema-bound turn a decoded JSON value — a
+  map, list, or scalar), `usage` is a `%Usage{input_tokens, output_tokens, total_tokens}`
+  of non-negative integers, and `activity` is an ordered list of provider activity-entry
+  maps (§7.3.1). The runner MUST normalize the legacy 3-tuple to
+  `{:ok, result, usage, []}` and MUST pass a 4-tuple's `activity` through to the
+  `agent_committed` or `agent_attempt_rejected` journal event for the same paid attempt.
+  The runner **hard-matches** the normalized `{:ok, output, usage, activity}`: `CallProvider`
+  returning any other shape (an `{:error, …}` tuple, a network failure, a raised exception)
+  is **not** a schema-validation failure and is **not** retried. It crashes the live writer,
+  which the caller observes via its monitor as `{:error, {:run_crashed, reason}}` (§6.1,
+  §7.4) — mapped to exit 1 (or exit 130 when `reason` is `:killed`) per §7.5.
+  Fail-closed retry (§6.4) applies **only** to a successful call whose `output` fails
+  `Schema.Validate`; a provider-level failure is a crash, not a retry.
+- **Activity normalization boundary.** Provider activity is normalized at the provider
+  boundary, then preserved until the inspector projection. A provider that consumes a
+  backend-specific event stream MUST translate that stream to provider activity-entry maps
+  before returning; the Codex provider, specifically, MUST fold raw `codex exec` JSONL
+  events into activity entries and MUST NOT return raw JSONL lines or maps as `activity`.
+  Generic richer providers that use the 4-tuple form MUST return an ordered List whose
+  members are maps shaped like activity entries: public keys `kind`, `label`, `summary`,
+  and `status` MAY be atom or string keys, values are display values coerced by the
+  inspector's `Text`/`OptionalText` rules (§7.3.1), and omitted display fields are defaulted
+  only by `NormalizeActivityEntry` (§7.3.1). Providers MUST NOT use `activity` to return
+  raw Codex JSONL, provider-private envelopes, or backend transcripts; they MUST either
+  summarize such data into the public fields or omit it. The writer MUST journal the
+  activity list it receives for the same paid attempt without normalizing it. The Status
+  fold MUST preserve that journaled list, defaulting absent legacy event keys to `[]`, and
+  MUST NOT coerce keys or display fields. The run inspector projection is the only read
+  surface that normalizes activity key shape and default display fields, and it exposes
+  only the normalized entry fields.
+- **Turn independence.** Because `CallProvider` receives only `(prompt, schema, key,
+>>>>>>> codex/run-inspector-followups
   opts)`, no conversation state, thread, or prior result is carried between turns. Every
   agent turn is independent; all context an agent needs MUST be present in its own literal
   prompt (Principle 6). A backend MUST use `key` as its request-idempotency key so a
@@ -2066,7 +2130,11 @@ CallProvider({module, opts}, prompt, schema, key):
 
 | callback | signature | required? | when called |
 |---|---|---|---|
+<<<<<<< HEAD
 | `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> ProviderSuccess \| ExpectedProviderFailure` | **REQUIRED** | once per paid attempt (§6.4) |
+=======
+| `c:run_agent/4` | `run_agent(prompt, schema, key, opts) -> {:ok, result, usage} \| {:ok, result, usage, activity}` | **REQUIRED** | once per paid attempt (§6.4) |
+>>>>>>> codex/run-inspector-followups
 | `c:validate_config/1` | `validate_config(opts) -> :ok \| {:error, reason}` | OPTIONAL | once, **pre-run**, during `ResolveProvider` |
 
 **Provider resolution (pre-run gate, exit 4).** Before the run starts — before
@@ -2091,11 +2159,19 @@ The two failure classes are **disjoint and pinned**:
   configuration — an API key, endpoint, model id — is absent or invalid). No `run_started`
   is committed; no lease is taken. A provider with **no** `validate_config/1` is treated as
   `:ok` at this gate (it can only fail later, at call time).
+<<<<<<< HEAD
 - **Call-time provider outcome.** A provider that **resolved** may later return an
   `ExpectedProviderFailure`; that is handled as data by §6.4 and is **never** an exit-4
   `provider-config` failure. A provider that returns any other malformed shape or raises
   (§6.4.1, `NormalizeProviderOutcome`) crashes the live writer mid-run and surfaces as
   `{:error, {:run_crashed, reason}}` ⇒ exit 1, or 130 when `reason` is `:killed`.
+=======
+- **Call-time (`{:error, {:run_crashed, reason}}` ⇒ exit 1, or 130 when `reason` is
+  `:killed`).** A provider that **resolved** but whose `run_agent/4` later returns a shape
+  that cannot normalize to `{:ok, result, usage, activity}` or raises (§6.4.1, "Success
+  return"). This crashes the live writer mid-run and is **never** an exit-4
+  `provider-config` failure.
+>>>>>>> codex/run-inspector-followups
 
 An **absent or `nil`** `:provider` option is neither of the above: it is a caller misuse of
 the run API (a missing REQUIRED option, §7.6), reported as `{:error, {:usage, :provider}}`
@@ -3053,10 +3129,16 @@ additive log policy in §7.1.
 | `:run_started` | `tree_name, tree_version, node_count, budget, script_path` (no address) |
 | `:phase_entered` | `address, name` |
 | `:log_emitted` | `address, message` |
+<<<<<<< HEAD
 | `:agent_committed` | `address, iteration, idempotency_key, label, prompt, result, usage, activity` |
 | `:agent_activity` | `address, iteration, attempt, activity_index, label, prompt, entry` |
 | `:agent_attempt_rejected` | `address, iteration, attempt, label, prompt, output, reason, usage, activity` |
 | `:agent_failed` | `address, iteration, attempts, reason, usage, activity` (last event for a top-level fail; `usage`/`activity` are `nil`/`[]` for schema exhaustion and provider-supplied for expected provider failures; inside a concurrent region later lane events may follow it in seq order — the run's halt reason is the **first** `agent_failed` (§6.1), while the Status fold's `failure` is the **last** `agent_failed` in seq order (§7.3)) |
+=======
+| `:agent_committed` | `address, iteration, idempotency_key, prompt, result, usage, activity` |
+| `:agent_attempt_rejected` | `address, iteration, attempt, prompt, output, reason, usage, activity` |
+| `:agent_failed` | `address, iteration, attempts, reason` (last event for a top-level fail; inside a concurrent region later lane events may follow it in seq order — the run's halt reason is the **first** `agent_failed` (§6.1), while the Status fold's `failure` is the **last** `agent_failed` in seq order (§7.3)) |
+>>>>>>> codex/run-inspector-followups
 | `:parallel_started` / `:parallel_completed` | `address, branch_count` / `address` |
 | `:pipeline_started` / `:pipeline_completed` | `address, items, item_count, stage_count` / `address` |
 | `:iteration_started` | `address, iteration` |
@@ -3112,6 +3194,7 @@ Payload-value pins (each is observable output, so it is normative):
   §7.3 `agents` projection both carry this map as-is. Because it is observable output, two
   conforming implementations journal byte-identical `idempotency_key` maps for the same
   effect.
+<<<<<<< HEAD
 - **`agent_committed.label` / `agent_activity.label` / `agent_attempt_rejected.label`** are
   the `%Agent{label}` string or `nil`. A label is display metadata only (§3.2, Rule 5.3.6):
   it MUST NOT affect prompts, schemas, keys, validation, retry, control flow, or results.
@@ -3130,6 +3213,17 @@ Payload-value pins (each is observable output, so it is normative):
   attempt has already been journaled as `agent_attempt_rejected`. Expected provider failures
   write the provider-supplied normalized `usage` and `activity` from §6.4.1 so failed turns
   remain visible in token/tool accounting.
+=======
+- **`agent_committed.activity` and `agent_attempt_rejected.activity`** are ordered
+  provider-normalized activity-entry lists for that exact paid attempt (§6.4.1, §7.3.1).
+  They are **activity protocol data**, not raw Codex JSONL, not provider-specific event
+  blobs, and not a live stream of in-progress tool calls. A writer that receives legacy
+  provider success
+  `{:ok, result, usage}` MUST journal `activity: []` for the attempt. A fold over an older
+  schema-1 journal event that lacks the `activity` key MUST behave as if the key were present
+  with `[]`. The writer records the provider activity list on the event field; it does not
+  coerce keys, fill display defaults, or wrap the list in a provider-private envelope.
+>>>>>>> codex/run-inspector-followups
 
 `run_completed` is the terminal success event; on failure the terminal event is
 `agent_failed`, `loop_exhausted`, `fanout_failed`, `refine_non_converged`, or
@@ -3155,6 +3249,7 @@ over the journal (it consults no process state). `state` transitions:
                                     --refine_input_invalid--> :failed
 ```
 
+<<<<<<< HEAD
 The fold accumulates `logs`, `agents`, `rejected`, `accumulators`, `verifications`,
 `judgments`, `refines`, `usage` (summed from `agent_committed`, `agent_attempt_rejected`,
 `agent_failed` with usage, and `refine_role_failed` with usage), `tool_activity` (ordered
@@ -3168,11 +3263,39 @@ full §7.5 projection additionally exposes `agents`, `rejected`, `verifications`
 `judgments`, `refines`, `toolActivity`, and `rawRefs` for inspect/status clients that need
 the data behind the counts. Each is an **ordered list
 appended in `seq` order** (one entry per matching event, in the order the fold visits them):
+=======
+The fold accumulates `phases`, `logs`, `agents`, `rejected`, `accumulators`,
+`verifications`, `judgments`, `usage` (summed only from `agent_committed` and
+`agent_attempt_rejected` — rejections still pay), and sets `result = value` on
+`run_completed`. Every folded journal event increments `event_count`. Unknown/new event
+types MUST be accepted by the fold, MUST increment `event_count`, and MUST leave every
+other `Workflow.Status` field unchanged. This preserves the open event discriminator in
+§7.1 while keeping resume/status/inspector reads total over additive logs.
 
+**List-projection shapes (pinned).** These projections live in the `Workflow.Status` struct
+returned by `Workflow.Status.of/1` (§7.6) and feed the inspector projection (§7.3.1). Of
+them, **only `logs` (verbatim) and `agentCount = length(agents)`** surface in the §7.5
+run-projection envelope; the `phases`, `agents`, `rejected`, `verifications`, and
+`judgments` lists are **not** envelope fields — they are reachable only through the
+`Workflow.Status` struct and derived inspector projection (§7.3.1). Each is an **ordered
+list appended in `seq` order** (one entry per matching event, in the order the fold visits
+them):
+>>>>>>> codex/run-inspector-followups
+
+- **`phases`** is an ordered list of phase groups. On each `phase_entered`, the fold appends
+  `%{id, name, address, agents}` where `id = "phase-" <> decimal(length(phases_before))`,
+  `name = payload.name`, `address = payload.address`, and `agents = []`; it also sets
+  `current_phase_id` to that `id` and `phase` to `name`. If an `agent_committed` or
+  `agent_attempt_rejected` is folded before any `phase_entered`, the fold first creates one
+  implicit group `%{id: "phase-default", name: "Default phase", address: nil, agents: []}`
+  and sets `current_phase_id` to `"phase-default"`. This implicit group is journal-derived
+  read-model state; it is not a journal event and it does not change the envelope `phase`
+  field, which remains `nil` until a `phase_entered` event is folded.
 - **`logs`** is an ordered list of **bare `message` strings** — exactly the `log_emitted`
   payload's `message` binary (§7.2), **not** a map. On each `log_emitted` the fold appends
   `payload.message`. (Because a body `log` commits at most once per address, §6.3, a loop
   emits one entry, not one per iteration.)
+<<<<<<< HEAD
 - **`agents`** is an ordered list of agent projections. `agent_activity` upserts a
   `:running` projection so long-running turns are visible before they commit. On
   `agent_committed`, the fold upserts the same `(address, iteration)` projection with
@@ -3188,6 +3311,22 @@ appended in `seq` order** (one entry per matching event, in the order the fold v
   *(Proposed §10 — dataflow: a proposed extension pins the projected `prompt` — and the `agent_committed.prompt` / `agent_attempt_rejected.prompt` payload keys (§7.2) — to the rendered `String.t()`, never an inert `%Template{}`; see §10.)*
 - **`rejected`** is an ordered list appending, on each `agent_attempt_rejected`, the map
   `%{address, iteration, attempt, label, prompt, output, reason, activity}`.
+=======
+- **`agents`** is an ordered list appending, on each `agent_committed`, the map
+  `%{address, iteration, prompt, result, usage, idempotency_key, activity, phase_id,
+  phase_name}`. `activity` is `payload.activity` when present and `[]` when absent; it is
+  normalized by the inspector projection (§7.3.1), not by this status fold. `phase_id` and
+  `phase_name` are the current phase group's `id` and `name` after the implicit/default phase
+  rule above, and the same agent map is appended to that phase group's `agents` list.
+  `agentCount` in the envelope (§7.5) is exactly `length(agents)`.
+  *(Proposed §10 — dataflow: a proposed extension pins the projected `prompt` — and the `agent_committed.prompt` / `agent_attempt_rejected.prompt` payload keys (§7.2) — to the rendered `String.t()`, never an inert `%Template{}`; see §10.)*
+- **`rejected`** is an ordered list appending, on each `agent_attempt_rejected`, the map
+  `%{address, iteration, attempt, prompt, output, reason, activity, phase_id, phase_name}`.
+  `activity` is `payload.activity` when present and `[]` when absent; as for committed
+  agents, the Status fold preserves it and does not normalize it. Rejected attempts are
+  never dropped just because a later retry succeeds; they remain visible to inspector
+  projections and still contribute to `usage`.
+>>>>>>> codex/run-inspector-followups
 - **`verifications`** / **`judgments`** append, on each `verify_settled` / `judge_settled`,
   the map `%{address, confirmations, total, threshold, survived}` /
   `%{address, scores, pick, winner}` respectively.
@@ -3217,9 +3356,11 @@ appended in `seq` order** (one entry per matching event, in the order the fold v
   tool/transcript read surface.
 
 Two conforming implementations therefore emit **byte-identical** `logs` (and the other list
-projections) for the same journal.
+projections) for the same journal, modulo the host-scoped `inspect/1` caveats already called
+out for non-JSON Elixir terms (§4.4, §7.5).
 
 **Failure projection (last-wins, pinned).** On **every** `agent_failed` the fold sets
+<<<<<<< HEAD
 `failure = %{address, attempts, reason}` and `state = :failed` **unconditionally** — there
 is **no** state guard, so a later `agent_failed` **overwrites** an earlier one. On
 `refine_non_converged`, the fold sets
@@ -3236,6 +3377,15 @@ common case — a single `agent_failed` (a top-level fail-closed node, or a conc
 with exactly one failing lane) or one terminal refine failure — last equals first, so the
 folded `failure` matches the halt reason `run` returned (§6.2) and what
 `status`/`inspect`/`resume` report.
+=======
+`failure = %{address, iteration, attempts, reason}` and `state = :failed`
+**unconditionally** — there
+is **no** state guard, so a later `agent_failed` **overwrites** an earlier one. The folded
+`failure` is therefore the **last** `agent_failed` in `seq` order. In the common case — a
+single `agent_failed` (a top-level fail-closed node, or a concurrent region with exactly one
+failing lane) — last equals first, so the folded `failure` matches the halt reason `run`
+returned (§6.2) and what `status`/`inspect`/`resume` report.
+>>>>>>> codex/run-inspector-followups
 
 **Note (multi-failure divergence, and its C4 consequence).** In a concurrent region where
 **2+ lanes** commit `agent_failed` (§6.1), the two projections differ deliberately: the
@@ -3257,6 +3407,195 @@ The fold also tracks `phase`: on each `phase_entered` it sets `phase = payload.n
 `phase` is the `name` of the **most recent** `phase_entered` event, or `nil` when no phase
 has been entered. This is the value surfaced as the envelope's `phase` field (§7.5); it is
 a projection, computable from the journal alone.
+
+### 7.3.1 Run inspector projection
+
+The run inspector is a derived, normalized read model for human and UI inspection of agent
+turns. It is **not** a writer-side state object. A conforming implementation MUST construct
+it from `Workflow.Status.of(run_id)` (or an observably equivalent fold of the same committed
+journal events) and MUST NOT consult a live writer process, provider process, raw Codex JSONL
+stream, or uncommitted in-memory activity. This projection is the activity normalization
+boundary for read surfaces: it accepts the provider activity lists preserved by the Status
+fold, normalizes key shape and missing display fields with `NormalizeActivity`, and exposes
+only the normalized activity-entry fields defined below.
+
+```
+RunInspector(status):
+  - Let {agents} be Map(status.agents, InspectorAgent).
+  - Let {rejected_attempts} be Map(status.rejected, InspectorRejection).
+  - Return %{
+      run_id: status.run_id,
+      phases: Map(status.phases, InspectorPhase),
+      agents: agents,
+      rejected_attempts: rejected_attempts,
+      failed_rejected_attempts: FailedRejectedAttempts(status.failure, agents, rejected_attempts)
+    }.
+```
+
+```
+InspectorPhase(phase):
+  - Return %{
+      id: phase.id,
+      name: phase.name,
+      address: phase.address,
+      agents: Map(phase.agents, InspectorAgent)
+    }.
+```
+
+```
+InspectorAgent(agent):
+  - Let {iteration} be AgentIteration(agent).
+  - Let {projected} be %{
+      address: agent.address,
+      iteration: iteration,
+      prompt: agent.prompt,
+      outcome: agent.result,
+      result: agent.result,
+      usage: agent.usage,
+      idempotency_key: agent.idempotency_key,
+      activity: NormalizeActivity(agent.activity),
+      phase_id: agent.phase_id,
+      phase_name: agent.phase_name
+    }.
+  - Return {projected} with id = AgentId(projected) and slug = AgentSlug(projected).
+```
+
+`AgentId(agent)` returns `"agent-" <> JoinAddress(agent.address) <> "-i" <>
+decimal(agent.iteration)`. `JoinAddress(address)` renders each non-negative integer address
+segment in decimal and joins the rendered segments with `"-"`; for example
+`JoinAddress([1, 0, 2])` is `"1-0-2"`. This is the inspector-grade identity for an agent
+turn: **address plus iteration**. Address alone is insufficient because loop bodies reuse the
+same node address across iterations.
+
+```
+AgentSlug(agent):
+  - Let {slug} be agent.prompt lowercased, with every non-empty run of characters outside
+    ASCII lowercase letters (`a-z`) and ASCII digits (`0-9`) replaced by `"-"`, then with
+    leading and trailing `"-"` removed.
+  - If {slug} is the empty string: Return AgentId(agent).
+  - Return {slug} <> "-i" <> decimal(agent.iteration).
+```
+
+`AgentSlug` is for display/testing convenience only and MUST NOT replace `AgentId` as
+identity.
+
+When an `InspectorAgent` is serialized through the public scheduler API or MCP tools, its
+`idempotency_key` field MUST be JSON-safe: either `nil`, or exactly the map
+`%{"run_id" => String.t(), "node_path" => [non_neg_integer()], "iteration" =>
+non_neg_integer(), "attempt" => non_neg_integer()}`. An implementation MAY hold the key
+internally as a host-language struct or atom-keyed map, but the public JSON shape MUST be
+the four-key map above and MUST NOT be flattened, hashed, or replaced with a string.
+
+```
+InspectorRejection(rejection):
+  - Let {iteration} be AgentIteration(rejection).
+  - Return %{
+      id: "rejection-" <> JoinAddress(rejection.address) <>
+          "-i" <> decimal(iteration) <> "-a" <> decimal(rejection.attempt),
+      address: rejection.address,
+      iteration: iteration,
+      attempt: rejection.attempt,
+      prompt: rejection.prompt,
+      output: rejection.output,
+      reason: rejection.reason,
+      activity: NormalizeActivity(rejection.activity),
+      phase_id: rejection.phase_id,
+      phase_name: rejection.phase_name
+    }.
+```
+
+```
+AgentIteration(map):
+  - If {map.iteration} is present: Return {map.iteration}.
+  - Return 0.
+```
+
+```
+FailedRejectedAttempts(failure, agents, rejected_attempts):
+  - If {failure} is nil: Return [].
+  - Let {address} be failure.address.
+  - Let {iteration} be failure.iteration.
+  - If any {agent} in {agents} has agent.address == address and agent.iteration == iteration:
+    - Return [].
+  - Return every {rejection} in {rejected_attempts} whose rejection.address == address and
+    rejection.iteration == iteration, preserving their original order.
+```
+
+The `failure` argument above is the folded `status.failure` from §7.3: the **last**
+`agent_failed` in journal `seq` order. `FailedRejectedAttempts` is intentionally scoped to
+that folded terminal failure identity. It MUST NOT scan the journal for every failed
+rejected-only identity and MUST NOT derive additional identities from earlier `agent_failed`
+events in a concurrent multi-failure run.
+
+Rejected attempts therefore remain observable in two cases:
+
+- If a later retry succeeds, the rejected attempts for the same `(address, iteration)` remain
+  in `rejected_attempts` and are selected with that committed agent turn.
+- If all attempts for the folded terminal `(address, iteration)` are rejected and the run
+  fails before any `agent_committed` exists for that identity, those rejected attempts MUST
+  appear in `failed_rejected_attempts` so the terminal failed rejected-only iteration is
+  still inspectable. Earlier failed identities in a multi-failure run remain visible in
+  `rejected_attempts` but are not duplicated into `failed_rejected_attempts` unless they are
+  also the folded terminal failure identity.
+
+```
+NormalizeActivity(activity):
+  - If {activity} is not a List: Return [].
+  - Return Map(activity, NormalizeActivityEntry).
+```
+
+A normalized activity entry is exactly the map shape returned by `NormalizeActivityEntry`:
+`%{kind, label, status, summary}`. No raw provider event, raw journal payload map, or
+provider-private field is part of the inspector activity projection.
+
+```
+NormalizeActivityEntry(entry):
+  - If {entry} is not a Map:
+    - Return %{kind: "activity", label: "Activity", status: nil, summary: nil}.
+  - Return %{
+      kind: Text(entry[:kind] || entry["kind"] || "activity"),
+      label: Text(entry[:label] || entry["label"] || "Activity"),
+      status: OptionalText(entry[:status] || entry["status"]),
+      summary: OptionalText(entry[:summary] || entry["summary"])
+    }.
+```
+
+```
+OptionalText(value):
+  - If {value} is nil: Return nil.
+  - Return Text(value).
+```
+
+```
+Text(value):
+  - If {value} is a binary string: Return {value}.
+  - If {value} is an atom: Return Atom.to_string(value).
+  - Return inspect(value).        ; host-scoped as in §4.4 and §7.5
+```
+
+`NormalizeActivity` is a read-projection normalization only. A conforming provider MUST
+already have converted backend-specific events to activity-entry-shaped maps before the
+writer journals them (§6.4.1). If non-conforming or legacy activity data reaches the
+inspector, the inspector MUST still project only the four public fields above; it MUST NOT
+pass through raw Codex JSONL maps, backend transcripts, provider-private envelopes, or extra
+activity keys.
+
+An activity entry's `kind` is a stable category such as `"reasoning"`, `"tool"`, or
+provider-defined `"event"`; `label` is the user-facing name; `summary` is a concise
+attempt-local description; and `status` is the provider-observed state text. The status
+value `"completed"` means the provider step completed within the paid attempt. The status
+value `"rejected"` means the activity belongs to an attempt whose provider output was
+rejected by `Schema.Validate`. Other status strings MAY be preserved for future providers,
+but consumers MUST treat unknown status strings as display text, not as control flow.
+
+**Stable serialization boundary.** The inspector projection serializes only the normalized
+fields above. It MUST NOT expose raw journal payload maps wholesale, raw Codex JSONL,
+provider-private event envelopes, or uncommitted live tool events. A compact scheduler
+event projection MAY expose only `%{seq, type, address?}` for each journal event; that
+projection is intentionally separate from the richer inspector projection. True live
+per-tool streaming, where tool-call progress is visible before an `agent_committed` or
+`agent_attempt_rejected` event is committed, is **outside this contract** and requires a
+separate future protocol change.
 
 ### 7.4 Result shape
 
@@ -3290,7 +3629,90 @@ Run API return values:
 - `{:error, {:already_running, pid}}` when a live writer holds the lease.
 - `{:error, {:run_crashed, reason}}` on writer crash.
 
-### 7.5 CLI envelope, error object, exit codes
+### 7.5 Scheduler API/MCP JSON, CLI envelope, error object, exit codes
+
+The public scheduler HTTP API is a separate JSON contract from the legacy CLI
+`--json` envelope below. Successful scheduler responses MUST be shaped as:
+
+```
+{"api_version": "scheduler.v1", "data": <endpoint data>}
+```
+
+Typed scheduler errors MUST be shaped as:
+
+```
+{"api_version": "scheduler.v1",
+ "error": {"code": <string>, "message": <string>, "details": <map>}}
+```
+
+MCP workflow tools that read scheduler status or inspect data are adapters over this
+scheduler API. They MUST preserve the scheduler `data` shapes below as JSON-safe
+structured content, while surfacing typed scheduler errors as MCP errors.
+
+`GET /api/runs/:id` (`workflow_status`) returns `data` with the existing scheduler status
+fields plus the additive `inspector` field:
+
+```
+%{
+  "run_id" => String.t(),
+  "state" => "pending" | "running" | "completed" | "failed",
+  "workflow_name" => String.t() | nil,
+  "tree_name" => String.t() | nil,
+  "phase" => String.t() | nil,
+  "logs" => [String.t()],
+  "agent_count" => non_neg_integer(),
+  "event_count" => non_neg_integer(),
+  "usage" => %{"input_tokens" => non_neg_integer(),
+               "output_tokens" => non_neg_integer(),
+               "total_tokens" => non_neg_integer()},
+  "inspector" => SchedulerInspector(status),
+  "result" => json_value() | String.t() | nil,
+  "failure" => SchedulerFailure(status.failure) | nil,
+  "ui_path" => String.t(),
+  "ui_url" => String.t()
+}
+```
+
+`GET /api/runs/:id/events` (`workflow_inspect`) returns:
+
+```
+%{
+  "run_id" => String.t(),
+  "events" => [SchedulerEvent(event)],
+  "inspector" => SchedulerInspector(status)
+}
+```
+
+`SchedulerEvent(event)` is the compact, scheduler-owned projection of one journal event:
+`%{"seq" => event.seq, "type" => Atom.to_string(event.type)}` plus `"address" =>
+event.payload.address` when that key is present and non-`nil`. It MUST NOT expose
+`payload` wholesale, raw journal blobs, raw Codex JSONL, provider-private envelopes, or
+any event field outside `seq`, `type`, and optional `address`. Unknown/new event types
+MUST still appear in this compact list, and because §7.3 counts every folded event,
+`SchedulerInspector(status)["event_count"]` MUST equal the number of journal events folded,
+including unknown/new event types.
+
+`SchedulerInspector(status)` is the public JSON serialization of `RunInspector(status)`
+(§7.3.1) plus status-derived summary fields. It MUST contain exactly these top-level keys:
+`"run_id"`, `"phases"`, `"agents"`, `"rejected_attempts"`,
+`"failed_rejected_attempts"`, `"failure"`, `"usage"`, and `"event_count"`. The first five
+fields come from `RunInspector(status)`. `"failure"` is `SchedulerFailure(status.failure)`
+or `nil`; `"usage"` is the status usage map with `"input_tokens"`, `"output_tokens"`, and
+`"total_tokens"`; and `"event_count"` is `status.event_count`.
+
+Serialized inspector agents, including agents nested under `"phases"`, MUST use the
+`InspectorAgent` fields from §7.3.1 with JSON object keys. Their `"idempotency_key"` MUST
+be either `nil` or exactly
+`%{"run_id" => String.t(), "node_path" => [non_neg_integer()], "iteration" =>
+non_neg_integer(), "attempt" => non_neg_integer()}`. Serialized activity entries MUST be
+the normalized four-key shape from `NormalizeActivityEntry`; raw provider fields and raw
+journal payload maps MUST NOT pass through the scheduler inspector.
+
+`SchedulerFailure(nil)` is `nil`. `SchedulerFailure(%{address, attempts, reason})` is
+`%{"address" => address, "attempts" => attempts, "reason" => inspect(reason)}`. As in the
+CLI envelope, `inspect/1` string rendering is byte-normative only for the Elixir
+embedding; non-Elixir hosts MUST return JSON-safe display text for non-JSON failure
+reasons.
 
 Under `--json`, stdout carries **exactly one** final JSON object, which always has a
 `"command"` field; progress/warnings go to stderr; on failure the last stderr line is a
@@ -3334,8 +3756,9 @@ from `run_agent/4` is `{:provider_failure, address, kind, detail}` (exit 7); onl
 bugs — malformed return shapes, malformed expected-failure data, raises/exits, malformed
 streams, or malformed usage/activity — are `{:run_crashed, reason}` (exit 1, §6.4.1).
 
-The run projection envelope (for `run`/`test`/`resume`/`status`/`inspect`) carries
+The legacy CLI run projection envelope (for `run`/`test`/`resume`/`status`/`inspect`) carries
 **exactly** these fields: `runId, state, treeName, phase, logs, agentCount, eventCount,
+<<<<<<< HEAD
 usage, result, failure, agents, rejected, verifications, judgments, refines, toolActivity,
 rawRefs`, plus a `command` field added by the caller. Here `logs` is the §7.3 `logs`
 projection verbatim — an ordered (seq-order) JSON array of the `log_emitted` **message
@@ -3361,6 +3784,25 @@ TerminalJSON(value):
 The `inspect/1` fallback is permitted only for literal `return` values or other non-result
 legacy terminal values. A conforming implementation MUST NOT stringify an `emit_result`
 projection: `emit_result(:r)` remains structured JSON in the envelope.
+=======
+usage, result, failure`, plus a `command` field added by the caller. This exact-field
+restriction applies only to the CLI envelope; it does **not** constrain the scheduler
+HTTP API or MCP JSON shapes defined above, whose status data includes the additive
+`inspector` field. Here `logs` is the §7.3 `logs` projection verbatim — an ordered
+(seq-order) JSON array of the `log_emitted` **message strings** — and `agentCount` is
+`length(agents)` (the §7.3 `agents` list); `usage` is
+`%{"inputTokens", "outputTokens", "totalTokens"}`; `failure` is `nil` or
+`%{"address", "attempts", "reason" => inspect(reason)}`. The §7.3 `agents`, `rejected`,
+`verifications`, and `judgments` list projections are **not** legacy CLI envelope fields:
+the envelope exposes the agent stream solely as the `agentCount` integer, and the
+rejection/verification/judgment lists are reachable through the `Workflow.Status` struct
+(`Workflow.Status.of/1`, §7.3, §7.6) and, where serialized for scheduler/MCP clients,
+through `SchedulerInspector(status)`. A value that is not JSON-encodable is rendered via
+`inspect/1` so the envelope always encodes; as in §4.4, this `inspect/1` fallback is
+byte-normative **only for the Elixir embedding** — a non-Elixir host MUST still produce an
+encodable envelope, but its string rendering of a non-JSON-encodable value is
+implementation-defined.
+>>>>>>> codex/run-inspector-followups
 
 **Scope of this section: envelope and exit codes only; the CLI *input* surface is
 non-normative.** What §7.5 pins is the **output** contract of a `--json` invocation — the
@@ -3431,12 +3873,15 @@ uppercase**. All content is normative except clearly marked examples, counter-ex
 and notes, which are non-normative.
 
 **Observably-equivalent clause.** The algorithms in this document describe required
-*observable* behavior — the sequence of committed journal events, the run result, and the
-exit code. A conforming implementation MAY use any internal strategy (any concurrency
-schedule, any storage engine, any host language) provided the observable result is
-identical to what these algorithms produce. In particular, because every concurrent region
-commits in input order (§6.11), a conforming implementation MAY execute lanes sequentially
-or in parallel — the journal MUST be the same either way.
+*observable* behavior — the sequence of committed journal events, the §7.3 Status fold, the
+§7.3.1 run inspector projection, the §7.5 run-projection envelope and error/exit-code
+mapping, the §7.6 run API result tuples, and any other read projection whose output shape
+this spec defines. A conforming implementation MAY use any internal strategy (any
+concurrency schedule, any storage engine, any host language) provided the observable result
+is identical to what these algorithms produce. In particular, because every concurrent
+region commits in input order (§6.11), a conforming implementation MAY execute lanes
+sequentially or in parallel — the journal, Status fold, and derived read projections MUST be
+the same either way.
 
 Normative requirements a conforming implementation MUST satisfy:
 
@@ -3465,6 +3910,12 @@ Normative requirements a conforming implementation MUST satisfy:
     while resume/status return the **last** (last-wins Status fold). A conforming
     implementation MUST reproduce **both** projections exactly; this is the single,
     pinned exception to "resume replays journaled decisions" (§6.1, §7.3).
+  - **C4c (defined read projections).** Where this spec defines a read output shape — the
+    Status fold (§7.3), run inspector projection (§7.3.1), run-projection envelope (§7.5),
+    compact scheduler event projection (§7.3.1), or public run API tuples (§7.6) — that
+    shape is normative observable output. A conforming implementation MUST NOT expose raw
+    Codex JSONL, provider-private activity envelopes, or raw journal payload maps through
+    the inspector projection.
 - **C5 (exactly-once).** A paid effect MUST be identified by `(run_id, node_path,
   iteration)` and refined by `attempt`; a backend MUST use the idempotency key so an
   effect is paid at most once and its result is never dropped.

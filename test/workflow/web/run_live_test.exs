@@ -1087,6 +1087,40 @@ defmodule Workflow.Web.RunLiveTest do
     assert row =~ "..."
   end
 
+  test "renders normalized string-keyed activity from the shared inspector projection" do
+    id = run_id()
+    usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
+    node = %Workflow.Node.Agent{address: [1], prompt: "inspect activity"}
+
+    append_event(id, 0, Event.phase_entered(%Workflow.Node.Phase{address: [0], name: "observe"}))
+
+    append_event(
+      id,
+      1,
+      Event.agent_committed(
+        node,
+        0,
+        %IdempotencyKey{run_id: id, node_path: [1], iteration: 0},
+        %{"label" => "ok"},
+        usage,
+        [
+          %{
+            "kind" => "tool",
+            "label" => "Shell",
+            "summary" => "string-keyed activity",
+            "status" => "completed"
+          }
+        ]
+      )
+    )
+
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+
+    assert has_element?(view, "[data-testid=agent-detail]", "Shell")
+    assert has_element?(view, "[data-testid=agent-detail]", "completed")
+    assert has_element?(view, "[data-testid=agent-detail]", "string-keyed activity")
+  end
+
   test "selected agent detail shows rejected retry attempts with reason and activity" do
     id = run_id()
 

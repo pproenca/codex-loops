@@ -1,4 +1,4 @@
-.PHONY: build ci release setup format-check native-build native-test native-quality quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: build ci release setup assets-build format-check native-build native-test native-quality quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint release-mcp package-homebrew-runtime proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -16,8 +16,11 @@ setup:
 	mix deps.get
 
 # Public developer gate: compile the project from a clean checkout.
-build: setup package-version-check native-build
+build: setup package-version-check native-build assets-build
 	mix compile --warnings-as-errors
+
+assets-build:
+	mix tailwind codex_loops
 
 # Public CI gate: every deterministic, credential-free check and end-to-end proof.
 ci: setup quality dialyzer-check browser-e2e verify-plugin-package proof proof-mcp
@@ -73,7 +76,7 @@ test: spec-lint
 spec-lint:
 	scripts/check-spec.sh SPEC.md
 
-release: setup package-version-check
+release: setup package-version-check assets-build
 	MIX_ENV=prod mix deps.get --only prod
 	rm -rf "_build/prod/rel/$(RELEASE_NAME)" "$(APP_BUILD_DIR)"
 	MIX_ENV=prod mix release $(RELEASE_NAME) --overwrite

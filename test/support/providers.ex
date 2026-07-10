@@ -49,6 +49,43 @@ defmodule Workflow.Test.GateProvider do
   end
 end
 
+defmodule Workflow.Test.StreamingGateProvider do
+  @moduledoc """
+  A gated provider that publishes in-flight activity before blocking, then
+  returns final activity after release. This lets LiveView tests prove that the
+  browser sees provider streaming and settlement as two distinct updates.
+  """
+  @behaviour Workflow.Provider
+
+  alias Workflow.Provider.Usage
+
+  @impl true
+  def run_agent(prompt, _schema, _key, opts) do
+    sink = Keyword.fetch!(opts, :sink)
+    activity_sink = Keyword.fetch!(opts, :activity_sink)
+
+    activity_sink.(%{
+      kind: "lifecycle",
+      label: "Turn started",
+      summary: "Streaming #{prompt}",
+      status: "running"
+    })
+
+    send(sink, {:at_agent, self()})
+    receive do: (:proceed -> :ok)
+
+    {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
+     [
+       %{
+         kind: "reasoning",
+         label: "Reasoning",
+         summary: "Finished #{prompt}",
+         status: "completed"
+       }
+     ]}
+  end
+end
+
 defmodule Workflow.Test.ScriptedProvider do
   @moduledoc """
   A call-counting mock that returns a *scripted sequence* of outputs — one per

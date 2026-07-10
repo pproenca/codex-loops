@@ -22,6 +22,7 @@ defmodule Workflow.Web.RunLiveTest do
   alias Workflow.Status
   alias Workflow.Test.EchoProvider
   alias Workflow.Test.GateProvider
+  alias Workflow.Test.StreamingGateProvider
 
   @endpoint Workflow.Web.Endpoint
 
@@ -157,38 +158,6 @@ defmodule Workflow.Web.RunLiveTest do
       ]
 
       {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}, activity}
-    end
-  end
-
-  defmodule StreamingGateProvider do
-    @moduledoc false
-    @behaviour Workflow.Provider
-
-    @impl true
-    def run_agent(prompt, _schema, _key, opts) do
-      sink = Keyword.fetch!(opts, :sink)
-      activity_sink = Keyword.fetch!(opts, :activity_sink)
-
-      activity_sink.(%{
-        kind: "lifecycle",
-        label: "Turn started",
-        summary: "Streaming #{prompt}",
-        status: "running"
-      })
-
-      send(sink, {:at_agent, self()})
-
-      receive do: (:proceed -> :ok)
-
-      {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
-       [
-         %{
-           kind: "reasoning",
-           label: "Reasoning",
-           summary: "Finished #{prompt}",
-           status: "completed"
-         }
-       ]}
     end
   end
 
@@ -501,10 +470,11 @@ defmodule Workflow.Web.RunLiveTest do
     refute strip =~ ~r/<button[^>]*>\s*Pause\s*</
 
     finish(writer, turn)
-    wait_for_render(view, "result: :ok")
+    wait_for_render(view, "Completed successfully")
 
     completed_strip = view |> element("[data-testid=status-strip]") |> render()
-    assert completed_strip =~ "No lifecycle action"
+    assert completed_strip =~ "Finished"
+    assert completed_strip =~ "Run completed successfully."
     refute completed_strip =~ "Resume"
 
     recoverable_id = run_id()
@@ -581,7 +551,7 @@ defmodule Workflow.Web.RunLiveTest do
 
     updated = render(view)
     assert updated =~ "completed"
-    assert updated =~ "result: :ok"
+    assert updated =~ "Completed successfully"
     # The committed agent turn (address [2]) now appears; usage folds to 2 tokens.
     assert has_element?(view, "[data-testid=phase-timeline] [data-address='[2]']")
     assert has_element?(view, "[data-testid=phase-timeline]", "say hello")
@@ -621,7 +591,7 @@ defmodule Workflow.Web.RunLiveTest do
 
     finish(writer, turn)
 
-    updated = wait_for_render(view, "result: :ok")
+    updated = wait_for_render(view, "Completed successfully")
     assert updated =~ "Finished say hello"
     assert has_element?(view, "[data-testid=agent-detail]", "Completed")
   end
@@ -639,7 +609,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert has_element?(view, "[data-testid=run-header]", status.tree_name)
     assert has_element?(view, "[data-testid=phase-list]", "plan")
     assert has_element?(view, "[data-testid=phase-timeline] [data-address='[2]']")
-    assert has_element?(view, "[data-testid=result]", "result: :ok")
+    assert has_element?(view, "[data-testid=result]", "Completed successfully")
     assert Enum.all?(status.logs, &(rendered =~ &1))
     refute_details_open(rendered, "logs")
   end
@@ -681,7 +651,7 @@ defmodule Workflow.Web.RunLiveTest do
       |> get("/runs/#{id}")
       |> html_response(200)
 
-    assert html =~ ~s(href="/assets/codex-loops/run.css?v=3")
+    assert html =~ ~s(href="/assets/codex-loops/run.css?v=5")
 
     css =
       conn()
@@ -689,23 +659,18 @@ defmodule Workflow.Web.RunLiveTest do
       |> response(200)
 
     assert css =~ ~s(.status-dot)
-    assert css =~ ~s(color-scheme: dark)
+    assert css =~ ~s(color-scheme: light)
+    assert css =~ ~s(tailwindcss v4.3.0)
+    assert css =~ ~s(--color-brand-500: #6d5ce7)
+    refute css =~ "@apply"
 
     assert css_rule(css, "[data-testid=\"inspector\"]") =~
-             "grid-template-columns: minmax(280px, 360px) minmax(0, 1fr)"
+             "grid-template-columns: minmax(280px, 320px) minmax(0, 1fr)"
 
     assert html =~ ~s(<span class="status-dot")
     assert html =~ ~s(Status: Completed)
 
-    assert css =~ ~s|@media (hover: hover) and (pointer: fine)|
-    hover_media_index = css |> :binary.match("@media (hover: hover) and (pointer: fine)") |> elem(0)
-    button_hover_index = css |> :binary.match("button:hover") |> elem(0)
-    assert button_hover_index > hover_media_index
-
-    button_rule = css_rule(css, "button")
-    assert button_rule =~ "transition: transform 140ms"
-    refute button_rule =~ "background-color 140ms"
-    refute button_rule =~ "border-color 140ms"
+    assert css =~ "--default-transition-duration: 150ms"
 
     assert css =~ "@media (prefers-reduced-motion: reduce)"
     refute css =~ "@keyframes"
@@ -756,7 +721,7 @@ defmodule Workflow.Web.RunLiveTest do
              "data" => %{"run_id" => ^id, "state" => "accepted"}
            } = json_response(conn, 200)
 
-    updated = wait_for_render(view, "result: :ok")
+    updated = wait_for_render(view, "Completed successfully")
 
     assert view.pid == view_pid
     assert Process.alive?(view_pid)
@@ -819,7 +784,7 @@ defmodule Workflow.Web.RunLiveTest do
 
       release_stub.()
 
-      completed = wait_for_render(view, "result: :ok", 100)
+      completed = wait_for_render(view, "Completed successfully", 100)
       assert completed =~ "Completed"
       assert has_element?(view, "[data-testid=agent-detail]", "18 tok")
     end)
@@ -838,7 +803,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert html =~ ~s(<meta name="csrf-token")
     assert html =~ ~s(src="/assets/phoenix/phoenix.js")
     assert html =~ ~s(src="/assets/phoenix_live_view/phoenix_live_view.js")
-    assert html =~ ~s(href="/assets/codex-loops/run.css?v=3")
+    assert html =~ ~s(href="/assets/codex-loops/run.css?v=5")
     assert html =~ ~s(new LiveView.LiveSocket("/live", Phoenix.Socket)
   end
 
@@ -867,10 +832,11 @@ defmodule Workflow.Web.RunLiveTest do
       "Latest activity",
       "Checked ship",
       "Final outcome",
-      ~s(&quot;echo&quot; =&gt; &quot;ship&quot;),
       "Prompt preview",
       "Raw activity"
     ])
+
+    assert has_element?(view, "[data-testid=final-outcome]", "ship")
 
     refute_details_open(detail, "prompt-preview")
     refute_details_open(detail, "raw-activity")
@@ -983,7 +949,7 @@ defmodule Workflow.Web.RunLiveTest do
     ref = Process.monitor(writer)
     send(second_turn, :proceed)
     assert_receive {:DOWN, ^ref, :process, ^writer, :normal}
-    wait_for_render(view, "result: :ok")
+    wait_for_render(view, "Completed successfully")
 
     assert has_element?(
              view,
@@ -1110,7 +1076,7 @@ defmodule Workflow.Web.RunLiveTest do
       "Retry context",
       "1 rejected attempt",
       "Final outcome",
-      ~s(&quot;label&quot; =&gt; &quot;ok&quot;),
+      ~s(&quot;label&quot;: &quot;ok&quot;),
       "Retry history",
       "Checked malformed output"
     ])
@@ -1153,7 +1119,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert detail =~ "No activity recorded"
     refute_details_open(detail, "retry-history")
 
-    assert has_element?(view, "[data-testid=failure]", "failed at [1]")
+    assert has_element?(view, "[data-testid=failure]", "Failed at [1]")
     assert has_element?(view, "[data-testid=failure]", "missing_required")
   end
 
@@ -1231,7 +1197,7 @@ defmodule Workflow.Web.RunLiveTest do
       "Latest activity",
       "Completed with final outcome",
       "Final outcome",
-      ~s(&quot;label&quot; =&gt; &quot;zero&quot;),
+      ~s(&quot;label&quot;: &quot;zero&quot;),
       "Retry history",
       "first rejection"
     ])
@@ -1250,7 +1216,7 @@ defmodule Workflow.Web.RunLiveTest do
       "Latest activity",
       "Completed with final outcome",
       "Final outcome",
-      ~s(&quot;label&quot; =&gt; &quot;one&quot;),
+      ~s(&quot;label&quot;: &quot;one&quot;),
       "Retry history",
       "second rejection"
     ])
@@ -1318,7 +1284,7 @@ defmodule Workflow.Web.RunLiveTest do
       "Retry context",
       "1 failed attempt",
       "Final outcome",
-      ~s(&quot;label&quot; =&gt; &quot;zero&quot;),
+      ~s(&quot;label&quot;: &quot;zero&quot;),
       "Failed attempts",
       "iteration 1",
       "failed iteration rejection"

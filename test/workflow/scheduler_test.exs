@@ -528,9 +528,9 @@ defmodule Workflow.SchedulerTest do
 
     assert completed_action == %{
              action: :none,
-             label: "No lifecycle action",
+             label: "Finished",
              enabled: false,
-             reason: "Run is completed.",
+             reason: "Run completed successfully.",
              method: nil,
              href: nil
            }

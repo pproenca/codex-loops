@@ -41,6 +41,7 @@ defmodule CodexLoops.MixProject do
       {:jason, "~> 1.4"},
       {:exqlite, "~> 0.38.0"},
       {:bandit, "~> 1.5"},
+      {:tailwind, "~> 0.5", only: [:dev, :test], runtime: false},
       {:styler, "~> 1.11", only: [:dev, :test], runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:sobelow, "~> 0.14.1", only: [:dev, :test], runtime: false},

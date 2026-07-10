@@ -14,4 +14,11 @@ config :codex_loops, Workflow.Web.Endpoint,
 
 config :phoenix, :json_library, Jason
 
+config :tailwind,
+  version: "4.3.0",
+  codex_loops: [
+    args: ~w(--input=assets/css/run.css --output=priv/static/run.css),
+    cd: Path.expand("..", __DIR__)
+  ]
+
 import_config "#{config_env()}.exs"

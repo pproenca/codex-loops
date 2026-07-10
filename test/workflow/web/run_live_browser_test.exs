@@ -10,6 +10,7 @@ defmodule Workflow.Web.RunLiveBrowserTest do
 
   alias Workflow.Run
   alias Workflow.Test.EchoProvider
+  alias Workflow.Test.StreamingGateProvider
 
   @moduletag :browser_e2e
 
@@ -56,7 +57,7 @@ defmodule Workflow.Web.RunLiveBrowserTest do
     |> assert_has("[data-testid=run-state]", text: "completed")
     |> assert_has("[data-testid=run-phase]", text: "browser")
     |> assert_has("[data-testid=agent-detail]", text: "Completed")
-    |> assert_has("[data-testid=result]", text: "result: :ok")
+    |> assert_has("[data-testid=result]", text: "Completed successfully")
   end
 
   test "failed mock run shows failure state and retry context in a real browser", %{conn: conn} do
@@ -73,7 +74,35 @@ defmodule Workflow.Web.RunLiveBrowserTest do
     |> assert_has("[data-testid=agent-detail]", text: "Failed")
     |> assert_has("[data-testid=agent-detail]", text: "1 rejected attempt")
     |> assert_has("[data-testid=retry-history]")
-    |> assert_has("[data-testid=failure]", text: "failed at")
+    |> assert_has("[data-testid=failure]", text: "Failed at")
+  end
+
+  test "connected browser streams in-flight activity and completion without reloading", %{conn: conn} do
+    id = run_id()
+
+    assert {:ok, ^id, writer} =
+             Run.start(CompletedWorkflow,
+               run_id: id,
+               provider: {StreamingGateProvider, sink: self()}
+             )
+
+    assert_receive {:at_agent, ^writer}
+
+    session =
+      conn
+      |> visit("/runs/#{id}")
+      |> assert_has("body .phx-connected", timeout: 2_000)
+      |> assert_has("[data-testid=run-state]", text: "running")
+      |> assert_has("[data-testid=agent-detail]", text: "Streaming render the completed browser smoke")
+      |> evaluate("window.__codexLoopsStreamingPage = true")
+
+    send(writer, :proceed)
+
+    session
+    |> assert_has("[data-testid=run-state]", text: "completed", timeout: 2_000)
+    |> assert_has("[data-testid=agent-detail]", text: "Finished render the completed browser smoke")
+    |> assert_has("[data-testid=result]", text: "Completed successfully")
+    |> evaluate("window.__codexLoopsStreamingPage", &assert(&1))
   end
 
   defp run_id, do: "browser_#{System.unique_integer([:positive])}"

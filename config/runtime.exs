@@ -25,5 +25,6 @@ if config_env() == :prod do
 
   config :codex_loops, Workflow.Web.Endpoint,
     http: [ip: ip, port: port],
+    url: [host: host, port: port],
     server: server?
 end

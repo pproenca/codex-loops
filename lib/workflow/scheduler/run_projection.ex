@@ -141,6 +141,9 @@ defmodule Workflow.Scheduler.RunProjection do
           "No journaled script path is available."
         )
 
+      status.state == :completed ->
+        unavailable(:none, "Finished", "Run completed successfully.")
+
       true ->
         unavailable(:none, "No lifecycle action", "Run is #{status.state}.")
     end

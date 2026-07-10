@@ -161,6 +161,16 @@ assert_contains "$health" '"api_version":"scheduler.v1"' "health response is sch
 assert_contains "$health" '"status":"ok"' "scheduler health is ok"
 assert_contains "$health" "\"version\":\"$package_version\"" "scheduler health reports package version"
 
+endpoint_url=$(
+  CODEX_LOOPS_HOST="$host" CODEX_LOOPS_PORT="$port" \
+    "$release_ctl" eval \
+    'url = Application.fetch_env!(:codex_loops, Workflow.Web.Endpoint)[:url]; IO.write("#{url[:host]}:#{url[:port]}")'
+)
+if [ "$endpoint_url" != "$host:$port" ]; then
+  echo "release endpoint URL does not match its public host and port: $endpoint_url" >&2
+  exit 1
+fi
+
 doctor="$tmpdir/doctor.json"
 CODEX_LOOPS_SCHEDULER_URL="$base_url" "$release_cli" doctor --json >"$doctor"
 assert_contains "$doctor" '"scheduler_state":"running"' "native doctor sees the scheduler"

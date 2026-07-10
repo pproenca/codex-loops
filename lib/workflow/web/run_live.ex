@@ -156,10 +156,10 @@ defmodule Workflow.Web.RunLive do
         window.liveSocket = liveSocket;
       });
     </script>
-    <link rel="stylesheet" href="/assets/codex-loops/run.css?v=3" />
+    <link rel="stylesheet" href="/assets/codex-loops/run.css?v=5" />
     <main id="run" data-run-id={@run_id}>
       <header data-testid="run-header">
-        <p class="product-label">Codex Loops <span>Run monitor</span></p>
+        <p class="product-label">Codex Loops <span>Workflow run</span></p>
         <h1>{@run_projection.tree_name || "Run"}</h1>
         <section data-testid="status-strip" class="status-strip" aria-label="Run status">
           <div data-testid="run-state" class="status-item">
@@ -445,12 +445,22 @@ defmodule Workflow.Web.RunLive do
         </details>
       </section>
 
-      <p :if={@status.state == :completed} data-testid="result">
-        result: {inspect(@status.result)}
-      </p>
-      <p :if={@status.state == :failed} data-testid="failure">
-        failed at {inspect(@status.failure.address)}: {inspect(@status.failure.reason)}
-      </p>
+      <section :if={@status.state == :completed} data-testid="result">
+        <span class="result-icon" aria-hidden="true">✓</span>
+        <span>
+          <span class="detail-kicker">Workflow result</span>
+          <strong>{run_result_text(@status.result)}</strong>
+        </span>
+      </section>
+      <section :if={@status.state == :failed} data-testid="failure">
+        <span class="result-icon" aria-hidden="true">!</span>
+        <span>
+          <span class="detail-kicker">Workflow failed</span>
+          <strong>
+            Failed at {inspect(@status.failure.address)} · {inspect(@status.failure.reason)}
+          </strong>
+        </span>
+      </section>
     </main>
     """
   end
@@ -796,9 +806,24 @@ defmodule Workflow.Web.RunLive do
 
   defp prompt_preview(prompt), do: line_preview(prompt, 2, 220)
 
-  defp outcome_preview(%{result: result}), do: result |> inspect(limit: 12, printable_limit: 900) |> line_preview(8, 260)
+  defp outcome_preview(%{result: %{"echo" => echo}}) when is_binary(echo), do: line_preview(echo, 8, 260)
+  defp outcome_preview(%{result: result}) when is_binary(result), do: line_preview(result, 8, 260)
+
+  defp outcome_preview(%{result: result}) do
+    result
+    |> Jason.encode(pretty: true)
+    |> case do
+      {:ok, json} -> json
+      {:error, _reason} -> inspect(result, limit: 12, printable_limit: 900)
+    end
+    |> line_preview(8, 260)
+  end
 
   defp outcome_preview(_agent), do: "pending"
+
+  defp run_result_text(:ok), do: "Completed successfully"
+  defp run_result_text(result) when is_binary(result), do: result
+  defp run_result_text(result), do: inspect(result)
 
   defp line_preview(text, max_lines, max_line_length) do
     text

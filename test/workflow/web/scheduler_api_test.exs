@@ -624,9 +624,9 @@ defmodule Workflow.Web.SchedulerAPITest do
              "state" => "completed",
              "lifecycleAction" => %{
                "action" => "none",
-               "label" => "No lifecycle action",
+               "label" => "Finished",
                "enabled" => false,
-               "reason" => "Run is completed.",
+               "reason" => "Run completed successfully.",
                "method" => nil,
                "href" => nil
              }

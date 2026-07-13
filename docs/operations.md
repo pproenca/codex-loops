@@ -87,7 +87,9 @@ GET  /runs/<id>
 The API checks are polling contracts: `/api/runs/<id>` is the run projection
 snapshot, and `/api/runs/<id>/events` is a durable journal-summary inspection
 surface. The `/runs/<id>` route is the LiveView surface used for realtime
-progress activity.
+rendering. Provider activity is appended to SQLite before LiveView receives a
+post-commit refresh notification, so browser reconnects and polling reads see
+the same projection.
 
 ## Live Provider Diagnostic
 
@@ -96,6 +98,11 @@ prove streaming and provider protocol behavior deterministically. Maintainers
 may separately run the live-provider proof when changing the Codex boundary;
 it requires authentication and spends one real turn, so it is intentionally
 not part of normal CI.
+
+Provider subprocesses have a finite 30-minute default deadline and 16 MiB input
+and stdout limits. Workflow concurrency is capped system-wide at eight tasks and
+fanout width at 64, even when a script asks for more. A limit breach is a typed
+provider or run failure, never an infinite wait or unbounded accumulation.
 
 ## Manual CLI Run
 
@@ -253,8 +260,16 @@ workflow_resume  run_id=<id> provider=codex
 `workflow_status` is a polling snapshot of the current run projection.
 `workflow_inspect` is a durable inspection view with `journalEvents` summaries
 and ordered `rawRefs`; it does not expose raw Codex JSONL by default.
-`workflow_open_ui` returns the Phoenix LiveView URL, which is where realtime
-progress messages and activity entries are watched.
+`workflow_open_ui` returns the Phoenix LiveView URL. LiveView refolds the
+journal after post-commit PubSub notifications; it does not maintain a separate
+transient progress state.
+
+Resume reuses committed turns and continues after settled rejected attempts.
+It never redelivers an attempt whose durable `agent_started` marker has no
+matching settlement. Such a run terminates with `outcome_unknown`, because the
+provider may already have completed or charged and Codex Loops cannot infer the
+result. Inspect the attempt and start a new run only as an explicit operator
+decision.
 
 ## Failure Parsing
 

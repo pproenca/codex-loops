@@ -19,94 +19,130 @@ defmodule Workflow.DataflowRunTest do
 
   defmodule BinaryEmit do
     @moduledoc false
-    use Workflow
 
-    workflow "binary-emit" do
-      let(:draft = agent("Write a draft."))
-      emit(~P"Final draft: <%= @draft %>")
+    def tree do
+      Workflow.Test.tree!(
+        "binary-emit",
+        quote do
+          let(:draft = agent("Write a draft."))
+          emit(~P"Final draft: <%= @draft %>")
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule SynthesizedEmit do
     @moduledoc false
-    use Workflow
 
-    workflow "synthesized-emit" do
-      let(:summary = synthesize(["plan A", "plan B"], "Merge the plans."))
-      emit(~P"Summary: <%= @summary %>")
+    def tree do
+      Workflow.Test.tree!(
+        "synthesized-emit",
+        quote do
+          let(:summary = synthesize(["plan A", "plan B"], "Merge the plans."))
+          emit(~P"Summary: <%= @summary %>")
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule MapEmit do
     @moduledoc false
-    use Workflow
 
-    workflow "map-emit" do
-      let(:draft = agent("Write a draft."))
-      emit(~P"Final draft: <%= @draft %>")
+    def tree do
+      Workflow.Test.tree!(
+        "map-emit",
+        quote do
+          let(:draft = agent("Write a draft."))
+          emit(~P"Final draft: <%= @draft %>")
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule InjectedAgent do
     @moduledoc false
-    use Workflow
 
-    workflow "injected-agent" do
-      let(:draft = agent("Write a draft."))
-      agent(~P"Improve this draft: <%= @draft %>")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "injected-agent",
+        quote do
+          let(:draft = agent("Write a draft."))
+          agent(~P"Improve this draft: <%= @draft %>")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule FormatterEmit do
     @moduledoc false
-    use Workflow
 
-    workflow "formatter-emit" do
-      let(:draft = agent("Draft."))
-      let(:review = agent("Review."))
+    def tree do
+      Workflow.Test.tree!(
+        "formatter-emit",
+        quote do
+          let(:draft = agent("Draft."))
+          let(:review = agent("Review."))
 
-      emit(~P|ID: <%= path(@review, "/items/0/id") %>
+          emit(~P|ID: <%= path(@review, "/items/0/id") %>
 Count: <%= count(@review, "/items") %>
 Flat: <%= flatten(@review, "/groups") %>
 Findings:
 <%= numbered_findings(@review, "/items") %>
 Short: <%= truncate(@draft, 5) %>|)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule RefineResultEmit do
     @moduledoc false
-    use Workflow
 
-    workflow "refine-result-emit" do
-      let(
-        :final =
-          refine(agent("Draft."),
-            reviewers: [
-              reviewer(:spec, "Check the spec."),
-              reviewer(:runtime, "Check the runtime.")
-            ],
-            revise_with: agent("Fix."),
-            until: :unanimous,
-            max_rounds: 1,
-            on_non_convergence: :accept_current
+    def tree do
+      Workflow.Test.tree!(
+        "refine-result-emit",
+        quote do
+          let(
+            :final =
+              refine(agent("Draft."),
+                reviewers: [
+                  reviewer(:spec, "Check the spec."),
+                  reviewer(:runtime, "Check the runtime.")
+                ],
+                revise_with: agent("Fix."),
+                until: :unanimous,
+                max_rounds: 1,
+                on_non_convergence: :accept_current
+              )
           )
-      )
 
-      emit_result(:final)
+          emit_result(:final)
+        end,
+        __ENV__
+      )
     end
   end
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
-  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+
+  defp types(id) do
+    id
+    |> Journal.fold()
+    |> Enum.reject(&(&1.type == :agent_started))
+    |> Enum.map(& &1.type)
+  end
 
   test "emit renders a binary-valued binding into run_completed.value exactly" do
     id = run_id()
     {:ok, script} = ScriptedProvider.start(["READY"])
 
     assert {:ok, ^id} =
-             Run.run(BinaryEmit,
+             Run.run(BinaryEmit.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -128,7 +164,7 @@ Short: <%= truncate(@draft, 5) %>|)
     {:ok, script} = ScriptedProvider.start(["Merged summary"])
 
     assert {:ok, ^id} =
-             Run.run(SynthesizedEmit,
+             Run.run(SynthesizedEmit.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -142,7 +178,7 @@ Short: <%= truncate(@draft, 5) %>|)
   test "map-bearing terminal render is asserted structurally, not byte-for-byte" do
     id = run_id()
 
-    assert {:ok, ^id} = Run.run(MapEmit, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:ok, ^id} = Run.run(MapEmit.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     assert %Event{payload: %{value: rendered}} =
              Enum.find(Journal.fold(id), &(&1.type == :run_completed))
@@ -157,7 +193,7 @@ Short: <%= truncate(@draft, 5) %>|)
     {:ok, script} = ScriptedProvider.start(["READY", "done"])
 
     assert {:ok, ^id} =
-             Run.run(InjectedAgent,
+             Run.run(InjectedAgent.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -193,7 +229,7 @@ Short: <%= truncate(@draft, 5) %>|)
     {:ok, script} = ScriptedProvider.start(["cafétéria", review])
 
     assert {:ok, ^id} =
-             Run.run(FormatterEmit,
+             Run.run(FormatterEmit.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -229,7 +265,7 @@ Short: <%= truncate(@draft, 5) %>|)
     }
 
     assert {:ok, ^id} =
-             Run.run(RefineResultEmit,
+             Run.run(RefineResultEmit.tree(),
                run_id: id,
                provider:
                  {RefineProvider,

@@ -16,7 +16,11 @@ defmodule Workflow.Event do
   alias Workflow.Node.Pipeline
   alias Workflow.Node.Refine
   alias Workflow.Node.Verify
+  alias Workflow.Refine.OpenFinding
+  alias Workflow.Refine.Reviewer
   alias Workflow.Refine.ReviewerAdapter
+  alias Workflow.Refine.ReviewerDecision
+  alias Workflow.Refine.RoleFailure
 
   @schema 1
 
@@ -79,6 +83,21 @@ defmodule Workflow.Event do
         result: result,
         usage: usage,
         activity: activity
+      }
+    }
+  end
+
+  @doc "Durable at-most-once marker written before a provider effect begins."
+  def agent_started(%Workflow.Node.Agent{} = node, iteration, key) do
+    %__MODULE__{
+      type: :agent_started,
+      payload: %{
+        address: node.address,
+        iteration: iteration,
+        attempt: key.attempt,
+        idempotency_key: key,
+        label: node.label,
+        prompt: node.prompt
       }
     }
   end
@@ -365,8 +384,8 @@ defmodule Workflow.Event do
     %__MODULE__{
       type: :refine_round_decision,
       payload:
-        Map.merge(
-          %{address: node.address, round: round},
+        %{address: node.address, round: round}
+        |> Map.merge(
           Map.take(decision, [
             :consensus,
             :approval_count,
@@ -380,26 +399,14 @@ defmodule Workflow.Event do
             :cold_read
           ])
         )
+        |> serialize_refine_entities()
     }
   end
 
-  def refine_role_failed(role_failure) when is_map(role_failure) do
+  def refine_role_failed(%RoleFailure{} = role_failure) do
     %__MODULE__{
       type: :refine_role_failed,
-      payload:
-        Map.take(role_failure, [
-          :address,
-          :role,
-          :role_address,
-          :round,
-          :reviewer,
-          :reviewer_index,
-          :attempts,
-          :reason,
-          :detail,
-          :usage,
-          :activity
-        ])
+      payload: RoleFailure.to_payload(role_failure)
     }
   end
 
@@ -407,8 +414,8 @@ defmodule Workflow.Event do
     %__MODULE__{
       type: :refine_completed,
       payload:
-        Map.merge(
-          %{address: node.address},
+        %{address: node.address}
+        |> Map.merge(
           Map.take(attrs, [
             :converged,
             :final_round,
@@ -421,6 +428,7 @@ defmodule Workflow.Event do
             :cold_read
           ])
         )
+        |> serialize_refine_entities()
     }
   end
 
@@ -428,8 +436,8 @@ defmodule Workflow.Event do
     %__MODULE__{
       type: :refine_non_converged,
       payload:
-        Map.merge(
-          %{address: node.address, reason: :max_rounds},
+        %{address: node.address, reason: :max_rounds}
+        |> Map.merge(
           Map.take(attrs, [
             :reason,
             :final_round,
@@ -442,6 +450,7 @@ defmodule Workflow.Event do
             :cold_read
           ])
         )
+        |> serialize_refine_entities()
     }
   end
 
@@ -483,14 +492,48 @@ defmodule Workflow.Event do
     }
   end
 
-  defp reviewer_descriptor(%{index: index, name: name, agent: agent} = reviewer) do
+  defp reviewer_descriptor(%Reviewer{index: index, name: name, adapter: adapter, agent: agent}) do
     agent
     |> agent_descriptor()
     |> Map.merge(%{
       index: index,
       name: name,
-      adapter: Map.get(reviewer, :adapter, ReviewerAdapter.default())
+      adapter: adapter
     })
+  end
+
+  defp serialize_refine_entities(attrs) do
+    attrs
+    |> map_present(:open_findings, &Enum.map(&1, fn %OpenFinding{} = finding -> OpenFinding.to_payload(finding) end))
+    |> map_present(:role_failures, &Enum.map(&1, fn %RoleFailure{} = failure -> RoleFailure.to_payload(failure) end))
+    |> map_present(
+      :reviewer_decisions,
+      &Enum.map(&1, fn %ReviewerDecision{} = decision -> ReviewerDecision.to_payload(decision) end)
+    )
+    |> map_present(:cold_read, &serialize_cold_read/1)
+  end
+
+  defp serialize_cold_read(nil), do: nil
+
+  defp serialize_cold_read(%{state: :completed} = cold_read) do
+    cold_read
+    |> map_present(:open_findings, &Enum.map(&1, fn %OpenFinding{} = finding -> OpenFinding.to_payload(finding) end))
+    |> map_present(:reviewer_decision, fn %ReviewerDecision{} = decision ->
+      ReviewerDecision.to_payload(decision)
+    end)
+  end
+
+  defp serialize_cold_read(%{state: :failed} = cold_read) do
+    map_present(cold_read, :role_failure, fn %RoleFailure{} = failure ->
+      RoleFailure.to_payload(failure)
+    end)
+  end
+
+  defp map_present(map, key, fun) do
+    case Map.fetch(map, key) do
+      {:ok, value} -> Map.put(map, key, fun.(value))
+      :error -> map
+    end
   end
 
   defp gate_descriptors(%Refine{gates: gates}) when map_size(gates) == 0, do: %{}

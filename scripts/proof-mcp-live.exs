@@ -371,15 +371,11 @@ defmodule ProofMCPLive do
 
   defp workflow_source do
     """
-    defmodule MCPLiveProofWorkflow do
-      use Workflow
-
-      workflow "mcp-live-proof" do
-        phase "prove live Codex through MCP"
-        log "live MCP proof started"
-        agent "Reply with exactly LIVE-MCP-PROOF-OK and no other text."
-        return :ok
-      end
+    workflow "mcp-live-proof" do
+      phase "prove live Codex through MCP"
+      log "live MCP proof started"
+      agent "Reply with exactly LIVE-MCP-PROOF-OK and no other text."
+      return :ok
     end
     """
   end

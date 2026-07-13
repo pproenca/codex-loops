@@ -11,6 +11,7 @@ defmodule Workflow.RenderText do
   alias Workflow.BoundValue
   alias Workflow.Event
   alias Workflow.Journal
+  alias Workflow.JSONPointer
   alias Workflow.Template
 
   @type part ::
@@ -78,16 +79,16 @@ defmodule Workflow.RenderText do
   defp materialize_part({:bound_list, ref}, events), do: BoundList.fold(events, ref)
 
   defp apply_formatter(%Template.Hole{op: :path, args: %{pointer: pointer}}, value),
-    do: {:ok, json_pointer_get(value, pointer)}
+    do: {:ok, pointer_value(value, pointer)}
 
   defp apply_formatter(%Template.Hole{op: :flatten, args: %{pointer: pointer}}, value),
-    do: {:ok, value |> json_pointer_get(pointer) |> flatten_value()}
+    do: {:ok, value |> pointer_value(pointer) |> flatten_value()}
 
   defp apply_formatter(%Template.Hole{op: :count, args: %{pointer: pointer}}, value),
-    do: {:ok, value |> json_pointer_get(pointer) |> count_value()}
+    do: {:ok, value |> pointer_value(pointer) |> count_value()}
 
   defp apply_formatter(%Template.Hole{op: :numbered_findings, args: %{pointer: pointer}}, value),
-    do: {:ok, value |> json_pointer_get(pointer) |> numbered_findings()}
+    do: {:ok, value |> pointer_value(pointer) |> numbered_findings()}
 
   defp apply_formatter(%Template.Hole{op: :truncate, args: %{max_bytes: max_bytes}}, value),
     do: {:ok, value |> to_text() |> truncate_utf8(max_bytes)}
@@ -95,54 +96,11 @@ defmodule Workflow.RenderText do
   defp to_text(text) when is_binary(text), do: text
   defp to_text(other), do: inspect(other)
 
-  defp json_pointer_get(value, ""), do: value
-
-  defp json_pointer_get(value, <<"/", tokens::binary>>) do
-    tokens
-    |> String.split("/", trim: false)
-    |> Enum.reduce_while(value, fn token, current ->
-      case pointer_step(current, decode_pointer_token(token)) do
-        {:ok, next} -> {:cont, next}
-        :error -> {:halt, nil}
-      end
-    end)
-  end
-
-  defp json_pointer_get(_value, _invalid_pointer), do: nil
-
-  defp decode_pointer_token(token) do
-    token
-    |> String.replace("~1", "/")
-    |> String.replace("~0", "~")
-  end
-
-  defp pointer_step(map, token) when is_map(map) do
-    case Map.fetch(map, token) do
-      {:ok, value} -> {:ok, value}
-      :error -> fetch_atom_key(map, token)
+  defp pointer_value(value, pointer) do
+    case JSONPointer.resolve(value, pointer) do
+      {:present, resolved} -> resolved
+      :missing -> nil
     end
-  end
-
-  defp pointer_step(list, token) when is_list(list) do
-    with true <- Regex.match?(~r/\A[0-9]+\z/, token),
-         index = String.to_integer(token),
-         true <- index < length(list) do
-      {:ok, Enum.at(list, index)}
-    else
-      _out_of_bounds -> :error
-    end
-  end
-
-  defp pointer_step(_value, _token), do: :error
-
-  defp fetch_atom_key(map, token) do
-    Enum.find_value(map, :error, fn
-      {key, value} when is_atom(key) ->
-        if Atom.to_string(key) == token, do: {:ok, value}
-
-      _entry ->
-        false
-    end)
   end
 
   defp flatten_value(list) when is_list(list), do: Enum.flat_map(list, &flatten_value/1)
@@ -171,16 +129,9 @@ defmodule Workflow.RenderText do
   defp numbered_finding(item, index), do: "#{index}. #{to_text(item)}"
 
   defp finding_field(map, field) do
-    case Map.fetch(map, field) do
-      {:ok, value} -> value
-      :error -> atom_finding_field(map, field)
-    end
-  end
-
-  defp atom_finding_field(map, field) do
-    case fetch_atom_key(map, field) do
-      {:ok, value} -> value
-      :error -> ""
+    case JSONPointer.resolve(map, "/" <> field) do
+      {:present, value} -> value
+      :missing -> ""
     end
   end
 
@@ -190,6 +141,7 @@ defmodule Workflow.RenderText do
     binary
     |> binary_part(0, max_bytes)
     |> trim_invalid_utf8()
+    |> :binary.copy()
   end
 
   defp trim_invalid_utf8(binary) do

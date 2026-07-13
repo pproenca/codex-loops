@@ -26,7 +26,13 @@ defmodule Workflow.FanoutRunTest do
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp echo, do: {EchoProvider, sink: self()}
   defp gate(opts \\ []), do: {GateProvider, Keyword.merge([sink: self()], opts)}
-  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+
+  defp types(id) do
+    id
+    |> Journal.fold()
+    |> Enum.reject(&(&1.type == :agent_started))
+    |> Enum.map(& &1.type)
+  end
 
   defp event(id, type), do: id |> Journal.fold() |> Enum.find(&(&1.type == type))
 
@@ -70,27 +76,37 @@ defmodule Workflow.FanoutRunTest do
 
   defmodule Par do
     @moduledoc false
-    use Workflow
 
-    workflow "par" do
-      parallel([agent("a"), agent("b"), agent("c")])
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "par",
+        quote do
+          parallel([agent("a"), agent("b"), agent("c")])
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule Capped do
     @moduledoc false
-    use Workflow
 
-    workflow "capped" do
-      parallel([agent("a"), agent("b"), agent("c")], max_concurrency: 2)
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "capped",
+        quote do
+          parallel([agent("a"), agent("b"), agent("c")], max_concurrency: 2)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   test "parallel runs every branch, journaling each at a distinct stable address, then barriers" do
     id = run_id()
-    assert {:ok, ^id} = Run.run(Par, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(Par.tree(), run_id: id, provider: echo())
 
     # Every branch's paid turn ran exactly once.
     for p <- ~w(a b c), do: assert_received({:agent_called, ^p})
@@ -121,7 +137,7 @@ defmodule Workflow.FanoutRunTest do
 
   test "parallel runs branches concurrently and joins at the barrier" do
     id = run_id()
-    {:ok, ^id, pid} = Run.start(Par, run_id: id, provider: gate())
+    {:ok, ^id, pid} = Run.start(Par.tree(), run_id: id, provider: gate())
     ref = Process.monitor(pid)
 
     # All three branches are in flight at the same time — proving concurrency, not
@@ -142,7 +158,7 @@ defmodule Workflow.FanoutRunTest do
 
   test "parallel bounds concurrency at the cap" do
     id = run_id()
-    {:ok, ^id, pid} = Run.start(Capped, run_id: id, provider: gate())
+    {:ok, ^id, pid} = Run.start(Capped.tree(), run_id: id, provider: gate())
     ref = Process.monitor(pid)
 
     # Only two branches start under a cap of two; the third waits for a free slot.
@@ -162,12 +178,12 @@ defmodule Workflow.FanoutRunTest do
 
   test "a completed parallel run resumes by replaying committed branches, never re-invoking" do
     id = run_id()
-    assert {:ok, ^id} = Run.run(Par, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(Par.tree(), run_id: id, provider: echo())
     for _ <- 1..3, do: assert_received({:agent_called, _})
 
     # Re-invoking the same run_id folds to :completed and reuses it verbatim — the
     # committed branch effects are replayed, so the provider must never run again.
-    assert {:ok, ^id} = Run.run(Par, run_id: id, provider: {ExplodingProvider, []})
+    assert {:ok, ^id} = Run.run(Par.tree(), run_id: id, provider: {ExplodingProvider, []})
     refute_received {:agent_called, _}
 
     assert committed_addresses(id) == [[0, 0], [0, 1], [0, 2]]
@@ -196,17 +212,22 @@ defmodule Workflow.FanoutRunTest do
 
   defmodule Pipe do
     @moduledoc false
-    use Workflow
 
-    workflow "pipe" do
-      pipeline(["x", "y"], [agent("s1"), agent("s2")])
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "pipe",
+        quote do
+          pipeline(["x", "y"], [agent("s1"), agent("s2")])
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   test "pipeline runs each item through every stage at a distinct stable address" do
     id = run_id()
-    assert {:ok, ^id} = Run.run(Pipe, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(Pipe.tree(), run_id: id, provider: echo())
 
     # Two items × two stages = four paid turns: two of each stage prompt.
     for _ <- 1..2, do: assert_received({:agent_called, "s1"})
@@ -230,7 +251,7 @@ defmodule Workflow.FanoutRunTest do
 
   test "pipeline lanes advance independently — no cross-item barrier" do
     id = run_id()
-    {:ok, ^id, pid} = Run.start(Pipe, run_id: id, provider: gate())
+    {:ok, ^id, pid} = Run.start(Pipe.tree(), run_id: id, provider: gate())
     ref = Process.monitor(pid)
 
     # Both lanes reach stage 1 concurrently.
@@ -265,18 +286,23 @@ defmodule Workflow.FanoutRunTest do
 
   defmodule ParFail do
     @moduledoc false
-    use Workflow
 
     # Every branch is schema-backed with no retries; EchoProvider's fixed
     # `%{"echo" => prompt}` output never satisfies the required "label", so each
     # branch fails closed deterministically.
-    workflow "par-fail" do
-      parallel([
-        agent("a", schema: %{"type" => "object", "required" => ["label"]}, retries: 0),
-        agent("b", schema: %{"type" => "object", "required" => ["label"]}, retries: 0)
-      ])
+    def tree do
+      Workflow.Test.tree!(
+        "par-fail",
+        quote do
+          parallel([
+            agent("a", schema: %{"type" => "object", "required" => ["label"]}, retries: 0),
+            agent("b", schema: %{"type" => "object", "required" => ["label"]}, retries: 0)
+          ])
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -284,7 +310,7 @@ defmodule Workflow.FanoutRunTest do
     id = run_id()
 
     assert {:error, {:malformed_output, address, {:missing_required, "label"}}} =
-             Run.run(ParFail, run_id: id, provider: echo())
+             Run.run(ParFail.tree(), run_id: id, provider: echo())
 
     assert address in [[0, 0], [0, 1]]
 
@@ -302,138 +328,183 @@ defmodule Workflow.FanoutRunTest do
 
   defmodule GenericFanout do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout" do
-      fanout width: 3 do
-        agent("work")
-        agent("check")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout",
+        quote do
+          fanout width: 3 do
+            agent("work")
+            agent("check")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutZeroComplete do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-zero-complete" do
-      fanout width: 0, on_zero: :complete do
-        agent("never")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-zero-complete",
+        quote do
+          fanout width: 0, on_zero: :complete do
+            agent("never")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutZeroFail do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-zero-fail" do
-      fanout width: 0, on_zero: :fail do
-        agent("never")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-zero-fail",
+        quote do
+          fanout width: 0, on_zero: :fail do
+            agent("never")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutThenGate do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-then-gate" do
-      fanout width: 2 do
-        agent("branch")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-then-gate",
+        quote do
+          fanout width: 2 do
+            agent("branch")
+          end
 
-      agent("gate")
-      return(:ok)
+          agent("gate")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutBudgetMax do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-budget-max" do
-      fanout width: budget_slices(per: 10, max: 3) do
-        agent("work")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-budget-max",
+        quote do
+          fanout width: budget_slices(per: 10, max: 3) do
+            agent("work")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutPathCountEmit do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-path-count-emit" do
-      let(:items = agent("items"))
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-path-count-emit",
+        quote do
+          let(:items = agent("items"))
 
-      fanout width: path_count(:items, "/rows", max: 2), bind: :work do
-        agent("work")
-      end
+          fanout width: path_count(:items, "/rows", max: 2), bind: :work do
+            agent("work")
+          end
 
-      emit(~P"Rows: <%= count(@work) %>")
+          emit(~P"Rows: <%= count(@work) %>")
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutPredicateGate do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-predicate-gate" do
-      fanout width: 2, bind: :checks do
-        agent("check")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-predicate-gate",
+        quote do
+          fanout width: 2, bind: :checks do
+            agent("check")
+          end
 
-      while_budget reserve: 0,
-                   until: agree(:checks, path: "/echo", equals: "check", threshold: :all),
-                   max_iterations: 1 do
-        agent("loop")
-      end
+          while_budget reserve: 0,
+                       until: agree(:checks, path: "/echo", equals: "check", threshold: :all),
+                       max_iterations: 1 do
+            agent("loop")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutBudgetThenGate do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-budget-then-gate" do
-      fanout width: budget_slices(per: 10, max: 2) do
-        agent("branch")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-budget-then-gate",
+        quote do
+          fanout width: budget_slices(per: 10, max: 2) do
+            agent("branch")
+          end
 
-      agent("gate")
-      return(:ok)
+          agent("gate")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GenericFanoutExplicitLanes do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-fanout-explicit-lanes" do
-      fanout width: 2 do
-        lanes([
-          [agent("research")],
-          [agent("draft"), agent("review")]
-        ])
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-fanout-explicit-lanes",
+        quote do
+          fanout width: 2 do
+            lanes([
+              [agent("research")],
+              [agent("draft"), agent("review")]
+            ])
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   test "fanout runs explicit heterogeneous lanes and commits stable addresses in lane order" do
     id = run_id()
-    assert {:ok, ^id} = Run.run(GenericFanoutExplicitLanes, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(GenericFanoutExplicitLanes.tree(), run_id: id, provider: echo())
 
     assert_received {:agent_called, "research"}
     assert_received {:agent_called, "draft"}
@@ -446,7 +517,7 @@ defmodule Workflow.FanoutRunTest do
 
   test "fanout runs a fixed-width repeated lane and commits lane events in input order" do
     id = run_id()
-    assert {:ok, ^id} = Run.run(GenericFanout, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(GenericFanout.tree(), run_id: id, provider: echo())
 
     for _ <- 1..3 do
       assert_received {:agent_called, "work"}
@@ -491,7 +562,7 @@ defmodule Workflow.FanoutRunTest do
 
   test "fanout on_zero complete journals generic markers without provider calls" do
     id = run_id()
-    assert {:ok, ^id} = Run.run(GenericFanoutZeroComplete, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(GenericFanoutZeroComplete.tree(), run_id: id, provider: echo())
 
     refute_received {:agent_called, _}
 
@@ -506,7 +577,7 @@ defmodule Workflow.FanoutRunTest do
     id = run_id()
 
     assert {:error, {:fanout_failed, [0], nil, :zero_width}} =
-             Run.run(GenericFanoutZeroFail, run_id: id, provider: echo())
+             Run.run(GenericFanoutZeroFail.tree(), run_id: id, provider: echo())
 
     refute_received {:agent_called, _}
 
@@ -533,7 +604,7 @@ defmodule Workflow.FanoutRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(GenericFanoutBudgetMax,
+             Run.run(GenericFanoutBudgetMax.tree(),
                run_id: id,
                budget: 50,
                provider: {EchoProvider, sink: self()}
@@ -558,7 +629,7 @@ defmodule Workflow.FanoutRunTest do
     {:ok, script} = ScriptedProvider.start([%{"rows" => [1, 2, 3]}, %{}, %{}])
 
     assert {:ok, ^id} =
-             Run.run(GenericFanoutPathCountEmit,
+             Run.run(GenericFanoutPathCountEmit.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -577,7 +648,7 @@ defmodule Workflow.FanoutRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(GenericFanoutPredicateGate,
+             Run.run(GenericFanoutPredicateGate.tree(),
                run_id: id,
                provider: {EchoProvider, sink: self()}
              )
@@ -590,11 +661,11 @@ defmodule Workflow.FanoutRunTest do
   end
 
   @tag :capture_log
-  test "fanout resumes past completed lanes without re-emitting markers or re-invoking lanes" do
+  test "fanout preserves completed lanes before failing closed on an unknown gate outcome" do
     id = run_id()
 
     {:ok, ^id, pid} =
-      Run.start(GenericFanoutThenGate,
+      Run.start(GenericFanoutThenGate.tree(),
         run_id: id,
         provider: {GateProvider, sink: self(), gate_on: "gate"}
       )
@@ -608,25 +679,25 @@ defmodule Workflow.FanoutRunTest do
 
     kill_and_await(id, pid)
 
-    assert {:ok, ^id} =
-             Run.run(GenericFanoutThenGate, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:error, {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}} =
+             Run.run(GenericFanoutThenGate.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     refute_received {:agent_called, "branch"}
-    assert_received {:agent_called, "gate"}
+    refute_received {:agent_called, "gate"}
     refute_received {:agent_called, _}
 
     assert Enum.count(types(id), &(&1 == :fanout_started)) == 1
     assert Enum.count(types(id), &(&1 == :fanout_completed)) == 1
-    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [1]]
-    assert Status.of(id).state == :completed
+    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0]]
+    assert Status.of(id).state == :failed
   end
 
   @tag :capture_log
-  test "dynamic fanout resumes exactly once after a journaled budget width decision" do
+  test "dynamic fanout reuses its width decision before failing on an unknown gate outcome" do
     id = run_id()
 
     {:ok, ^id, pid} =
-      Run.start(GenericFanoutBudgetThenGate,
+      Run.start(GenericFanoutBudgetThenGate.tree(),
         run_id: id,
         budget: 20,
         provider: {GateProvider, sink: self(), gate_on: "gate"}
@@ -642,20 +713,20 @@ defmodule Workflow.FanoutRunTest do
 
     kill_and_await(id, pid)
 
-    assert {:ok, ^id} =
-             Run.run(GenericFanoutBudgetThenGate,
+    assert {:error, {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}} =
+             Run.run(GenericFanoutBudgetThenGate.tree(),
                run_id: id,
                budget: 0,
                provider: {EchoProvider, sink: self()}
              )
 
     refute_received {:agent_called, "branch"}
-    assert_received {:agent_called, "gate"}
+    refute_received {:agent_called, "gate"}
     refute_received {:agent_called, _}
 
     assert Enum.count(types(id), &(&1 == :fanout_started)) == 1
     assert Enum.count(types(id), &(&1 == :fanout_completed)) == 1
-    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [1]]
-    assert Status.of(id).state == :completed
+    assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0]]
+    assert Status.of(id).state == :failed
   end
 end

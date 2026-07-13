@@ -1,6 +1,6 @@
 defmodule Workflow.LoopCompilerTest do
   @moduledoc """
-  The dynamic-loop DSL at its highest seam — `Workflow.Compiler.parse/2` — against
+  The dynamic-loop DSL at its highest seam — `Workflow.Compiler.compile/3` — against
   `quote`d / string-sourced input with no macro expansion. Proves loops compile into
   inert, addressed, closure-free structs and that malformed loops are rejected with
   located findings.
@@ -24,7 +24,7 @@ defmodule Workflow.LoopCompilerTest do
   alias Workflow.Predicate.Dry
 
   defp env, do: %{__ENV__ | file: "workflows/loops.ex", line: 1}
-  defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
+  defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
 
   describe "generic loop" do
     test "compiles a bounded loop with a header predicate and exhaustion policy" do
@@ -422,10 +422,11 @@ defmodule Workflow.LoopCompilerTest do
                parse("while_budget reserve: 1 do\n  return :ok\nend\nreturn :ok")
     end
 
-    test "a closure inside a loop body still raises via the forbidden-form catalog" do
-      assert_raise Workflow.CompileError, fn ->
-        parse("while_budget reserve: 1 do\n  fn -> :x end\nend\nreturn :ok")
-      end
+    test "a closure inside a loop body returns a forbidden-form finding" do
+      assert {:error, %Finding{message: message}} =
+               parse("while_budget reserve: 1 do\n  fn -> :x end\nend\nreturn :ok")
+
+      assert message =~ "anonymous functions"
     end
   end
 

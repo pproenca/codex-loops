@@ -1,7 +1,7 @@
 defmodule Workflow.FanoutCompilerTest do
   @moduledoc """
   The static fan-out combinators (`parallel`, `pipeline`) exercised at the highest
-  DSL seam — `Workflow.Compiler.parse/2` — directly against `quote do ... end`
+  DSL seam — `Workflow.Compiler.compile/3` — directly against `quote do ... end`
   input with no macro expansion. Assertions are on the inert, pre-addressed tree the
   compiler produces and on the located findings it returns for malformed fan-out.
   """
@@ -19,7 +19,7 @@ defmodule Workflow.FanoutCompilerTest do
   alias Workflow.Node.Return
 
   defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
-  defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
+  defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
 
   describe "parallel (barrier fan-out)" do
     test "compiles a branch list into addressed, inert agent branches" do
@@ -29,7 +29,7 @@ defmodule Workflow.FanoutCompilerTest do
           return(:ok)
         end
 
-      assert {:ok, tree} = Compiler.parse(body, env())
+      assert {:ok, tree} = Compiler.compile("test", body, env())
 
       assert [
                %Parallel{
@@ -77,10 +77,11 @@ defmodule Workflow.FanoutCompilerTest do
       assert f.hint =~ "max_concurrency"
     end
 
-    test "a closure branch is rejected by the forbidden-form catalog (raises)" do
-      assert_raise Workflow.CompileError, fn ->
-        parse("parallel([fn -> :x end])\nreturn(:ok)")
-      end
+    test "a closure branch returns a forbidden-form finding" do
+      assert {:error, %Finding{message: message}} =
+               parse("parallel([fn -> :x end])\nreturn(:ok)")
+
+      assert message =~ "anonymous functions"
     end
   end
 
@@ -92,7 +93,7 @@ defmodule Workflow.FanoutCompilerTest do
           return(:ok)
         end
 
-      assert {:ok, tree} = Compiler.parse(body, env())
+      assert {:ok, tree} = Compiler.compile("test", body, env())
 
       assert [
                %Pipeline{
@@ -126,7 +127,7 @@ defmodule Workflow.FanoutCompilerTest do
           return(:ok)
         end
 
-      assert {:ok, tree} = Compiler.parse(body, env())
+      assert {:ok, tree} = Compiler.compile("test", body, env())
       assert [%Pipeline{lanes: [[stage]]}, %Return{}] = tree.nodes
 
       assert %Agent{address: [0, 0, 0], schema: %{"type" => "object", "required" => ["label"]}} =

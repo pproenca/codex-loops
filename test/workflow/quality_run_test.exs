@@ -13,8 +13,6 @@ defmodule Workflow.QualityRunTest do
   """
   use ExUnit.Case, async: true
 
-  alias Workflow.Catalog.AdversarialVerify
-  alias Workflow.Catalog.JudgePanel
   alias Workflow.Journal
   alias Workflow.Run
   alias Workflow.Status
@@ -24,8 +22,54 @@ defmodule Workflow.QualityRunTest do
   alias Workflow.Test.ScriptedProvider
   alias Workflow.Test.VerdictProvider
 
+  defmodule AdversarialVerify do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "adversarial-verify",
+        quote do
+          verify("the reported bug reproduces on main",
+            lenses: [:correctness, :security, :repro],
+            threshold: :majority
+          )
+
+          return(:done)
+        end,
+        __ENV__
+      )
+    end
+  end
+
+  defmodule JudgePanel do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "judge-panel",
+        quote do
+          judge(["plan A", "plan B", "plan C"],
+            by: [:feasibility, :impact],
+            pick: :max_score
+          )
+
+          synthesize(["plan A", "plan B", "plan C"], "Write up the winning plan.")
+          return(:done)
+        end,
+        __ENV__
+      )
+    end
+  end
+
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
-  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+
+  defp types(id) do
+    id
+    |> Journal.fold()
+    |> Enum.reject(&(&1.type == :agent_started))
+    |> Enum.map(& &1.type)
+  end
+
   defp event(id, type), do: id |> Journal.fold() |> Enum.find(&(&1.type == type))
 
   defp committed_addresses(id) do
@@ -39,11 +83,16 @@ defmodule Workflow.QualityRunTest do
 
   defmodule Voters do
     @moduledoc false
-    use Workflow
 
-    workflow "voters" do
-      verify("the finding", voters: 3, threshold: :majority)
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "voters",
+        quote do
+          verify("the finding", voters: 3, threshold: :majority)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -51,7 +100,7 @@ defmodule Workflow.QualityRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(Voters,
+             Run.run(Voters.tree(),
                run_id: id,
                provider: {VerdictProvider, verdicts: [true, true, false], sink: self()}
              )
@@ -107,7 +156,7 @@ defmodule Workflow.QualityRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(Voters,
+             Run.run(Voters.tree(),
                run_id: id,
                provider: {VerdictProvider, verdicts: [true, false, false], sink: self()}
              )
@@ -126,7 +175,7 @@ defmodule Workflow.QualityRunTest do
 
     # Correctness and repro confirm, security refutes: 2/3 -> majority holds.
     assert {:ok, ^id} =
-             Run.run(AdversarialVerify,
+             Run.run(AdversarialVerify.tree(),
                run_id: id,
                provider: {VerdictProvider, verdicts: [true, false, true], sink: self()}
              )
@@ -150,7 +199,7 @@ defmodule Workflow.QualityRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(Voters,
+             Run.run(Voters.tree(),
                run_id: id,
                provider: {VerdictProvider, verdicts: [true, true, true], sink: self()}
              )
@@ -160,7 +209,7 @@ defmodule Workflow.QualityRunTest do
 
     # Re-invoking folds to :completed: votes replay from the journal, so the provider
     # never runs again and no new events are appended.
-    assert {:ok, ^id} = Run.run(Voters, run_id: id, provider: {ExplodingProvider, []})
+    assert {:ok, ^id} = Run.run(Voters.tree(), run_id: id, provider: {ExplodingProvider, []})
     refute_received {:agent_called, _}
     assert id |> Journal.fold() |> length() == before
     assert Status.of(id).verifications |> hd() |> Map.fetch!(:survived) == true
@@ -168,13 +217,18 @@ defmodule Workflow.QualityRunTest do
 
   defmodule StrictVote do
     @moduledoc false
-    use Workflow
 
     # A voter whose output must carry a boolean verdict; a provider that returns
     # something else fails the vote closed, and the failed vote fails the panel.
-    workflow "strict-vote" do
-      verify("the finding", voters: 2, threshold: :unanimous)
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "strict-vote",
+        quote do
+          verify("the finding", voters: 2, threshold: :unanimous)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -184,7 +238,7 @@ defmodule Workflow.QualityRunTest do
     # EchoProvider returns %{"echo" => prompt} — no "verdict" — so each vote fails
     # its schema with retries: 0.
     assert {:error, {:malformed_output, address, _reason}} =
-             Run.run(StrictVote, run_id: id, provider: {EchoProvider, sink: self()})
+             Run.run(StrictVote.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     assert address in [[0, 0], [0, 1]]
     event_types = types(id)
@@ -199,20 +253,25 @@ defmodule Workflow.QualityRunTest do
 
   defmodule InlineRefine do
     @moduledoc false
-    use Workflow
 
-    workflow "inline-refine" do
-      refine(agent("Draft artifact."),
-        reviewers: [
-          reviewer(:spec, "Spec reviewer."),
-          reviewer(:runtime, "Runtime reviewer.")
-        ],
-        revise_with: agent("Revise artifact."),
-        until: :unanimous,
-        max_rounds: 3
+    def tree do
+      Workflow.Test.tree!(
+        "inline-refine",
+        quote do
+          refine(agent("Draft artifact."),
+            reviewers: [
+              reviewer(:spec, "Spec reviewer."),
+              reviewer(:runtime, "Runtime reviewer.")
+            ],
+            revise_with: agent("Revise artifact."),
+            until: :unanimous,
+            max_rounds: 3
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
@@ -227,7 +286,7 @@ defmodule Workflow.QualityRunTest do
       ])
 
     assert {:ok, ^id} =
-             Run.run(InlineRefine,
+             Run.run(InlineRefine.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -332,7 +391,7 @@ defmodule Workflow.QualityRunTest do
 
     # Totals per candidate = score x 2 criteria: A=2, B=10, C=6 -> winner "plan B".
     assert {:ok, ^id} =
-             Run.run(JudgePanel,
+             Run.run(JudgePanel.tree(),
                run_id: id,
                provider: {PanelProvider, scores: [1, 5, 3], sink: self()}
              )
@@ -395,14 +454,19 @@ defmodule Workflow.QualityRunTest do
 
   defmodule Widen do
     @moduledoc false
-    use Workflow
 
-    workflow "widen" do
-      fan_out width: budget_slices(per: 10) do
-        agent("work")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "widen",
+        quote do
+          fan_out width: budget_slices(per: 10) do
+            agent("work")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -411,7 +475,7 @@ defmodule Workflow.QualityRunTest do
 
     # remaining 40, per 10 -> floor(40/10) = 4 branches.
     assert {:ok, ^id} =
-             Run.run(Widen, run_id: id, budget: 40, provider: {EchoProvider, sink: self()})
+             Run.run(Widen.tree(), run_id: id, budget: 40, provider: {EchoProvider, sink: self()})
 
     for _ <- 1..4, do: assert_received({:agent_called, "work"})
     refute_received {:agent_called, _}
@@ -430,7 +494,7 @@ defmodule Workflow.QualityRunTest do
 
     # remaining 25, per 10 -> floor(25/10) = 2 branches.
     assert {:ok, ^id} =
-             Run.run(Widen, run_id: id, budget: 25, provider: {EchoProvider, sink: self()})
+             Run.run(Widen.tree(), run_id: id, budget: 25, provider: {EchoProvider, sink: self()})
 
     for _ <- 1..2, do: assert_received({:agent_called, "work"})
     refute_received {:agent_called, _}
@@ -443,7 +507,7 @@ defmodule Workflow.QualityRunTest do
 
     # remaining 5, per 10 -> floor(5/10) = 0: the region is bracketed but empty.
     assert {:ok, ^id} =
-             Run.run(Widen, run_id: id, budget: 5, provider: {EchoProvider, sink: self()})
+             Run.run(Widen.tree(), run_id: id, budget: 5, provider: {EchoProvider, sink: self()})
 
     refute_received {:agent_called, _}
     assert event(id, :fan_out_started).payload.width == 0
@@ -457,6 +521,6 @@ defmodule Workflow.QualityRunTest do
     id = run_id()
 
     assert {:error, {:run_crashed, _}} =
-             Run.run(Widen, run_id: id, provider: {EchoProvider, sink: self()})
+             Run.run(Widen.tree(), run_id: id, provider: {EchoProvider, sink: self()})
   end
 end

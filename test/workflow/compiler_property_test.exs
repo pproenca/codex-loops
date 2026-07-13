@@ -27,13 +27,13 @@ defmodule Workflow.CompilerPropertyTest do
         |> Enum.map(fn {kind, i} -> {kind, [line: i + 1], ["#{kind}_#{i}"]} end)
         |> then(&{:__block__, [], &1 ++ [{:return, [line: 999], [:ok]}]})
 
-      assert {:ok, tree} = Compiler.parse(body, __ENV__)
+      assert {:ok, tree} = Compiler.compile("test", body, __ENV__)
       assert Enum.all?(tree.nodes, &(&1.__struct__ in @deterministic_nodes))
       refute contains_function?(tree)
     end
   end
 
-  property "forbidden forms are always rejected at compile" do
+  property "forbidden forms always return a finding" do
     forbidden =
       one_of([
         constant(quote(do: :rand.uniform())),
@@ -46,7 +46,7 @@ defmodule Workflow.CompilerPropertyTest do
 
     check all(form <- forbidden) do
       body = {:__block__, [], [form, {:return, [line: 2], [:ok]}]}
-      assert_raise Workflow.CompileError, fn -> Compiler.parse(body, __ENV__) end
+      assert {:error, %Workflow.Compiler.Finding{}} = Compiler.compile("test", body, __ENV__)
     end
   end
 

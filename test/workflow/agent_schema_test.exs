@@ -9,6 +9,7 @@ defmodule Workflow.AgentSchemaTest do
 
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
   alias Workflow.Run
   alias Workflow.Status
@@ -21,31 +22,41 @@ defmodule Workflow.AgentSchemaTest do
   # A workflow with a single schema-backed agent requiring an object with "label".
   defmodule Classify do
     @moduledoc false
-    use Workflow
 
-    workflow "classify" do
-      agent("classify",
-        schema: %{"type" => "object", "required" => ["label"]},
-        retries: 2
+    def tree do
+      Workflow.Test.tree!(
+        "classify",
+        quote do
+          agent("classify",
+            schema: %{"type" => "object", "required" => ["label"]},
+            retries: 2
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule InjectedClassify do
     @moduledoc false
-    use Workflow
 
-    workflow "injected-classify" do
-      let(:draft = agent("draft"))
+    def tree do
+      Workflow.Test.tree!(
+        "injected-classify",
+        quote do
+          let(:draft = agent("draft"))
 
-      agent(~P"classify: <%= @draft %>",
-        schema: %{"type" => "object", "required" => ["label"]},
-        retries: 1
+          agent(~P"classify: <%= @draft %>",
+            schema: %{"type" => "object", "required" => ["label"]},
+            retries: 1
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
@@ -56,13 +67,24 @@ defmodule Workflow.AgentSchemaTest do
     {ScriptedProvider, sink: self(), script: script}
   end
 
-  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+  defp types(id) do
+    id
+    |> Journal.fold()
+    |> Enum.reject(&(&1.type in [:agent_started, :agent_activity]))
+    |> Enum.map(& &1.type)
+  end
+
+  defp activity_fields(%Activity{} = activity) do
+    activity
+    |> Map.from_struct()
+    |> Map.delete(:activity_index)
+  end
 
   test "a schema-backed agent returns a validated term through the mock provider" do
     id = run_id()
     valid = %{"label" => "spam", "confidence" => 9}
 
-    assert {:ok, ^id} = Run.run(Classify, run_id: id, provider: provider([valid]))
+    assert {:ok, ^id} = Run.run(Classify.tree(), run_id: id, provider: provider([valid]))
 
     # The provider ran exactly once — the first output already conformed.
     assert_received {:agent_called, "classify"}
@@ -92,7 +114,7 @@ defmodule Workflow.AgentSchemaTest do
     ]
 
     assert {:error, {:provider_failure, [0], :quota_exceeded, ^detail}} =
-             Run.run(Classify,
+             Run.run(Classify.tree(),
                run_id: id,
                provider:
                  {ProviderFailureProvider,
@@ -107,7 +129,15 @@ defmodule Workflow.AgentSchemaTest do
     failed = Enum.find(Journal.fold(id), &(&1.type == :agent_failed))
     assert failed.payload.reason == {:provider_failure, :quota_exceeded, detail}
     assert failed.payload.usage == usage
-    assert Enum.map(failed.payload.activity, &Map.delete(&1, :activity_index)) == activity
+
+    assert Enum.map(failed.payload.activity, &activity_fields/1) == [
+             %{
+               kind: "provider",
+               label: "Quota",
+               summary: "quota exhausted",
+               status: :failed
+             }
+           ]
 
     status = Status.of(id)
     assert status.state == :failed
@@ -124,7 +154,7 @@ defmodule Workflow.AgentSchemaTest do
     id = run_id()
     outputs = [%{"wrong" => 1}, %{"still" => "wrong"}, %{"label" => "ok"}]
 
-    assert {:ok, ^id} = Run.run(Classify, run_id: id, provider: provider(outputs))
+    assert {:ok, ^id} = Run.run(Classify.tree(), run_id: id, provider: provider(outputs))
 
     # One initial attempt + two retries, all on the same thread.
     assert_received {:agent_called, "classify"}
@@ -155,7 +185,7 @@ defmodule Workflow.AgentSchemaTest do
     outputs = [%{"a" => 1}, %{"b" => 2}, %{"c" => 3}]
 
     assert {:error, {:malformed_output, [0], reason}} =
-             Run.run(Classify, run_id: id, provider: provider(outputs))
+             Run.run(Classify.tree(), run_id: id, provider: provider(outputs))
 
     assert reason == {:missing_required, "label"}
 
@@ -187,7 +217,7 @@ defmodule Workflow.AgentSchemaTest do
 
   test "retry decisions and terminal failure are reconstructable by folding alone" do
     id = run_id()
-    {:error, _} = Run.run(Classify, run_id: id, provider: provider([%{}, %{}, %{}]))
+    {:error, _} = Run.run(Classify.tree(), run_id: id, provider: provider([%{}, %{}, %{}]))
 
     # The fold over the raw journal equals the live read model — no process state.
     assert Status.fold(Journal.fold(id), id) == Status.of(id)
@@ -200,7 +230,7 @@ defmodule Workflow.AgentSchemaTest do
     # Drive the run to its fail-closed terminal state (three rejections, then a
     # terminal agent_failed — no run_completed).
     assert {:error, {:malformed_output, [0], _}} =
-             Run.run(Classify, run_id: id, provider: provider([%{}, %{}, %{}]))
+             Run.run(Classify.tree(), run_id: id, provider: provider([%{}, %{}, %{}]))
 
     assert types(id) ==
              [
@@ -222,7 +252,7 @@ defmodule Workflow.AgentSchemaTest do
     # relies on). The journal already folds to :failed, so the run is reused
     # verbatim: the provider must never run and no fresh run_started is appended.
     assert {:error, {:malformed_output, [0], {:missing_required, "label"}}} =
-             Run.run(Classify, run_id: id, provider: {ExplodingProvider, []})
+             Run.run(Classify.tree(), run_id: id, provider: {ExplodingProvider, []})
 
     refute_received {:agent_called, _}
 
@@ -242,7 +272,7 @@ defmodule Workflow.AgentSchemaTest do
   end
 
   @tag :capture_log
-  test "resume after a mid-retry crash reuses journaled paid attempts, not re-calling them" do
+  test "a mid-retry crash makes the in-flight paid attempt outcome unknown and never redelivers it" do
     id = run_id()
 
     # First run: two attempts reject (paid + journaled), then the provider faults
@@ -250,7 +280,7 @@ defmodule Workflow.AgentSchemaTest do
     {:ok, script1} = FlakyProvider.start([%{"a" => 1}, %{"b" => 2}])
 
     assert {:error, {:run_crashed, _}} =
-             Run.run(Classify,
+             Run.run(Classify.tree(),
                run_id: id,
                provider: {FlakyProvider, sink: self(), script: script1}
              )
@@ -259,41 +289,25 @@ defmodule Workflow.AgentSchemaTest do
     for _ <- 1..3, do: assert_received({:agent_called, "classify"})
     refute_received {:agent_called, _}
 
-    # Only the two paid rejections survived in the journal — attempt 2 never
-    # committed anything.
-    assert types(id) == [:run_started, :agent_attempt_rejected, :agent_attempt_rejected]
+    # The two settled rejections remain durable. The third paid call has a start
+    # marker but no settlement, so the writer records the ambiguity and fails.
+    assert types(id) == [
+             :run_started,
+             :agent_attempt_rejected,
+             :agent_attempt_rejected,
+             :run_failed
+           ]
 
-    # Resume with a single further (invalid) output. Correct exactly-once resume
-    # picks the retry loop up at attempt 2 — the last allowed attempt — so this one
-    # call exhausts the budget and fails the node cleanly. A buggy restart-at-0
-    # would re-call the provider for the already-paid attempts and either double-pay
-    # or crash on the exhausted script.
-    {:ok, script2} = FlakyProvider.start([%{"c" => 3}])
+    attempt = %{address: [0], iteration: 0, attempt: 2}
+    assert %{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
 
-    assert {:error, {:malformed_output, [0], {:missing_required, "label"}}} =
-             Run.run(Classify,
-               run_id: id,
-               provider: {FlakyProvider, sink: self(), script: script2}
-             )
+    # Reusing the run returns the journaled terminal result and never risks
+    # charging the unknown provider attempt a second time.
+    assert {:error, {:outcome_unknown, ^attempt}} =
+             Run.run(Classify.tree(), run_id: id, provider: {ExplodingProvider, []})
 
-    # The resumed run called the provider exactly once — not once per prior attempt.
-    assert_received {:agent_called, "classify"}
     refute_received {:agent_called, _}
-
-    # Three rejections total (two reused from the journal + one new) then terminal.
-    assert types(id) ==
-             [
-               :run_started,
-               :agent_attempt_rejected,
-               :agent_attempt_rejected,
-               :agent_attempt_rejected,
-               :agent_failed
-             ]
-
-    status = Status.of(id)
-    assert status.state == :failed
-    assert status.failure.attempts == 3
-    assert length(status.rejected) == 3
+    assert length(Status.of(id).rejected) == 2
   end
 
   test "distinct retry attempts carry distinct idempotency keys against a deduping backend" do
@@ -306,7 +320,7 @@ defmodule Workflow.AgentSchemaTest do
     {:ok, store} = DedupingProvider.start([%{"wrong" => 1}, %{"label" => "ok"}])
 
     assert {:ok, ^id} =
-             Run.run(Classify,
+             Run.run(Classify.tree(),
                run_id: id,
                provider: {DedupingProvider, store: store, sink: self()}
              )
@@ -336,13 +350,13 @@ defmodule Workflow.AgentSchemaTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(Classify, run_id: id, provider: provider([%{"label" => "ok"}]))
+             Run.run(Classify.tree(), run_id: id, provider: provider([%{"label" => "ok"}]))
 
     assert_received {:agent_called, "classify"}
 
     # Resume the same run_id with a provider that explodes if ever called: the
     # committed turn must be replayed from the journal, so it must not run.
-    assert {:ok, ^id} = Run.run(Classify, run_id: id, provider: {ExplodingProvider, []})
+    assert {:ok, ^id} = Run.run(Classify.tree(), run_id: id, provider: {ExplodingProvider, []})
     refute_received {:agent_called, _}
 
     committed = Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
@@ -353,7 +367,7 @@ defmodule Workflow.AgentSchemaTest do
     id = run_id()
     outputs = ["READY", %{"wrong" => 1}, %{"label" => "ok"}]
 
-    assert {:ok, ^id} = Run.run(InjectedClassify, run_id: id, provider: provider(outputs))
+    assert {:ok, ^id} = Run.run(InjectedClassify.tree(), run_id: id, provider: provider(outputs))
 
     assert_received {:agent_called, "draft"}
     assert_received {:agent_called, "classify: READY"}

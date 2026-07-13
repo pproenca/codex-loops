@@ -101,17 +101,18 @@ MCP behavior:
 Workflow scripts are Elixir files:
 
 ```elixir
-defmodule ExampleWorkflow do
-  use Workflow
-
-  workflow "example" do
-    phase "scout"
-    log "starting"
-    agent "Inspect README.md and summarize the project goal."
-    return :ok
-  end
+workflow "example" do
+  phase "scout"
+  log "starting"
+  agent "Inspect README.md and summarize the project goal."
+  return :ok
 end
 ```
+
+Each script contains exactly one bare, top-level `workflow` declaration. It is
+parsed as inert AST data, not compiled or evaluated; do not wrap it in a module,
+write `use Workflow`, or define a schema DSL. Structured agents use literal JSON
+Schema maps.
 
 Useful forms:
 
@@ -119,7 +120,7 @@ Useful forms:
 - `phase "title"`
 - `log "message"`
 - `agent "prompt"`
-- `agent "prompt", schema: %{...}, retries: n`
+- `agent "prompt", schema: %{...}, retries: n` where `n` is `0..5`
 - `let :name = agent(...)`
 - `let :name = synthesize(...)`
 - `let :name = refine(...)`
@@ -138,7 +139,7 @@ Useful forms:
 
 The plugin authoring surface includes the implemented generic core from root
 `SPEC.md`: bounded `loop`, repeated or explicit-lane `fanout`, and the closed predicate
-vocabulary. `loop max_iterations:` requires a positive integer and supports a
+vocabulary. `loop max_iterations:` requires an integer from `1` through `1000` and supports a
 header `until:` predicate or one body-local `until(predicate)`, but not both.
 Body-local `until` cannot contain `dry(...)`, stops the loop at that body point,
 and may use an earlier loop-local `fanout bind:`.
@@ -150,7 +151,9 @@ width equal to the lane count. A repeated lane's `width:` is an integer,
 `path_count(:binding, "/json/pointer", max: m)`. It supports optional `bind:`,
 `max_concurrency:`, and `on_zero: :complete | :fail`. A `fanout bind:` produces
 the ordered lane result list for later templates and predicates; it does not
-inject per-lane data into lane prompts.
+inject per-lane data into lane prompts. The scheduler caps concurrent tasks at
+eight and resolved fanout width at 64; script-level limits may only reduce those
+system bounds.
 
 Closed predicate examples. For `agree` over a fanout binding, each lane result
 must be a structured map, usually from a schema-backed agent:
@@ -203,10 +206,17 @@ projections are folds over the journal. Completed nodes replay from the journal
 on resume.
 
 The live provider shells out to `codex exec --json --skip-git-repo-check`,
-normalizes Codex events into activity entries, and streams progress to LiveView.
+normalizes Codex events into activity entries, and synchronously journals each
+entry before publishing a post-commit refresh notification to LiveView.
 Schema-backed agents pass `--output-schema`; the schema owns output shape, the
 prompt owns task semantics, and the writer validates outputs and fails closed
 after retry exhaustion.
+
+Immediately before every provider call, the writer appends `agent_started`.
+`agent_committed`, `agent_attempt_rejected`, or `agent_failed` settles that
+attempt. If a crash leaves a start without settlement, resume does not
+redeliver the possibly-paid effect; it terminates with `outcome_unknown`.
+Provider processes have finite time and 16 MiB input/stdout bounds.
 
 ## Packaging
 

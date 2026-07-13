@@ -11,6 +11,7 @@ defmodule Workflow.RunTest do
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
   alias Workflow.Node.Phase
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
   alias Workflow.Run
   alias Workflow.Scheduler.RunProjection
@@ -78,37 +79,61 @@ defmodule Workflow.RunTest do
 
   defmodule DemoWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "demo" do
-      phase("p")
-      log("hi")
-      agent("say hello")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "demo",
+        quote do
+          phase("p")
+          log("hi")
+          agent("say hello")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule SettledRetryThenCrashWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "settled-retry-then-crash" do
-      agent("classify",
-        retries: 1,
-        schema: %{
-          "type" => "object",
-          "properties" => %{"label" => %{"type" => "string"}},
-          "required" => ["label"]
-        }
+    def tree do
+      Workflow.Test.tree!(
+        "settled-retry-then-crash",
+        quote do
+          agent("classify",
+            retries: 1,
+            schema: %{
+              "type" => "object",
+              "properties" => %{"label" => %{"type" => "string"}},
+              "required" => ["label"]
+            }
+          )
+
+          agent("later crash")
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      agent("later crash")
-      return(:ok)
     end
   end
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp echo, do: {EchoProvider, [sink: self()]}
+
+  defp activity_fields(%Activity{} = activity) do
+    activity
+    |> Map.from_struct()
+    |> Map.delete(:activity_index)
+  end
+
+  defp activity_fields(activity) when is_map(activity) do
+    activity
+    |> Activity.normalize!()
+    |> activity_fields()
+  end
+
+  defp normalized_activity_fields(activity), do: activity |> Activity.normalize!() |> activity_fields()
 
   defp wait_for_journal_type_count(id, type, count, tries \\ 100)
 
@@ -135,7 +160,7 @@ defmodule Workflow.RunTest do
   test "runs the demo end-to-end, committing ordered events and completing" do
     id = run_id()
 
-    assert {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: echo())
 
     # The provider ran exactly once.
     assert_received {:agent_called, "say hello"}
@@ -144,10 +169,17 @@ defmodule Workflow.RunTest do
     events = Journal.fold(id)
 
     assert Enum.map(events, & &1.type) ==
-             [:run_started, :phase_entered, :log_emitted, :agent_committed, :run_completed]
+             [
+               :run_started,
+               :phase_entered,
+               :log_emitted,
+               :agent_started,
+               :agent_committed,
+               :run_completed
+             ]
 
     # seq is contiguous and ordered.
-    assert Enum.map(events, & &1.seq) == [0, 1, 2, 3, 4]
+    assert Enum.map(events, & &1.seq) == [0, 1, 2, 3, 4, 5]
 
     # Every event is versioned.
     assert Enum.all?(events, &(&1.schema == Event.schema_version()))
@@ -159,19 +191,19 @@ defmodule Workflow.RunTest do
     missing_start = run_id()
     nil_start = run_id()
 
-    assert {:error, {:usage, :provider}} = Run.run(DemoWorkflow, run_id: missing_run)
+    assert {:error, {:usage, :provider}} = Run.run(DemoWorkflow.tree(), run_id: missing_run)
     assert_no_run_started(missing_run)
 
     assert {:error, {:usage, :provider}} =
-             Run.run(DemoWorkflow, run_id: nil_run, provider: nil)
+             Run.run(DemoWorkflow.tree(), run_id: nil_run, provider: nil)
 
     assert_no_run_started(nil_run)
 
-    assert {:error, {:usage, :provider}} = Run.start(DemoWorkflow, run_id: missing_start)
+    assert {:error, {:usage, :provider}} = Run.start(DemoWorkflow.tree(), run_id: missing_start)
     assert_no_run_started(missing_start)
 
     assert {:error, {:usage, :provider}} =
-             Run.start(DemoWorkflow, run_id: nil_start, provider: nil)
+             Run.start(DemoWorkflow.tree(), run_id: nil_start, provider: nil)
 
     assert_no_run_started(nil_start)
   end
@@ -180,7 +212,7 @@ defmodule Workflow.RunTest do
     id = run_id()
 
     assert {:error, {:provider_config, {:not_a_provider, String}}} =
-             Run.start(DemoWorkflow, run_id: id, provider: {String, []})
+             Run.start(DemoWorkflow.tree(), run_id: id, provider: {String, []})
 
     assert_no_run_started(id)
   end
@@ -189,7 +221,7 @@ defmodule Workflow.RunTest do
     id = run_id()
 
     assert {:error, {:provider_config, {:missing_config, :api_key}}} =
-             Run.run(DemoWorkflow,
+             Run.run(DemoWorkflow.tree(),
                run_id: id,
                provider: {ConfigurableProvider, [sink: self(), validate_result: {:error, {:missing_config, :api_key}}]}
              )
@@ -200,7 +232,7 @@ defmodule Workflow.RunTest do
 
   test "each agent event records usage, a stable address, and the idempotency key" do
     id = run_id()
-    {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())
+    {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: echo())
 
     agent = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
 
@@ -216,16 +248,16 @@ defmodule Workflow.RunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(DemoWorkflow, run_id: id, provider: {ActivityProvider, sink: self()})
+             Run.run(DemoWorkflow.tree(), run_id: id, provider: {ActivityProvider, sink: self()})
 
     agent = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
 
-    assert Enum.map(agent.payload.activity, &Map.delete(&1, :activity_index)) == [
+    assert Enum.map(agent.payload.activity, &activity_fields/1) == [
              %{
                kind: "tool",
                label: "Shell",
                summary: "mix test test/workflow/run_test.exs",
-               status: "completed"
+               status: :completed
              }
            ]
 
@@ -248,7 +280,7 @@ defmodule Workflow.RunTest do
     ]
 
     assert {:error, {:provider_failure, [2], :timeout, ^detail}} =
-             Run.run(DemoWorkflow,
+             Run.run(DemoWorkflow.tree(),
                run_id: id,
                provider:
                  {ProviderFailureProvider, sink: self(), kind: :timeout, detail: detail, usage: usage, activity: activity}
@@ -264,6 +296,8 @@ defmodule Workflow.RunTest do
              :run_started,
              :phase_entered,
              :log_emitted,
+             :agent_started,
+             :agent_activity,
              :agent_failed
            ]
 
@@ -274,7 +308,9 @@ defmodule Workflow.RunTest do
     assert failed.payload.reason == {:provider_failure, :timeout, detail}
     assert failed.payload.usage == usage
 
-    assert Enum.map(failed.payload.activity, &Map.delete(&1, :activity_index)) == activity
+    assert Enum.map(failed.payload.activity, &activity_fields/1) ==
+             Enum.map(activity, &normalized_activity_fields/1)
+
     assert [%{activity_index: 0}] = failed.payload.activity
 
     status = Status.of(id)
@@ -297,7 +333,7 @@ defmodule Workflow.RunTest do
              public_projection["agents"]
 
     assert {:error, {:provider_failure, [2], :timeout, ^detail}} =
-             Run.run(DemoWorkflow, run_id: id, provider: {ExplodingProvider, []})
+             Run.run(DemoWorkflow.tree(), run_id: id, provider: {ExplodingProvider, []})
 
     assert Journal.fold(id) == events
     refute_received {:agent_called, _, _}
@@ -308,7 +344,7 @@ defmodule Workflow.RunTest do
     missing_total_tokens = run_id()
 
     assert {:error, {:run_crashed, _reason}} =
-             Run.run(DemoWorkflow,
+             Run.run(DemoWorkflow.tree(),
                run_id: missing_total_tokens,
                provider: {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
              )
@@ -318,7 +354,7 @@ defmodule Workflow.RunTest do
     scalar_activity = run_id()
 
     assert {:error, {:run_crashed, _reason}} =
-             Run.run(DemoWorkflow,
+             Run.run(DemoWorkflow.tree(),
                run_id: scalar_activity,
                provider: {ProviderFailureProvider, activity: [%{kind: "provider", label: "ok"}, "not an activity object"]}
              )
@@ -331,26 +367,29 @@ defmodule Workflow.RunTest do
     id = run_id()
 
     assert {:ok, ^id, pid} =
-             Run.start(DemoWorkflow,
+             Run.start(DemoWorkflow.tree(),
                run_id: id,
                provider: {ProviderFailureProvider, usage: %{"input_tokens" => 1, "output_tokens" => 2}}
              )
 
     ref = Process.monitor(pid)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, @receive_timeout
 
-    assert [:run_started, :phase_entered, :log_emitted, :run_failed] =
+    assert_receive {:DOWN, ^ref, :process, ^pid, {%ArgumentError{message: message}, _stacktrace}},
+                   @receive_timeout
+
+    assert message =~ "invalid provider usage"
+
+    assert [:run_started, :phase_entered, :log_emitted, :agent_started, :run_failed] =
              id |> Journal.fold() |> Enum.map(& &1.type)
 
-    assert %{state: :failed, failure: %{reason: {:run_crashed, detail}}} = Status.of(id)
-    assert detail["kind"] == "error"
-    assert detail["message"] =~ "invalid provider usage"
+    attempt = %{address: [2], iteration: 0, attempt: 0}
+    assert %{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
   end
 
   @tag :capture_log
   test "settled rejected attempts do not hide a later non-resumable writer crash" do
     id = run_id()
-    tree = SettledRetryThenCrashWorkflow.__workflow__(:tree)
+    tree = SettledRetryThenCrashWorkflow.tree()
     [first_agent, _second_agent | _rest] = tree.nodes
 
     assert {:ok, _event} = Journal.append_next(id, Event.run_started(tree))
@@ -377,7 +416,7 @@ defmodule Workflow.RunTest do
              )
 
     assert {:error, {:run_crashed, _reason}} =
-             Run.run(SettledRetryThenCrashWorkflow,
+             Run.run(SettledRetryThenCrashWorkflow.tree(),
                run_id: id,
                provider: {ProviderFailureProvider, sink: self(), usage: %{"input_tokens" => 1, "output_tokens" => 2}}
              )
@@ -388,21 +427,22 @@ defmodule Workflow.RunTest do
              :run_started,
              :agent_attempt_rejected,
              :agent_committed,
+             :agent_started,
              :run_failed
            ] = id |> Journal.fold() |> Enum.map(& &1.type)
 
-    assert %{state: :failed, failure: %{reason: {:run_crashed, detail}}} = Status.of(id)
-    assert detail["message"] =~ "invalid provider usage"
+    attempt = %{address: [1], iteration: 0, attempt: 0}
+    assert %{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
   end
 
-  test "streamed activity uses the serialized append allocator without settlement authority" do
+  test "streamed activity is durable before settlement and broadcasts after commit" do
     id = run_id()
     :ok = Workflow.Run.Stream.subscribe(id)
 
     assert {:ok, ^id} =
-             Run.run(DemoWorkflow, run_id: id, provider: {StreamingActivityProvider, []})
+             Run.run(DemoWorkflow.tree(), run_id: id, provider: {StreamingActivityProvider, []})
 
-    assert_receive {:run_stream_event, ^id, %Event{type: :agent_activity}}, @receive_timeout
+    assert_receive {:journal_committed, ^id, %Event{type: :agent_activity}}, @receive_timeout
 
     events = wait_for_journal_type_count(id, :agent_activity, 1)
 
@@ -410,17 +450,18 @@ defmodule Workflow.RunTest do
              :run_started,
              :phase_entered,
              :log_emitted,
+             :agent_started,
              :agent_committed,
              :run_completed
            ]
 
-    assert Enum.map(events, & &1.seq) == Enum.to_list(0..5)
+    assert Enum.map(events, & &1.seq) == Enum.to_list(0..6)
 
     assert [%Event{payload: %{activity_index: 0, attempt: 0}}] =
              Enum.filter(events, &(&1.type == :agent_activity))
   end
 
-  test "activity replay is idempotent by activity index and preserves repeated entries" do
+  test "status dedupes repeated durable activity identities and preserves distinct indexes" do
     id = run_id()
     node = %Workflow.Node.Agent{address: [0], prompt: "inspect"}
     entry = %{kind: "tool", label: "Shell", summary: "mix test", status: "completed"}
@@ -436,13 +477,14 @@ defmodule Workflow.RunTest do
     assert {:ok, replayed} = Journal.append_next(id, Event.agent_activity(node, 0, 0, 0, entry))
     assert {:ok, second} = Journal.append_next(id, Event.agent_activity(node, 0, 0, 1, entry))
 
-    assert first.seq == replayed.seq
-    assert second.seq == first.seq + 1
+    assert replayed.seq == first.seq + 1
+    assert second.seq == replayed.seq + 1
 
     status = Status.of(id)
     assert [%{activity: [first_entry, second_entry]}] = status.agents
-    assert Map.delete(first_entry, :activity_index) == entry
-    assert Map.delete(second_entry, :activity_index) == entry
+    expected = normalized_activity_fields(entry)
+    assert activity_fields(first_entry) == expected
+    assert activity_fields(second_entry) == expected
     assert first_entry.activity_index == 0
     assert second_entry.activity_index == 1
   end
@@ -487,7 +529,7 @@ defmodule Workflow.RunTest do
              }
            ] = status.rejected
 
-    assert Map.delete(rejected_activity, :activity_index) == attempt_0_activity
+    assert activity_fields(rejected_activity) == normalized_activity_fields(attempt_0_activity)
 
     assert [
              %{
@@ -497,7 +539,7 @@ defmodule Workflow.RunTest do
              }
            ] = status.agents
 
-    assert Map.delete(in_flight_activity, :activity_index) == attempt_1_activity
+    assert activity_fields(in_flight_activity) == normalized_activity_fields(attempt_1_activity)
   end
 
   test "agent events journal workflow-authored labels into the folded read model" do
@@ -549,7 +591,7 @@ defmodule Workflow.RunTest do
   test "a legacy literal-prompt agent still sends and journals the exact binary prompt" do
     id = run_id()
 
-    assert {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())
+    assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: echo())
 
     assert_received {:agent_called, "say hello"}
     refute_received {:agent_called, _}
@@ -561,7 +603,7 @@ defmodule Workflow.RunTest do
 
   test "status reconstructs run state purely by folding the journal" do
     id = run_id()
-    {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())
+    {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: echo())
 
     status = Status.of(id)
 
@@ -572,7 +614,7 @@ defmodule Workflow.RunTest do
     assert status.logs == ["hi"]
     assert length(status.agents) == 1
     assert status.usage.total_tokens == 8
-    assert status.event_count == 5
+    assert status.event_count == 6
 
     # Purity: folding the same events by hand yields the same model.
     assert Status.fold(Journal.fold(id), id) == status
@@ -674,7 +716,7 @@ defmodule Workflow.RunTest do
     id = run_id()
     :ok = Phoenix.PubSub.subscribe(Workflow.PubSub, "run:" <> id)
 
-    {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: echo())
+    {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: echo())
 
     assert_receive {:journal_committed, ^id, %Event{type: :run_started}}, @receive_timeout
     assert_receive {:journal_committed, ^id, %Event{type: :phase_entered}}, @receive_timeout
@@ -704,13 +746,13 @@ defmodule Workflow.RunTest do
     id = run_id()
     provider = {GateProvider, [sink: self()]}
 
-    {:ok, ^id, pid} = Run.start(DemoWorkflow, run_id: id, provider: provider)
+    {:ok, ^id, pid} = Run.start(DemoWorkflow.tree(), run_id: id, provider: provider)
 
     # The writer is now blocked inside the agent turn, holding the lease.
     assert_receive {:at_agent, agent_pid}, @receive_timeout
 
     assert {:error, {:already_running, ^pid}} =
-             Run.start(DemoWorkflow, run_id: id, provider: provider)
+             Run.start(DemoWorkflow.tree(), run_id: id, provider: provider)
 
     # Release the turn and let the run finish; the lease is freed on exit.
     ref = Process.monitor(pid)

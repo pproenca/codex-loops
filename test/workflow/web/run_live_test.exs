@@ -28,115 +28,150 @@ defmodule Workflow.Web.RunLiveTest do
 
   defmodule DemoWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "demo" do
-      phase("plan")
-      log("starting up")
-      agent("say hello")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "demo",
+        quote do
+          phase("plan")
+          log("starting up")
+          agent("say hello")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule InspectorWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "inspector-demo" do
-      phase("plan")
-      agent("research", label: "read:research")
-      phase("build")
-      agent("ship", label: "build:ship")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "inspector-demo",
+        quote do
+          phase("plan")
+          agent("research", label: "read:research")
+          phase("build")
+          agent("ship", label: "build:ship")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule PhaseTransitionWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "phase-transition-demo" do
-      phase("draft")
-      agent("first-agent", label: "draft:first")
-      phase("ship")
-      agent("second-agent", label: "ship:second")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "phase-transition-demo",
+        quote do
+          phase("draft")
+          agent("first-agent", label: "draft:first")
+          phase("ship")
+          agent("second-agent", label: "ship:second")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule LogHeavyWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "log-heavy-demo" do
-      phase("observe")
-      log("event one")
-      log("event two")
-      log("event three")
-      log("event four")
-      log("event five")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "log-heavy-demo",
+        quote do
+          phase("observe")
+          log("event one")
+          log("event two")
+          log("event three")
+          log("event four")
+          log("event five")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule RetryWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "retry-demo" do
-      phase("validate")
+    def tree do
+      Workflow.Test.tree!(
+        "retry-demo",
+        quote do
+          phase("validate")
 
-      agent("classify",
-        schema: %{
-          "type" => "object",
-          "properties" => %{"label" => %{"type" => "string"}},
-          "required" => ["label"]
-        },
-        retries: 1
+          agent("classify",
+            schema: %{
+              "type" => "object",
+              "properties" => %{"label" => %{"type" => "string"}},
+              "required" => ["label"]
+            },
+            retries: 1
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule LongRetryWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "long-retry-demo" do
-      phase("validate")
+    def tree do
+      Workflow.Test.tree!(
+        "long-retry-demo",
+        quote do
+          phase("validate")
 
-      agent("classify long",
-        label: "classify:long",
-        schema: %{
-          "type" => "object",
-          "properties" => %{"label" => %{"type" => "string"}},
-          "required" => ["label"]
-        },
-        retries: 2
+          agent("classify long",
+            label: "classify:long",
+            schema: %{
+              "type" => "object",
+              "properties" => %{"label" => %{"type" => "string"}},
+              "required" => ["label"]
+            },
+            retries: 2
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule FailureWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "failure-demo" do
-      phase("validate")
+    def tree do
+      Workflow.Test.tree!(
+        "failure-demo",
+        quote do
+          phase("validate")
 
-      agent("classify",
-        schema: %{
-          "type" => "object",
-          "properties" => %{"label" => %{"type" => "string"}},
-          "required" => ["label"]
-        },
-        retries: 0
+          agent("classify",
+            schema: %{
+              "type" => "object",
+              "properties" => %{"label" => %{"type" => "string"}},
+              "required" => ["label"]
+            },
+            retries: 0
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
@@ -238,16 +273,7 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defp write_workflow(block) do
-    mod = "RunLiveAPIFixture#{System.unique_integer([:positive])}"
-
-    source = """
-    defmodule #{mod} do
-      use Workflow
-      #{block}
-    end
-    """
-
-    write_script(source)
+    write_script(block)
   end
 
   defp api_workflow do
@@ -380,7 +406,7 @@ defmodule Workflow.Web.RunLiveTest do
   # "mid-run" journal state. Returns the writer pid and the gated turn's pid.
   defp start_gated(id) do
     {:ok, ^id, writer} =
-      Run.start(DemoWorkflow, run_id: id, provider: {GateProvider, sink: self()})
+      Run.start(DemoWorkflow.tree(), run_id: id, provider: {GateProvider, sink: self()})
 
     assert_receive {:at_agent, turn}
     {writer, turn}
@@ -531,7 +557,8 @@ defmodule Workflow.Web.RunLiveTest do
     {writer, turn} = start_gated(id)
 
     # Mounted mid-run: the initial projection already reflects the committed prefix.
-    {:ok, view, html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    html = wait_for_render(view, "running")
     assert html =~ "running"
     assert html =~ "plan"
     assert html =~ "starting up"
@@ -542,9 +569,8 @@ defmodule Workflow.Web.RunLiveTest do
     # no remount.
     finish(writer, turn)
 
-    updated = render(view)
+    updated = wait_for_render(view, "Completed successfully")
     assert updated =~ "completed"
-    assert updated =~ "Completed successfully"
     # The committed agent turn (address [2]) now appears; usage folds to 2 tokens.
     assert has_element?(view, "[data-testid=phase-timeline] [data-address='[2]']")
     assert has_element?(view, "[data-testid=phase-timeline]", "say hello")
@@ -554,14 +580,15 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     {:ok, ^id, writer} =
-      Run.start(DemoWorkflow,
+      Run.start(DemoWorkflow.tree(),
         run_id: id,
         provider: {StreamingGateProvider, sink: self()}
       )
 
     assert_receive {:at_agent, turn}
 
-    {:ok, view, html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    html = wait_for_render(view, "running")
 
     assert html =~ "running"
     assert has_element?(view, "[data-testid=phase-timeline]", "say hello")
@@ -591,7 +618,7 @@ defmodule Workflow.Web.RunLiveTest do
 
   test "the rendered state equals a fold of the journal at every point" do
     id = run_id()
-    assert {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     {:ok, view, _html} = live(conn(), "/runs/#{id}")
     status = Status.of(id)
@@ -611,7 +638,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(LogHeavyWorkflow, run_id: id, provider: {EchoProvider, sink: self()})
+             Run.run(LogHeavyWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     {:ok, view, _html} = live(conn(), "/runs/#{id}")
 
@@ -637,12 +664,10 @@ defmodule Workflow.Web.RunLiveTest do
   test "monitoring polish CSS keeps status accessible and motion quiet" do
     id = run_id()
 
-    assert {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
-    html =
-      conn()
-      |> get("/runs/#{id}")
-      |> html_response(200)
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    html = wait_for_render(view, "Completed successfully")
 
     assert html =~ ~s(href="/assets/codex-loops/run.css?v=5")
 
@@ -678,23 +703,25 @@ defmodule Workflow.Web.RunLiveTest do
 
     # A brand-new LiveView (a fresh connection that never observed the earlier
     # broadcasts live) must rebuild the committed prefix from the scheduler snapshot.
-    {:ok, _view, html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    html = wait_for_render(view, "running")
     committed = Status.of(id)
 
     assert html =~ to_string(committed.state)
     assert html =~ committed.phase
     assert Enum.all?(committed.logs, &(html =~ &1))
-    # The uncommitted agent turn is not shown; workflow-body state trusts committed
-    # journal events only.
-    assert committed.agents == []
+    # The durable start marker renders the in-flight attempt without inventing a
+    # successful result.
+    assert [%{status: :running}] = committed.agents
     refute html =~ ~s({"echo")
 
     finish(writer, turn)
 
     # After completion, another fresh reconnect rebuilds the terminal state too.
-    {:ok, _view2, html2} = live(conn(), "/runs/#{id}")
+    {:ok, view2, _html2} = live(conn(), "/runs/#{id}")
+    html2 = wait_for_render(view2, "completed")
     assert html2 =~ "completed"
-    assert length(Journal.fold(id)) == 5
+    assert length(Journal.fold(id)) == 6
   end
 
   test "a connected LiveView updates when the scheduler API starts a mock run" do
@@ -770,7 +797,8 @@ defmodule Workflow.Web.RunLiveTest do
       refute Map.has_key?(status_response["data"], "events")
       refute Map.has_key?(status_response["data"], "journalEvents")
 
-      {:ok, _fresh_view, fresh_html} = live(conn(), "/runs/#{id}")
+      {:ok, fresh_view, _fresh_html} = live(conn(), "/runs/#{id}")
+      fresh_html = wait_for_render(fresh_view, "codex final draft")
       assert fresh_html =~ "codex final draft"
       assert fresh_html =~ "Turn started"
       assert fresh_html =~ "Bash(mix test test/workflow/web/run_live_test.exs)"
@@ -786,7 +814,7 @@ defmodule Workflow.Web.RunLiveTest do
   test "serves the browser LiveView client for inspector controls" do
     id = run_id()
 
-    assert {:ok, ^id} = Run.run(DemoWorkflow, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     html =
       conn()
@@ -804,7 +832,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InspectorWorkflow, run_id: id, provider: {ActivityProvider, sink: self()})
+             Run.run(InspectorWorkflow.tree(), run_id: id, provider: {ActivityProvider, sink: self()})
 
     {:ok, view, _html} = live(conn(), "/runs/#{id}")
 
@@ -851,7 +879,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InspectorWorkflow, run_id: id, provider: {ActivityProvider, sink: self()})
+             Run.run(InspectorWorkflow.tree(), run_id: id, provider: {ActivityProvider, sink: self()})
 
     {:ok, view, _html} = live(conn(), "/runs/#{id}")
 
@@ -898,7 +926,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     {:ok, ^id, writer} =
-      Run.start(PhaseTransitionWorkflow, run_id: id, provider: {GateProvider, sink: self()})
+      Run.start(PhaseTransitionWorkflow.tree(), run_id: id, provider: {GateProvider, sink: self()})
 
     assert_receive {:agent_called, "first-agent"}
     assert_receive {:at_agent, first_turn}
@@ -954,7 +982,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     {:ok, ^id, writer} =
-      Run.start(PhaseTransitionWorkflow,
+      Run.start(PhaseTransitionWorkflow.tree(),
         run_id: id,
         provider: {StreamingGateProvider, sink: self()}
       )
@@ -990,7 +1018,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InspectorWorkflow, run_id: id, provider: {ActivityProvider, sink: self()})
+             Run.run(InspectorWorkflow.tree(), run_id: id, provider: {ActivityProvider, sink: self()})
 
     {:ok, view, _html} = live(conn(), "/runs/#{id}")
 
@@ -1026,7 +1054,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(LongRetryWorkflow,
+             Run.run(LongRetryWorkflow.tree(),
                run_id: id,
                provider: {RetryActivityProvider, sink: self(), mode: :retry_twice_long}
              )
@@ -1050,7 +1078,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(RetryWorkflow,
+             Run.run(RetryWorkflow.tree(),
                run_id: id,
                provider: {RetryActivityProvider, sink: self(), mode: :retry}
              )
@@ -1084,7 +1112,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
 
     assert {:error, {:malformed_output, [1], {:missing_required, "label"}}} =
-             Run.run(FailureWorkflow,
+             Run.run(FailureWorkflow.tree(),
                run_id: id,
                provider: {RetryActivityProvider, sink: self(), mode: :fail}
              )

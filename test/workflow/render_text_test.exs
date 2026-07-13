@@ -9,37 +9,28 @@ defmodule Workflow.RenderTextTest do
     assert Code.ensure_loaded?(Workflow.RenderText)
 
     assert {:ok, verify_prompt} =
-             apply(Workflow.RenderText, :fold, [
-               [],
-               [
-                 {:text, "Confirm or refute this finding, answering with a boolean verdict: "},
-                 {:literal, "finding"}
-               ]
+             Workflow.RenderText.fold([], [
+               {:text, "Confirm or refute this finding, answering with a boolean verdict: "},
+               {:literal, "finding"}
              ])
 
     assert verify_prompt ==
              "Confirm or refute this finding, answering with a boolean verdict: finding"
 
     assert {:ok, judge_prompt} =
-             apply(Workflow.RenderText, :fold, [
-               [],
-               [
-                 {:text, "Score this candidate on feasibility, answering with a numeric score: "},
-                 {:literal, "plan A"}
-               ]
+             Workflow.RenderText.fold([], [
+               {:text, "Score this candidate on feasibility, answering with a numeric score: "},
+               {:literal, "plan A"}
              ])
 
     assert judge_prompt ==
              "Score this candidate on feasibility, answering with a numeric score: plan A"
 
     assert {:ok, synthesize_prompt} =
-             apply(Workflow.RenderText, :fold, [
-               [],
-               [
-                 {:text, "Write up the winning plan."},
-                 {:text, "\n\nInputs: "},
-                 {:literal, ["plan A", "plan B", "plan C"]}
-               ]
+             Workflow.RenderText.fold([], [
+               {:text, "Write up the winning plan."},
+               {:text, "\n\nInputs: "},
+               {:literal, ["plan A", "plan B", "plan C"]}
              ])
 
     assert synthesize_prompt ==
@@ -74,14 +65,11 @@ defmodule Workflow.RenderTextTest do
     ]
 
     assert {:ok, rendered} =
-             apply(Workflow.RenderText, :fold, [
-               events,
-               [
-                 {:text, "Single: "},
-                 {:bound_value, {:node, [2]}},
-                 {:text, "\nMany: "},
-                 {:bound_list, {:map, [4]}}
-               ]
+             Workflow.RenderText.fold(events, [
+               {:text, "Single: "},
+               {:bound_value, {:node, [2]}},
+               {:text, "\nMany: "},
+               {:bound_list, {:map, [4]}}
              ])
 
     assert rendered ==

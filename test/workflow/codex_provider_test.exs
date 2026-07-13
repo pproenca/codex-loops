@@ -20,6 +20,7 @@ defmodule Workflow.CodexProviderTest do
 
   alias Workflow.Journal
   alias Workflow.Provider
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Codex
   alias Workflow.Run
   alias Workflow.Status
@@ -141,60 +142,75 @@ defmodule Workflow.CodexProviderTest do
 
   defmodule EchoWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "codex_echo" do
-      agent("say hello")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "codex_echo",
+        quote do
+          agent("say hello")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule SchemaWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "codex_schema" do
-      agent("find bugs",
-        schema: %{
-          "type" => "object",
-          "properties" => %{
-            "bugs" => %{
-              "type" => "array",
-              "items" => %{
-                "type" => "object",
-                "properties" => %{
-                  "file" => %{"type" => "string"},
-                  "line" => %{"type" => "integer"}
-                },
-                "required" => ["file", "line"]
-              }
+    def tree do
+      Workflow.Test.tree!(
+        "codex_schema",
+        quote do
+          agent("find bugs",
+            schema: %{
+              "type" => "object",
+              "properties" => %{
+                "bugs" => %{
+                  "type" => "array",
+                  "items" => %{
+                    "type" => "object",
+                    "properties" => %{
+                      "file" => %{"type" => "string"},
+                      "line" => %{"type" => "integer"}
+                    },
+                    "required" => ["file", "line"]
+                  }
+                }
+              },
+              "required" => ["bugs"]
             }
-          },
-          "required" => ["bugs"]
-        }
-      )
+          )
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule SemanticSchemaWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "codex_schema_semantics" do
-      agent("Findings must cite a concrete file and line.",
-        schema: %{
-          "type" => "object",
-          "properties" => %{
-            "prompt" => %{"type" => "string"},
-            "hasSchemaFile" => %{"type" => "boolean"}
-          },
-          "required" => ["prompt", "hasSchemaFile"]
-        }
+    def tree do
+      Workflow.Test.tree!(
+        "codex_schema_semantics",
+        quote do
+          agent("Findings must cite a concrete file and line.",
+            schema: %{
+              "type" => "object",
+              "properties" => %{
+                "prompt" => %{"type" => "string"},
+                "hasSchemaFile" => %{"type" => "boolean"}
+              },
+              "required" => ["prompt", "hasSchemaFile"]
+            }
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
@@ -214,12 +230,18 @@ defmodule Workflow.CodexProviderTest do
     do: Provider.select(:codex, command: {elixir, [stub, mode | extra]})
 
   defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
-  defp settled_types(id), do: id |> types() |> Enum.reject(&(&1 == :agent_activity))
+  defp settled_types(id), do: id |> types() |> Enum.reject(&(&1 in [:agent_started, :agent_activity]))
+
+  defp activity_fields(%Activity{} = activity) do
+    activity
+    |> Map.from_struct()
+    |> Map.delete(:activity_index)
+  end
 
   test "--provider codex executes a real agent turn and journals its result + usage", ctx do
     id = run_id()
 
-    assert {:ok, ^id} = Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "echo"))
+    assert {:ok, ^id} = Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "echo"))
 
     committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
 
@@ -246,51 +268,51 @@ defmodule Workflow.CodexProviderTest do
     assert {Codex, command: _} = codex(ctx, "echo")
 
     assert {:ok, ^mock_id} =
-             Run.run(EchoWorkflow, run_id: mock_id, provider: Provider.select(:mock, []))
+             Run.run(EchoWorkflow.tree(), run_id: mock_id, provider: Provider.select(:mock, []))
 
     assert {:ok, ^codex_id} =
-             Run.run(EchoWorkflow, run_id: codex_id, provider: codex(ctx, "echo"))
+             Run.run(EchoWorkflow.tree(), run_id: codex_id, provider: codex(ctx, "echo"))
 
     # Same inert tree, same interpreter: swapping the backend leaves the committed
     # event shape identical — only the backend module differs.
-    assert types(mock_id) == settled_types(codex_id)
+    assert settled_types(mock_id) == settled_types(codex_id)
     assert Status.of(mock_id).state == Status.of(codex_id).state
   end
 
   test "codex JSONL stream is normalized into concise committed activity", ctx do
     id = run_id()
 
-    assert {:ok, ^id} = Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "activity"))
+    assert {:ok, ^id} = Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "activity"))
 
     committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
 
     assert committed.payload.result == "say hello"
 
-    assert Enum.map(committed.payload.activity, &Map.delete(&1, :activity_index)) == [
+    assert Enum.map(committed.payload.activity, &activity_fields/1) == [
              %{
                kind: "lifecycle",
                label: "Thread started",
                summary: "t1",
-               status: "running"
+               status: :running
              },
-             %{kind: "lifecycle", label: "Turn started", summary: nil, status: "running"},
+             %{kind: "lifecycle", label: "Turn started", summary: nil, status: :running},
              %{
                kind: "reasoning",
                label: "Reasoning",
                summary: "Read the failing test",
-               status: "completed"
+               status: :completed
              },
              %{
                kind: "tool",
                label: "shell",
                summary: "mix test test/workflow/codex_provider_test.exs",
-               status: "completed"
+               status: :completed
              },
              %{
                kind: "output",
                label: "Assistant",
                summary: "say hello",
-               status: "completed"
+               status: :completed
              }
            ]
 
@@ -309,7 +331,7 @@ defmodule Workflow.CodexProviderTest do
     assert Enum.any?(activity, &(&1.kind == "output" and &1.summary == "partial assistant output"))
 
     assert {:error, {:provider_failure, [0], :backend, ^detail}} =
-             Run.run(EchoWorkflow, run_id: id, provider: {Codex, opts})
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: {Codex, opts})
 
     assert settled_types(id) == [:run_started, :agent_failed]
     refute Enum.any?(Journal.fold(id), &(&1.type == :agent_committed))
@@ -324,7 +346,7 @@ defmodule Workflow.CodexProviderTest do
     detail = %{"message" => "codex backend exploded"}
 
     assert {:error, {:provider_failure, [0], :backend, ^detail}} =
-             Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "turn_failed_exit"))
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "turn_failed_exit"))
 
     assert settled_types(id) == [:run_started, :agent_failed]
     refute Enum.any?(Journal.fold(id), &(&1.type == :run_failed))
@@ -334,7 +356,7 @@ defmodule Workflow.CodexProviderTest do
     id = run_id()
 
     assert {:error, {:provider_failure, [0], :backend, detail}} =
-             Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "completed_exit"))
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "completed_exit"))
 
     assert detail["message"] =~ "exited with status 1"
     assert settled_types(id) == [:run_started, :agent_failed]
@@ -346,7 +368,7 @@ defmodule Workflow.CodexProviderTest do
     detail = %{"message" => "codex stream failed"}
 
     assert {:error, {:provider_failure, [0], :backend, ^detail}} =
-             Run.run(EchoWorkflow, run_id: id, provider: codex(ctx, "stream_error"))
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "stream_error"))
 
     assert settled_types(id) == [:run_started, :agent_failed]
     refute Enum.any?(Journal.fold(id), &(&1.type == :agent_committed))
@@ -363,7 +385,7 @@ defmodule Workflow.CodexProviderTest do
              Codex.run_agent("say hello", nil, key, opts)
 
     assert {:error, {:provider_failure, [0], :timeout, ^detail}} =
-             Run.run(EchoWorkflow, run_id: id, provider: {Codex, opts})
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: {Codex, opts})
 
     assert settled_types(id) == [:run_started, :agent_failed]
 
@@ -392,7 +414,7 @@ defmodule Workflow.CodexProviderTest do
     # The stub rejects the first invocation and corrects on the retry; the writer
     # re-runs the paid turn across the real boundary, so the retry gets fresh output.
     assert {:ok, ^id} =
-             Run.run(SchemaWorkflow, run_id: id, provider: codex(ctx, "retry", [counter]))
+             Run.run(SchemaWorkflow.tree(), run_id: id, provider: codex(ctx, "retry", [counter]))
 
     assert settled_types(id) == [
              :run_started,
@@ -410,7 +432,7 @@ defmodule Workflow.CodexProviderTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(SemanticSchemaWorkflow,
+             Run.run(SemanticSchemaWorkflow.tree(),
                run_id: id,
                provider: codex(ctx, "schema_prompt_contract")
              )
@@ -455,7 +477,7 @@ defmodule Workflow.CodexProviderTest do
     id = run_id()
 
     assert {:error, {:malformed_output, [0], _reason}} =
-             Run.run(SchemaWorkflow, run_id: id, provider: codex(ctx, "always_invalid"))
+             Run.run(SchemaWorkflow.tree(), run_id: id, provider: codex(ctx, "always_invalid"))
 
     # Default budget: three paid attempts across the real boundary, then a terminal
     # failure — the same fail-closed contract the mock proves, now end-to-end.
@@ -477,7 +499,7 @@ defmodule Workflow.CodexProviderTest do
     # Sanity: the compiled inert tree carries the raw schema map unchanged, and the
     # provider forwards it as `--output-schema` — the writer, not the provider,
     # decides validity.
-    assert [%Workflow.Node.Agent{schema: schema} | _] = SchemaWorkflow.__workflow__(:tree).nodes
+    assert [%Workflow.Node.Agent{schema: schema} | _] = SchemaWorkflow.tree().nodes
     assert schema == @bugs_schema
   end
 

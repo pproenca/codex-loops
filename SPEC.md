@@ -5,8 +5,8 @@
 - **Created**: 2026-07-06
 - **Editors**: Codex Loops maintainers
 
-This document specifies the **Codex Loops Workflow DSL**: an embedded Elixir
-compile-time DSL for authoring deterministic, replayable agent workflows. It is written
+This document specifies the **Codex Loops Workflow DSL**: a path-loaded,
+Elixir-shaped data language for authoring deterministic, replayable agent workflows. It is written
 to the completeness bar of an implementable language spec — a developer with no access to
 the maintainers should be able to build a conforming implementation from this document
 alone.
@@ -21,13 +21,14 @@ alone.
 
 ## 1. Overview — Purpose & Design Principles
 
-The Workflow DSL is a **declarative, closed-vocabulary language embedded in Elixir**. An
-author writes a `workflow "name" do … end` block inside a module that does `use Workflow`.
-At **compile time** (during `mix compile`) the block is parsed into an inert
+The Workflow DSL is a **declarative, closed-vocabulary language with Elixir surface
+syntax**. A script contains exactly one bare, top-level
+`workflow "name" do … end` block. When the script path is validated or started,
+`Workflow.Script` parses the source as AST data and lowers it into an inert
 `%Workflow.Tree{}` — an ordered list of plain `%Workflow.Node.*{}` structs that contain no
-functions, no closures, and no captured runtime state. That tree is later executed by a
-separate interpreter that records every decision and paid effect in an append-only
-journal.
+functions, closures, or captured runtime state. The workflow source is never compiled or
+evaluated. A separate interpreter executes the tree and records every decision and paid
+effect in an append-only journal.
 
 The DSL exists to describe **generic workflow orchestration** — sequencing paid turns,
 explicitly wiring data edges, fanning out bounded work, and running bounded loops — in a
@@ -39,14 +40,15 @@ a proof that it cannot lower to the generic core (§9).
 
 Declarative and imperative-sequenced: statements execute top to bottom, but every
 statement is a static declaration, not an expression that computes a value. The DSL is a
-*surface* over a plain compiler function; the macro layer is a thin shell that only
-escapes the compiled tree into a compile-time constant.
+*surface* over a plain compiler function. There is no declaration macro or generated
+workflow module.
 
 ### 1.2 Non-goals
 
 The following are deliberately **out of scope** and MUST NOT be expressible:
 
-- **General computation.** A workflow cannot run arbitrary Elixir, define variables whose
+- **General computation.** A workflow cannot run arbitrary Elixir, define modules or
+  imports, define variables whose
   values are computed by host code, perform arithmetic, or choose an arbitrary subtree by
   branching on agent output. The only value-binding form is `let`, which binds a name to a
   lexically preceding producer's **journaled** output for deterministic rendering or closed
@@ -55,8 +57,8 @@ The following are deliberately **out of scope** and MUST NOT be expressible:
   filesystem, or any external module. Wall-clock and randomness are *unrepresentable*.
 - **Side effects outside the vocabulary.** No spawning shells, no I/O, no network calls,
   no module imports from inside a workflow body.
-- **Runtime linting.** Determinism is not enforced by a runtime checker; it is a static
-  property of the vocabulary and its compile-time validation rules.
+- **Runtime linting.** Determinism is not enforced by an execution-time checker; it is a static
+  property of the vocabulary and its load-time validation rules.
 
 ### 1.3 Design principles (the tie-breakers)
 
@@ -64,7 +66,7 @@ These principles resolve every ambiguity this document does not foresee. When tw
 readings are possible, the reading that upholds these principles is correct.
 
 1. **Core calculus before product vocabulary.** The normative core is the small set of
-   semantic primitives in §2.4: inert markers, paid `agent` turns, compile-time `let`
+   semantic primitives in §2.4: inert markers, paid `agent` turns, static `let`
    bindings to journaled producer outputs, terminal values, bounded `loop`, bounded
    `fanout`, and closed predicates. Product terms (`verify`, `judge`, `refine`,
    `reviewer`, `cold_read`, `repair`) are library/domain sugar unless a section explicitly
@@ -72,7 +74,7 @@ readings are possible, the reading that upholds these principles is correct.
    workflow first tries to desugar; it does not earn a primitive by being common.
 
 2. **Explicit data edges, no ambient phase context.** A node may consume data only through a
-   compile-time `BindingRef`, an accumulator name, or an explicit loop/fanout lane binding
+   statically resolved `BindingRef`, an accumulator name, or an explicit loop/fanout lane binding
    stored in the compiled tree. `phase` is display/read-model metadata only; it is never an
    implicit input to a prompt, predicate, key, or provider call. *Pre-resolves:* no node can
    silently read "the current phase" or "the previous result" except through a named edge.
@@ -90,7 +92,7 @@ readings are possible, the reading that upholds these principles is correct.
    an implementation-defined predicate.
 
 5. **Loops/fanout are bounded and have explicit exhaustion behavior.** Every `loop` has a
-   positive integer `max_iterations`; every runtime-width `fanout` has a positive integer
+   `max_iterations` in `1..1000`; every runtime-width `fanout` has a positive integer
    structural cap or a budget-derived width whose zero/unbounded-budget behavior is pinned.
    A loop that reaches its cap returns the declared `on_exhausted:` result (`:stop`, `:fail`,
    or `:accept_current`); it never spins or guesses. *Pre-resolves:* non-progressing bodies,
@@ -103,22 +105,23 @@ readings are possible, the reading that upholds these principles is correct.
    `refine`, `reviewer`, `cold_read`, and `repair` are not core merely because they are
    product features.
 
-7. **The Elixir DSL compiles to inert data and validates at compile time.** `use Workflow`
-   exposes declaration syntax only. `Workflow.Compiler.parse/2` lowers the AST to
-   serializable structs, stores no closures or process references, validates every static
-   rule during `mix compile`, and the macro layer only `Macro.escape`s the compiled data into
-   reflection functions. *Pre-resolves:* no validation is deferred to the interpreter, and
-   no hidden macro semantics are required to run the tree.
+7. **Path loading produces inert data and validates before execution.**
+   `Workflow.Script.load_tree/1` accepts one bounded UTF-8 file, parses it without
+   evaluation, and passes its single workflow block to `Workflow.Compiler.compile/3`.
+   The compiler lowers AST to serializable structs, stores no closures or process
+   references, and validates every static rule before a writer can start. *Pre-resolves:*
+   no validation is deferred to the interpreter, and no macro, module reflection, or
+   generated accessor is required to run the tree.
 
 ---
 
 ## 2. Lexical Grammar
 
-### 2.1 The DSL is embedded Elixir
+### 2.1 The DSL uses Elixir surface syntax
 
 The Workflow DSL **defines no lexer of its own**. A workflow's source text is ordinary
 Elixir source. Elixir's own tokenizer and parser turn that text into a quoted abstract
-syntax tree (`Macro.t()`), and the DSL compiler (`Workflow.Compiler.parse/2`) operates on
+syntax tree (`Macro.t()`), and the DSL compiler (`Workflow.Compiler.compile/3`) operates on
 that AST — not on a character stream. Consequently:
 
 - **Character set, encoding, whitespace, line terminators, and comments** are exactly
@@ -126,10 +129,15 @@ that AST — not on a character stream. Consequently:
   separator; `#` begins a line comment; comments do not nest. None of these are the
   DSL's to redefine.
 - **Case sensitivity** is Elixir's: identifiers and atoms are case-sensitive.
-- **The combinator names are not reserved words.** `agent`, `phase`, `verify`, etc. are
+- **The combinator names are not reserved Elixir words.** `agent`, `phase`, `verify`, etc. are
   recognized structurally — a local call form `name(args)` whose `name` atom is in the
   closed vocabulary. They are keywords *of the DSL grammar*, not of the Elixir lexer, and
-  carry no meaning outside a `workflow` block.
+  are recognized only as inert call-shaped AST inside the one top-level `workflow` block.
+
+The reference loader accepts at most 1 MiB of valid UTF-8. It invokes the Elixir
+parser with existing-atoms-only behavior and a finite encoder for atoms shipped in the
+runtime, so an external script cannot grow the VM atom table. A module definition,
+`use`, import, module attribute, or any second top-level form is rejected before lowering.
 
 An implementation MAY reuse a host language other than Elixir, but it MUST accept the same
 *surface forms* (§3) and produce the same *tree* (§4); this document describes the Elixir
@@ -169,14 +177,14 @@ restate the DSL-relevant subset for completeness.
 
 Note: a `StringLiteral` in the DSL MUST NOT contain runtime interpolation. Elixir string
 interpolation (`"… #{expr} …"`) tokenizes to a call form, not a binary literal, so an
-interpolated prompt fails the "must be a literal string" check (§5) — it is a compile
-error, never a runtime concatenation.
+interpolated prompt fails the "must be a literal string" check (§5) — it is a
+load-time validation error, never a runtime concatenation.
 
 ### 2.3 Literal admissibility
 
 Every value a combinator accepts as data (prompts, names, `return` values, `verify`
 subjects, `judge` candidates, `pipeline` items, `synthesize` inputs, schema maps) MUST be
-a **compile-time literal**. Formally, the AST MUST satisfy `Macro.quoted_literal?/1`: it is
+a **static literal**. Formally, the AST MUST satisfy `Macro.quoted_literal?/1`: it is
 built only from scalars (integers, floats, booleans, `nil`, atoms, binaries), lists,
 tuples, and maps whose contents are themselves literals. A form that contains a variable
 reference or a function call is **not** a literal and is rejected.
@@ -212,7 +220,7 @@ promoted. `reduce`, `select`, and `when` are explicitly **REJECTED** (§10.10).
 Contextual names:
 
 - `collect` is core but **body-only**: valid only inside a `loop` body or a library loop
-  body after desugaring (§3.7). A top-level `collect` is a compile error.
+  body after desugaring (§3.7). A top-level `collect` is a validation error.
 - `until` is core but **body-only**: it is valid only inside a `loop` body, where it
   journals a closed predicate decision and can stop that loop before later body nodes run.
 - `budget_slices(per: N)` is not a standalone combinator. It is a `WidthExpr` usable only
@@ -268,6 +276,9 @@ LibrarySugarStmt :
   - RefineStmt
 ```
 
+`WorkflowDefinition` is the entire file, not a form nested inside a module. The
+file MUST contain exactly one such definition and no sibling top-level forms.
+
 TerminalStmt :
   - ReturnStmt
   - EmitStmt
@@ -300,7 +311,7 @@ Producer :
   MUST terminate with a final `return`, `emit`, or `emit_result` (§5.10.2, §10.7, §10.7a).
 - `emit_result` emits the structured result of a result-capable binding. A result-capable
   binding is one whose producer defines a JSON-encodable public projection (§10.7a).
-- `let` is compile-time binding syntax. It inserts the producer node at the `let`'s address
+- `let` is static binding syntax. It inserts the producer node at the `let`'s address
   and records the binding name to that producer's journaled output; it creates no runtime
   node of its own (§10.5).
 
@@ -312,10 +323,9 @@ AgentOpts : `,` KeywordList
 ```
 
 The optional `KeywordList` is a literal Elixir keyword list drawn only from the keys
-`schema:`, `retries:`, and `label:`. `schema:` is either a
-literal JSON-schema map or a **schema-module alias** — a module built with
-`Workflow.Schema.DSL` (§4.5) that the compiler lifts to an inert map via
-`module.__schema__(:json)`. `retries:` is a non-negative integer literal, default `2`
+`schema:`, `retries:`, and `label:`. `schema:` MUST be a literal JSON Schema map;
+module aliases, function calls, and schema DSL declarations are rejected. `retries:` is an
+integer from `0` through `5`, default `2`
 (total attempts = `retries + 1`), and requires `schema:` when present. `label:` is an
 optional string literal used only as inert display metadata; it does not affect addressing,
 idempotency, prompts, provider calls, validation, control flow, or results, and it may be
@@ -329,7 +339,7 @@ Rule 5.3.4 (it is a literal map) and therefore **compiles and runs**, but `schem
 is then `nil`, which `Schema.Validate` treats as an unrecognized type and **accepts every
 output permissively** (§6.4.2), silently defeating fail-closed validation (Principle 4).
 The compiler does **not** reject an atom-keyed schema (Rule 5.3.4 checks only that the map
-is a literal); a conforming implementation SHOULD emit a compile-time warning when a
+is a literal); a conforming implementation SHOULD emit a validation warning when a
 literal schema map's top-level `"type"` string key is absent, and MAY reject it, but an
 author MUST supply string keys to get fail-closed behavior (§11.3).
 
@@ -343,7 +353,8 @@ ConcurrencyOpt : `,` `[` `max_concurrency:` IntegerLiteral `]`
 
 `BranchList` MUST be a non-empty literal list in which **every element is an `agent(…)`
 call**. The only option is `max_concurrency: <positive integer>` (default: all branches
-at once).
+eligible at once). The runtime-wide cap of eight tasks still applies; a node option can
+only reduce that bound.
 
 ### 3.4 Pipeline (per-item fan-out, no barrier)
 
@@ -410,7 +421,7 @@ UntilStmt   : `until` `(` Predicate `)`
 
 The generic `loop` options are:
 
-- `max_iterations:` REQUIRED, a positive integer literal.
+- `max_iterations:` REQUIRED, an integer literal from `1` through `1000`.
 - `until:` OPTIONAL, a `Predicate` (§3.8). Omitted means the loop stops only by
   `max_iterations`.
 - `on_exhausted:` OPTIONAL, one of `:stop | :fail | :accept_current`; default `:stop`.
@@ -485,7 +496,7 @@ JsonPointerCharacter :: `\` (`"` | `\`)
 `all`/`any` (and legacy aliases `all_of`/`any_of`) require at least one nested predicate.
 `count(:name)` reads the global accumulator named by `collect(into: :name)`.
 `budget_remaining()` reads the journaled ledger. `path_*` predicates and `agree` resolve a
-compile-time `BindingRefAtom` to an already-journaled value and inspect it with RFC 6901 JSON
+statically resolved `BindingRefAtom` to an already-journaled value and inspect it with RFC 6901 JSON
 Pointer rules (§6.8). `agree(:reviews, path: "/approved", equals: true, threshold: :all)`
 is true iff the bound value is a list and the required number of elements have a value at
 `/approved` JSON-equal to `true`.
@@ -493,7 +504,7 @@ is true iff the bound value is a list and the required number of elements have a
 A `loop` whose `until:` predicate contains one or more `dry(...)` predicates derives the
 loop body's `seen_by` list from those predicates. All `dry` predicates in one `until:` tree
 MUST specify the same `seen_by` list (or all omit it, equivalent to `[]`); conflicting
-`seen_by` lists are a compile-time error. A `dry` predicate outside a `loop until:` position
+`seen_by` lists are a load-time error. A `dry` predicate outside a `loop until:` position
 is invalid; body `until(...)` predicates MUST use non-dry predicates.
 
 No predicate performs arithmetic beyond the single comparison production. No predicate uses
@@ -527,7 +538,7 @@ WidthExpr :
 - `width:` REQUIRED, a `WidthExpr`.
 - `max_concurrency:` OPTIONAL, a positive integer literal.
 - `bind:` OPTIONAL, a literal atom naming the ordered list of lane results for later
-  predicates/templates. If present at top level, it is a compile-time `BindingRef` to this
+  predicates/templates. If present at top level, it is a statically resolved `BindingRef` to this
   fanout's journaled result list (`{:fanout, address, :global}`) and enters scope **after**
   the `fanout` node. If present inside a loop body, it is a loop-local `BindingRef`
   (`{:fanout, address, {:loop_local, loop_address}}`) for the current iteration only and may
@@ -546,6 +557,7 @@ is valid only for a repeated lane and is handled by `on_zero:`.
 `max` when present MUST be positive, and an unbounded run is a runtime crash unless the
 width decision was already journaled on resume (§6.10). `path_count(:xs, "/items", max: M)`
 is runtime-decided from a lexically preceding binding and MUST use the explicit `max:` cap.
+Every newly resolved width is additionally limited by the runtime-wide maximum of 64 lanes.
 
 The legacy `fan_out width: budget_slices(per: N) do B end` desugars to
 `fanout width: budget_slices(per: N), on_zero: :complete do B end`.
@@ -578,11 +590,8 @@ during tree construction by `Desugar(form, env)` (§4.3.1): after compilation, n
 interpreter step may need to know that a node was written with product vocabulary such as
 `reviewer`, `cold_read`, or `repair`.
 
-The macro escapes the tree into a compile-time constant exposed by two reflection functions
-(introspection surface):
-
-- `Module.__workflow__(:tree)` returns the `%Workflow.Tree{}`.
-- `Module.__workflow__(:name)` returns the workflow's name string.
+`Workflow.Script.load_tree/1` returns the tree directly as `{:ok, tree}`. There is no
+workflow module, reflection callback, or generated accessor.
 
 ### 4.1 The tree container
 
@@ -590,7 +599,7 @@ The macro escapes the tree into a compile-time constant exposed by two reflectio
 
 | Field | Type | Default | Notes |
 |---|---|---|---|
-| `name` | `String.t() \| nil` | `nil` | Set by the `workflow/2` macro from the string literal; the compiler leaves it `nil`. |
+| `name` | `String.t() \| nil` | `nil` | Set by `Workflow.Compiler.compile/3` from the top-level string literal. |
 | `version` | `pos_integer()` | `1` | Structural version, independent of the journal schema version. |
 | `nodes` | `[struct()]` | `[]` (enforced key) | Ordered list of node structs. |
 
@@ -646,14 +655,14 @@ match the desugaring below.
 
 ### 4.3.1 Desugaring contract
 
-`Desugar(form, env)` is a compile-time, total function over valid surface forms. It returns
-only inert core nodes and an updated compile-time binding environment.
+`Desugar(form, env)` is a static, total function over valid surface forms. It returns
+only inert core nodes and an updated binding environment.
 
 ```
 Desugar(form, env):
   - If form is a core form: Return CoreLower(form, env).
   - If form is a library form: Return the core tree specified by that form's section.
-  - If the section gives no desugaring: Raise a compile-time validation error.
+  - If the section gives no desugaring: Return a located validation finding.
 ```
 
 `CoreLower(form, env)` is the per-core-form compile algorithm defined by that form's grammar
@@ -683,10 +692,10 @@ library-specific events (for example `refine_*`), those events are library proje
 they MAY be emitted in addition to core events, but no core decision may depend on them
 unless they are themselves journaled before the decision that reads them.
 
-### 4.4 Compile-time template pre-expansion
+### 4.4 Static template pre-expansion
 
-Several combinators pre-expand into a grid or lane of inert `%Agent{}` templates **at
-compile time**, so the tree already contains every paid turn (fully addressed) before the
+Several combinators pre-expand into a grid or lane of inert `%Agent{}` templates **while
+the script is loaded**, so the tree already contains every paid turn (fully addressed) before the
 run starts:
 
 - **`parallel`**: branch `i` at `address ++ [i]`.
@@ -708,7 +717,7 @@ run starts:
 
 **Placeholder rendering (normative, with a host-scoped clause for `inspect/1`).** The
 `<subject>`, `<candidate>`, `<lens>`, and `<criterion>` placeholders above are substituted
-into the fixed template **at compile time**, and the composed prompt is later journaled
+into the fixed template **while loading**, and the composed prompt is later journaled
 verbatim in `agent_committed.prompt` (§7.2), so it is observable output. The substitution
 rules are:
 
@@ -760,7 +769,7 @@ score schema   = %{"type" => "object",
                    "required" => ["score"]}
 ```
 
-`fan_out` is the **only** combinator whose fan width is not a compile-time constant: its
+`fan_out` is the **only** combinator whose fan width is not statically fixed: its
 body is stored with placeholder addresses and re-addressed per branch at runtime (§6.10),
 because the width is a runtime budget decision. Like `pipeline` (and unlike
 `synthesize`/`verify`/`judge`, which inject their data), a `fan_out` lane receives **no**
@@ -770,131 +779,31 @@ index appears only in the address, never in the prompt (§3.9).
 Voter and scorer agents are always `retries: 0` and schema-bound, so a malformed vote or
 score is a **hard panel failure**, never a re-roll.
 
-### 4.5 Schema modules (the `schema:` module-alias form)
+### 4.5 Literal schemas
 
-`agent`'s `schema:` option accepts a **literal JSON-schema map** (the primary form; the
-maps validated by §6.4.2) or a **schema-module alias**: a module that exports
-`__schema__(:json)` returning such a map. The two are interchangeable — `agent("…", schema:
-Name)` behaves **identically** to passing `Name.__schema__(:json)`'s map literally. The
-compiler resolves the alias at compile time (Rule 5.3.4) and stores only the resulting inert
-map in the `%Agent{}` node; no module reference survives into the tree (Principle 7).
-
-Schema modules are authored with a small **closed sub-DSL**, `Workflow.Schema.DSL`, which is
-itself compile-time-only and produces an inert JSON-schema map. Its grammar and semantics:
-
-```
-SchemaDefinition : `schema` ModuleAlias `do` SchemaBody `end`
-SchemaBody       : FieldStmt+
-FieldStmt :
-  - ScalarField
-  - ArrayField
-ScalarField : ScalarType `(` FieldName ReqOpt? `)`
-ScalarType  : one of `string` `integer` `number` `boolean`
-ArrayField  : `array` `(` FieldName `,` `[` `of:` ElemType `]` ReqOpt? `)`
-            | `array` FieldName `,` `of:` `:object` `do` SchemaBody `end`
-ElemType    : `:string` | `:integer` | `:number` | `:boolean`
-FieldName   : Atom | StringLiteral
-ReqOpt      : `,` `required:` BooleanLiteral
-```
-
-- `import Workflow.Schema.DSL` (or `use Workflow.Schema.DSL`) exposes `schema/2`.
-- `schema Name do <body> end` defines a module `Name` exporting `Name.__schema__(:json)`
-  (and a zero-arity `Name.__schema__/0`) that returns the inert map. A schema module MUST be
-  compiled **before** the workflow that references it.
-- **Every field is REQUIRED by default.** A field opts out with `required: false` (the value
-  MUST be a boolean literal). Required fields populate the enclosing object's `"required"`
-  list, in declaration order.
-- The generated map is a JSON-Schema `"object"` whose `"properties"` are the declared
-  fields in declaration order: a scalar field `string(:f)` → `%{"type" => "string"}`; an
-  `array name, of: :string` → `%{"type" => "array", "items" => %{"type" => "string"}}`; an
-  `array name, of: :object do … end` → an array whose `"items"` is the nested object built
-  by the same rules.
-- The vocabulary is **closed**: any form outside `string`/`integer`/`number`/`boolean`/
-  `array` (or an `of:` element type outside the four scalars) raises a caller-located
-  `Workflow.CompileError` at `mix compile`, exactly like the workflow DSL's forbidden-form
-  catalog (§5.1).
-
-Example — the module and its lifted map:
-
-```elixir
-import Workflow.Schema.DSL
-
-schema BugReport do
-  array :bugs, of: :object do
-    string(:file)
-    integer(:line)
-  end
-end
-
-# BugReport.__schema__(:json) ==
-#   %{"type" => "object",
-#     "properties" => %{
-#       "bugs" => %{"type" => "array",
-#                   "items" => %{"type" => "object",
-#                                "properties" => %{"file" => %{"type" => "string"},
-#                                                  "line" => %{"type" => "integer"}},
-#                                "required" => ["file", "line"]}}},
-#     "required" => ["bugs"]}
-```
-
-**Placement (the "compiled before" rule, made concrete).** Because the compiler calls
-`Name.__schema__(:json)` **at compile time** while parsing the referencing workflow
-(Rule 5.3.4), the module `Name` MUST already be compiled at that point; a module Elixir has
-not yet compiled is an "unknown/uncompiled module" and is **rejected**. Concretely:
-
-- **RECOMMENDED:** define the schema module in its **own file** (or its own top-level
-  `defmodule`), which Elixir compiles as an independent unit before the workflow module that
-  references it. This always satisfies the rule.
-- **Same-file definition works only if the schema module is compiled first.** A `schema Name
-  do … end` written **below** the `defmodule …WorkflowModule` that references it (or in any
-  arrangement Elixir does not compile first) fails Rule 5.3.4 at `mix compile` with a
-  caller-located error. The literal-map form (`schema: %{…}`) has no ordering constraint and
-  is the fallback when placement is awkward.
-
-Example — schema module in its own file, referenced by a workflow in another:
-
-```elixir
-# file: lib/schemas/bug_report.ex  (compiles as its own unit, before the workflow)
-import Workflow.Schema.DSL
-
-schema BugReport do
-  string(:file)
-  integer(:line)
-end
-
-# file: lib/flows/triage.ex
-defmodule Triage do
-  use Workflow
-
-  workflow "triage" do
-    agent("Report one bug as {file, line}.", schema: BugReport)   # BugReport already compiled
-    return(:done)
-  end
-end
-```
-
-An implementation MAY treat the module-alias form as syntactic sugar; what is normative is
-that `schema: Name` and `schema: Name.__schema__(:json)`'s map yield the **same** `%Agent{}`
-node and therefore the same run behavior.
+`agent`'s `schema:` option accepts only a literal JSON Schema map validated by
+§6.4.2. The compiler materializes that map into the `%Agent{}` node. Module aliases,
+function calls, schema modules, and a schema sub-DSL are outside the language and MUST be
+rejected. This keeps path-loaded scripts inert and prevents loading or executing author
+modules.
 
 ---
 
 ## 5. Validation (static semantics)
 
-All validation runs at **compile time** in the plain function `Workflow.Compiler.parse/2`
-(the `workflow/2` macro is a thin shell that only escapes the compiled tree or raises the
-finding). No validation is deferred to runtime.
+All validation runs while the path is loaded, before execution, in
+`Workflow.Script.load_tree/1` and `Workflow.Compiler.compile/3`. No validation is
+deferred to the interpreter.
 
-### 5.0 The two error channels and finding shape
+### 5.0 Tagged result and finding shape
 
-`parse/2` surfaces validation through two channels; both end as a **caller-located**
-`mix compile` failure:
+`compile/3` returns one of two tagged results:
 
-1. **Recoverable finding** — `{:error, %Workflow.Compiler.Finding{}}`. Used for
-   wrong-argument-shape errors, per-option errors, and whole-DSL invariants. The macro
-   converts it to a raised, formatted `Workflow.CompileError`.
-2. **Raised `Workflow.CompileError`** — raised directly for the *forbidden-form catalog*
-   (§5.1).
+1. **Success** — `{:ok, %Workflow.Tree{}}`.
+2. **Located finding** — `{:error, %Workflow.Compiler.Finding{}}`, used for
+   wrong-argument shapes, per-option errors, forbidden forms, and whole-language
+   invariants. `Workflow.Script` formats it into a typed `Workflow.Script.Error` for the
+   scheduler API.
 
 A `%Finding{}` carries `message`, optional `form` (the offending AST), `file`, `line`, and
 optional `hint`. `file`/`line` come from the caller's `%Macro.Env{}` and the offending
@@ -902,14 +811,14 @@ form's line metadata, so an error names the exact line in the author's file. Whe
 is `nil` (whole-DSL invariants) the render shows location only; otherwise it renders a
 rustc-style snippet with a caret underline.
 
-An implementation MUST report every validation failure as a compile-time error located at
+An implementation MUST report every validation failure as a typed, located load error at
 the offending declaration. It MUST NOT accept an invalid workflow and defer the error to
-run time.
+execution time.
 
-### 5.1 Forbidden-form catalog (raises)
+### 5.1 Forbidden-form catalog
 
-Any form that is not a recognized combinator call is rejected. These **raise**
-`Workflow.CompileError`.
+Any form that is not a recognized combinator call returns a located
+`Workflow.Compiler.Finding`.
 
 **Rule 5.1.1 — No closures.** A `fn … end` form is rejected.
 *Why:* a workflow is inert data and cannot capture a closure.
@@ -991,22 +900,23 @@ agent("go", schema: %{"type" => "object"}, bogus: 1)   # invalid arguments
 agent("go", retries: 2)      # `agent` with options requires a `schema:`
 ```
 
-**Rule 5.3.4 — Schema is a literal map or a schema module.** `schema:` MUST be either a
-literal JSON-schema map (satisfying `Macro.quoted_literal?`) or a **schema-module alias**
-(§4.5) — a module that exports `__schema__(:json)`, which the compiler calls at compile
-time to obtain the inert JSON-schema map. A non-map, a non-literal map, a module that does
-not export `__schema__(:json)`, or an unknown/uncompiled module is rejected. A schema module
-MUST be compiled before the workflow that references it.
+**Rule 5.3.4 — Schema is a literal map.** `schema:` MUST be a literal JSON Schema map
+satisfying `Macro.quoted_literal?/1`. A non-map, non-literal map, module alias, or function
+call is rejected.
 
 ```counter-example
 agent("go", schema: "not a map")   # `agent` schema must be a literal map
 ```
 
-**Rule 5.3.5 — Retries is a non-negative integer.** `retries:` MUST be an integer `>= 0`
-(default `2`).
+**Rule 5.3.5 — Retries is bounded.** `retries:` MUST be an integer from `0` through `5`
+(default `2`; at most six paid attempts including the initial call).
 
 ```counter-example
 agent("go", schema: %{"type" => "object"}, retries: -1)   # must be a non-negative integer
+```
+
+```counter-example
+agent("go", schema: %{"type" => "object"}, retries: 6)    # retries must be at most 5
 ```
 
 **Rule 5.3.6 — Label is inert display metadata.** `label:` MUST be a string literal when
@@ -1123,10 +1033,10 @@ end
 
 **Rule 5.7.0 — Generic `loop` options are closed and bounded.** `loop` MUST parse as
 `[opts, [do: block]]`. `opts` keys MUST be drawn from
-`[:max_iterations, :until, :on_exhausted]`; `max_iterations:` is REQUIRED and MUST be a
-positive integer literal; `until:` when present MUST parse as a `Predicate`; and
+`[:max_iterations, :until, :on_exhausted]`; `max_iterations:` is REQUIRED and MUST be an
+integer literal from `1` through `1000`; `until:` when present MUST parse as a `Predicate`; and
 `on_exhausted:` when present MUST be one of `:stop | :fail | :accept_current`. An invalid
-generic loop is a compile-time finding; exhaustion is never left to runtime policy. If the
+generic loop is a load-time finding; exhaustion is never left to runtime policy. If the
 `until:` tree contains `dry(...)`, every `dry` node in that tree MUST carry the same
 `seen_by` list after defaulting omitted `seen_by` to `[]`.
 
@@ -1161,13 +1071,20 @@ while_budget max_iterations: 10 do
 end                          # a loop requires `reserve:`
 ```
 
-**Rule 5.7.4 — `max_iterations:` is a positive integer.** Optional; default `1000`.
+**Rule 5.7.4 — `max_iterations:` is bounded.** On compatibility loops it is optional
+(default `1000`); whenever present it MUST be an integer from `1` through `1000`.
 
 ```counter-example
 until_dry rounds: 1, max_iterations: 0 do
   agent("go", schema: %{"type" => "array"})
   collect(into: :i)
 end                          # `max_iterations` must be a positive integer
+```
+
+```counter-example
+loop max_iterations: 1001 do
+  agent("go")
+end                          # `max_iterations` must be between 1 and 1000
 ```
 
 **Rule 5.7.5 — `seen_by:` is a list of atoms.** Optional; default `[]`. Never a function.
@@ -1227,10 +1144,12 @@ in-scope global binding or a loop-local binding already declared in the same bod
 `on_zero:` when present MUST be `:complete` or `:fail`.
 The body MUST be either one non-empty `AgentLane` or a non-empty `LaneList`. If it is a
 `LaneList`, `width:` MUST be a positive integer literal equal to the number of lanes. If it
-is a repeated `AgentLane`, an integer width MUST be a non-negative integer literal. Runtime
+is a repeated `AgentLane`, an integer width MUST be a literal from `0` through `64`. An
+explicit lane list therefore also contains at most 64 lanes. Runtime
 width expressions (`budget_slices`, `path_count`) are valid only with a single repeated
 lane; their structural caps (`per:` and `max:` where present/required) MUST be positive
-integer literals. A `path_count` width expression MUST reference a global binding; it MUST
+integer literals, and the runtime clamps their newly decided width to 64. A `path_count`
+width expression MUST reference a global binding; it MUST
 NOT reference a loop-local `fanout bind:` name.
 
 ```counter-example
@@ -1243,6 +1162,12 @@ end                          # path-count fanout width requires an explicit `max
 fanout width: budget_slices(per: 10) do
   lanes([[agent("a")], [agent("b")]])
 end                          # heterogeneous lanes require fixed literal width
+```
+
+```counter-example
+fanout width: 65 do
+  agent("go")
+end                          # literal fanout width must be at most 64
 ```
 
 **Rule 5.8.1 — legacy `fan_out` width is exactly `budget_slices(per: N)`.** REQUIRED;
@@ -1346,7 +1271,7 @@ end
 
 **Rule 5.10.2a — `emit_result` is a final top-level terminal over one result-capable
 binding.** `emit_result` MUST appear only at top level, MUST be the final top-level node,
-and MUST take exactly one literal binding atom. The binding MUST resolve, at compile time,
+and MUST take exactly one literal binding atom. The binding MUST resolve, while loading,
 to a result-capable producer: a producer whose section defines a JSON-encodable public
 projection for structured terminal output. In the shipped library surface, only `refine`
 defines such a projection.
@@ -1398,8 +1323,6 @@ Examples (all compile):
 - `verify("f", voters: 1, voters: 3)` → `{:voters, 1}`.
 - `judge(["a"], by: [:x], by: [:y], pick: :max_score)` → `by: [:x]`.
 - `while_budget reserve: 4, reserve: 8 do agent("go") end` → `reserve: 4`.
-- A schema field option `string(:f, required: false, required: true)` → `required: false`
-  (§5.11.3).
 
 **Exception — an option checked by exact key-set equality rejects a duplicate.** Two options
 are validated with `Keyword.keys(opts) == [<key>]` rather than a subset predicate, so a
@@ -1417,116 +1340,6 @@ subset-checked options, and rejection for the two exact-key-set options above.
 ```counter-example
 collect(into: :a, into: :b)   # exact-key-set option: a repeated `into:` is rejected
 ```
-
-### 5.11 Schema sub-DSL (`Workflow.Schema.DSL`) validation
-
-The schema sub-DSL (§4.5) is its own closed vocabulary parsed by the plain function
-`Workflow.Schema.Compiler.parse_object/2`. Like the workflow DSL's forbidden-form catalog
-(§5.1), every out-of-vocabulary form **raises** a caller-located `Workflow.CompileError` at
-`mix compile`; the rules below are decidable predicates over the schema-body AST, each with
-the smallest violating (or, where noted, accepted) input. The builder vocabulary is exactly
-`string`, `integer`, `number`, `boolean`, and `array` (scalar element types
-`:string | :integer | :number | :boolean`, plus `of: :object` with a nested body).
-
-**Rule 5.11.1 — Only the closed builder vocabulary.** A field form whose head is not one of
-`string`/`integer`/`number`/`boolean`/`array` (in any accepted arity) raises `unknown schema
-builder outside the field vocabulary`.
-
-```counter-example
-schema Bad do
-  frobnicate(:x)             # unknown schema builder outside the field vocabulary
-end
-```
-
-**Rule 5.11.2 — A field name is a literal atom or string.** A `ScalarField`/`ArrayField`
-name that is not a literal atom or binary raises `a schema field name must be a literal atom
-or string`.
-
-```counter-example
-schema Bad do
-  string(some_var)           # a schema field name must be a literal atom or string
-end
-```
-
-**Rule 5.11.3 — Field options are a keyword literal from the allowed keys.** A scalar
-field's options MUST be a literal keyword list drawn from `[:required]`; an `array`'s from
-`[:of, :required]`. Any other key or a non-keyword raises `invalid schema field options`
-(or `schema field options must be a keyword list`). A **repeated** allowed key is accepted
-and resolved **first-occurrence-wins** (the compiler reads each with `Keyword.fetch/2`), per
-Rule 5.10.4 — e.g. `array(:xs, of: :string, of: :integer)` uses `of: :string`.
-
-```counter-example
-schema Bad do
-  string(:f, bogus: 1)       # invalid schema field options
-end
-```
-
-**Rule 5.11.4 — `required:` is a boolean literal.** When present, `required:` MUST be a
-boolean literal; any non-boolean raises `` `required:` must be a boolean `` (a field is
-required by default; opt out with `required: false`).
-
-```counter-example
-schema Bad do
-  string(:f, required: 1)    # `required:` must be a boolean
-end
-```
-
-**Rule 5.11.5 — `array` requires an `of:` item type.** An `array` field MUST supply `of:`.
-
-```counter-example
-schema Bad do
-  array(:xs, [])             # `array xs` requires an `of:` item type
-end
-```
-
-**Rule 5.11.6 — `of: :object` REQUIRES a `do` block; a scalar `of:` FORBIDS one.**
-`array name, of: :object` MUST be paired with a `do … end` body (raising `` `array <name>,
-of: :object` requires a `do` block `` otherwise), and a scalar `of:` (e.g. `of: :string`)
-MUST NOT carry a `do` block (raising `` … does not take a `do` block ``). An `of:` value
-outside `:object` and the four scalars raises `` `array <name>` has an unknown item type … ``.
-
-```counter-example
-schema Bad do
-  array(:xs, of: :object)    # `array xs, of: :object` requires a `do` block
-end
-```
-
-**Rule 5.11.7 — An empty nested-object body is valid (accepts to an empty object).** A
-`schema` body (top-level or a nested `of: :object` body) MAY be empty; `parse_object`
-of an empty body yields `%{"type" => "object", "properties" => %{}, "required" => []}`
-(no fields, no required keys). This is accepted, not rejected.
-
-```example
-schema Empty do
-end
-# Empty.__schema__(:json) == %{"type" => "object", "properties" => %{}, "required" => []}
-```
-
-**Duplicate field names (pinned output — accepted, collapsed).** The sub-DSL does **not**
-enforce field-name uniqueness. Declaring the same field twice is **valid** and produces a
-pinned, observable map: `"properties"` is built with `Map.new`, so a repeated key collapses
-to a **single** property whose value is the **last** declaration's type; but `"required"` is
-built by a comprehension that does **not** dedup, so a repeated required field **appears
-twice** in the `"required"` list, in declaration order.
-
-```example
-schema Dup do
-  string(:f)
-  string(:f)
-end
-# Dup.__schema__(:json) ==
-#   %{"type" => "object",
-#     "properties" => %{"f" => %{"type" => "string"}},   # one key (last wins)
-#     "required" => ["f", "f"]}                            # NOT deduped
-```
-
-**String vs. atom field names produce the same property key (pinned).** A field name is
-rendered to a property key by `Atom.to_string/1` for an atom and passed through unchanged
-for a binary, so `string(:f)` and `string("f")` produce the **identical** property key
-`"f"` (and would collapse per the duplicate-field rule above if both appear). Authors MUST
-treat an atom field name and the equivalent string field name as the same field.
-
----
 
 ## 6. Execution (dynamic semantics)
 
@@ -1594,18 +1407,24 @@ partial progress**:
   `CallProvider` returning malformed data, raising, or exiting (§6.4.1) — is
   **not** a schema `{:failed, …}`: it is not caught and converted, it **propagates** off the
   lane task and **crashes the live writer**, exactly as a top-level provider crash does.
-  Because the region commits nothing until every lane result is gathered and `CommitLanes`
-  runs (§6.9), **no** events of that region are committed when a lane crashes — the region's
-  `*_started` marker may already be in the journal, but **none** of the region's lane
-  `agent_committed`/`agent_attempt_rejected`/`agent_failed` events and **no** `*_settled` /
-  `*_completed` marker are written. The caller observes `{:error, {:run_crashed, reason}}`
+  Terminal lane settlements wait for result gathering, but `agent_started` and
+  `agent_activity` append synchronously from the lane. Thus a region marker and one or more
+  starts/activity entries may already be in the journal, while no terminal lane event or
+  `*_settled` / `*_completed` marker is written. An unsettled start forces terminal
+  `outcome_unknown`. The current caller may observe `{:error, {:run_crashed, reason}}`
   (no `run_completed`). This is distinct from a schema `{:failed, …}` lane, which **is**
   committed (its events land, first-in-input-order reason becomes the halt) and yields
   `{:malformed_output, address, reason}` (exit 8) — a provider crash yields `run_crashed`
   (exit 1, or 130 when `reason` is `:killed`).
 - **A crash** (writer process death) surfaces to the caller as
-  `{:error, {:run_crashed, reason}}` via a process monitor; `:killed` maps to a distinct
-  exit (§7).
+  `{:error, {:run_crashed, reason}}` via a process monitor. Before re-raising an unexpected
+  catchable defect, the writer appends `run_failed`; if an attempt is unsettled, its reason
+  is `outcome_unknown`. An untrappable kill leaves the start marker for the next resume
+  preflight to settle as `outcome_unknown`. No path redelivers that attempt.
+- **An unknown paid outcome is terminal.** A durable `agent_started` without a matching
+  settlement means the provider may have completed or charged. Resume appends
+  `run_failed({:outcome_unknown, attempt})`, performs no provider call, and returns the
+  typed unknown-outcome error.
 - **A held lease** (another live writer owns the run's single-writer lease, §6.2.1) yields
   `{:error, {:already_running, pid}}`.
 
@@ -1625,9 +1444,14 @@ ExecuteRun(run_id, tree, provider, budget, script_path):
       ; status.failure is the LAST agent_failed (last-wins fold, §7.3); for a single-failure
       ; run this equals the first, but for a 2+-lane failure it is the LAST failing lane —
       ; a resume therefore returns a DIFFERENT tuple than the initial run did (§6.1, §7.3).
+  - If UnsettledAttempt(prior) returns {:ok, attempt}:
+    - Commit Event.run_failed({:outcome_unknown, attempt}).
+    - Return {:error, {:outcome_unknown, attempt}}.
   - Return {RunTree(run_id, tree, provider, budget, script_path, prior)}.
 
 FailureReturn(failure):
+  - If failure.reason is {:outcome_unknown, attempt}:
+    - Return {:outcome_unknown, attempt}.
   - If failure.reason is {:provider_failure, kind, detail}:
     - Return {:provider_failure, failure.address, kind, detail}.
   - If failure.reason is {:did_not_converge, address, reason}:
@@ -1673,7 +1497,7 @@ next writer-owned commit is expected to land if no progress telemetry interleave
 
 The journal append boundary is the authoritative physical `seq` allocator. Every event that
 is actually committed during a live run — simple commits (`run_started`, `run_completed`,
-`phase_entered`, `log_emitted`, `agent_committed`, `agent_attempt_rejected`, `agent_failed`,
+`phase_entered`, `log_emitted`, `agent_started`, `agent_committed`, `agent_attempt_rejected`, `agent_failed`,
 `accumulate`, `iteration_started`, `loop_decision`, `loop_completed`), region marker/lane
 commits (via `CommitMarker` §6.3, `CommitAll` §6.9), and `agent_activity` progress telemetry
 — is appended through the serialized journal allocator. The allocator stamps the event with
@@ -1696,13 +1520,11 @@ argument/return instead of the whole `ctx`: a caller holding the cursor as `ctx.
 physical `seq` values are **contiguous** across the whole run (§7.2), even when progress
 telemetry lands between a provider call starting and its eventual settled event.
 
-This allocation rule does not change workflow decisions: `agent_activity` is progress-only
-read-model data, while the writer still controls semantic traversal/order and positional
-marker/idempotency. To make crash/replay safe, `agent_activity` is idempotent by
-`(address, iteration, attempt, activity_index)`; appending the same key again returns the
-already-journaled event instead of writing a duplicate. Distinct repeated activity entries
-MUST use distinct `activity_index` values and therefore remain visible even if their
-`kind`/`label`/`summary`/`status` fields are byte-identical.
+This allocation rule does not change workflow decisions: `agent_activity` is telemetry,
+while the writer still controls semantic traversal/order and positional replay. Each
+activity entry is synchronously appended before its post-commit notification. The writer
+assigns monotonically increasing `activity_index` values within an attempt; distinct
+repeated entries remain visible even when their fields are byte-identical.
 
 **Resume recompiles the tree (no identity check).** The inert `%Tree{}` is **not** carried
 across process death; a resume is handed a tree **recompiled from the (mutable) workflow
@@ -1872,7 +1694,7 @@ retry" (§1.3, §6.4) means only that a **single** node's fail-closed retries re
 node/iteration identity (Principle 4, §1.3); it does **not** mean turns share a
 conversation. Authors MUST make every prompt self-contained.
 
-### 6.4 Agent turn and exactly-once resolution
+### 6.4 Agent turn and at-most-once resolution
 
 ```
 RunAgent(node, run_id, provider, prior, ctx):
@@ -1900,9 +1722,17 @@ ResolveIdempotency(events, node_path, iteration):
   - Return `:none`.
 ```
 
+`UnsettledAttempt(events)` finds the first `agent_started` whose
+`(address, iteration, attempt)` has no matching `agent_committed`,
+`agent_attempt_rejected`, or covering `agent_failed` settlement. The run-level preflight
+in §6.2 executes this check before any further node can run. Therefore `RunAgent` only
+sees fresh attempts or attempts whose earlier paid calls have durable settlements.
+
 ```
 CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Let {key} be IdempotencyKey(run_id, node.address, iteration, attempt).
+  - Let {ctx} be Commit(Event.agent_started(node, iteration, key), ctx).
+    ; this durable marker MUST precede the provider effect
   - Let {provider_outcome} be CallProvider(provider, node.prompt, node.schema, key).  ; §6.4.1
   - If {provider_outcome} is {:provider_failure, kind, detail, usage, activity}:
     - Let {reason} be {:provider_failure, kind, detail}.
@@ -1923,12 +1753,13 @@ CommitAttempt(node, run_id, provider, iteration, attempt, ctx):
   - Return {:halt, ctx, {:malformed_output, node.address, reason}}.
 ```
 
-Each paid attempt is committed **incrementally** — a rejection lands in the journal before
-the next paid provider call — so a crash mid-retry resumes at the first un-journaled
-attempt. The provider is called as `provider.run_agent(prompt, schema, key, opts)` with the
-idempotency `key`; a conforming backend MUST use `key` as its request-idempotency key so a
-re-issued request after a lost commit returns the already-produced result **without
-charging again** (money spent at most once, result never dropped).
+Each paid attempt is committed **incrementally**: `agent_started` lands before the call,
+and a rejection lands before the next attempt. A crash after the start marker but before
+settlement creates an unknowable outcome. The runtime MUST NOT redeliver that attempt; the
+run-level preflight journals `run_failed` with `{:outcome_unknown, attempt}`. This provides
+at-most-once invocation at the cost of possibly losing an unjournaled result. The
+`IdempotencyKey` remains a stable attempt identity for providers, activity, and settlement,
+but Codex Loops does not claim or depend on backend request deduplication.
 
 An expected provider failure consumes exactly one attempt. It is committed as `agent_failed`
 immediately and is not retried by the workflow runtime, because there is no candidate
@@ -1948,6 +1779,14 @@ CallProvider({module, opts}, prompt, schema, key):
   - Return NormalizeProviderOutcome(raw).
 ```
 
+The reference Codex provider runs one external process per attempt through
+`Workflow.Containment`. The boundary rejects input above 16 MiB, stops stdout above
+16 MiB, uses a monotonic absolute deadline (30 minutes by default), and discards stderr.
+Timeout, input-limit, and output-limit outcomes are finite failures; stdout is accumulated
+as bounded iodata, never by unbounded binary concatenation. Concurrent branch tasks have
+their own finite 31-minute deadline so a stalled child cannot leave a writer waiting
+forever.
+
 - **Inputs.** `prompt :: String.t()` (this node's literal prompt — never a splice of any
   other node's output), `schema :: map() | nil` (the node's JSON-schema map, or `nil` for a
   schemaless turn), `key :: IdempotencyKey` (§6.5), and the backend-specific `opts`.
@@ -1964,13 +1803,14 @@ CallProvider({module, opts}, prompt, schema, key):
   ```
 
   `kind` MUST be exactly one of `:quota_exceeded | :model_limit | :timeout |
-  :unavailable`:
+  :unavailable | :backend`:
 
   - `:quota_exceeded`: account, rate, billing, or quota exhaustion prevented completion.
   - `:model_limit`: the request exceeds context, output, schema, or model capability
     limits and will not succeed unchanged.
   - `:timeout`: the provider did not produce a terminal result before a configured deadline.
   - `:unavailable`: the backend or service is temporarily unreachable or unable to accept work.
+  - `:backend`: the contained process or provider protocol failed without a more specific class.
 
   `NormalizeProviderOutcome` converts the success three-tuple form to
   `{:ok, result, usage, []}` and converts `ExpectedProviderFailure` to
@@ -2029,7 +1869,7 @@ CallProvider({module, opts}, prompt, schema, key):
     - If raw is {:ok, result, usage, activity} and activity is a JSON array:
       - Return {:ok, result, NormalizeProviderSuccessUsage(usage), activity}.
     - If raw is {:error, {:provider_failure, kind, detail, usage, activity}},
-      kind is one of the four expected kinds, detail is a ProviderFailureDetailValue,
+      kind is one of the five expected kinds, detail is a ProviderFailureDetailValue,
       and activity is a JSON array:
       - Return {:provider_failure, kind, detail, NormalizeProviderFailureUsage(usage), activity}.
     - Otherwise raise a provider bug.
@@ -2038,28 +1878,26 @@ CallProvider({module, opts}, prompt, schema, key):
   Public JSON usage is always
   `%{"inputTokens" => i, "outputTokens" => o, "totalTokens" => t}` or `null` inside role
   failure records when no usage exists.
-- **Activity sink.** The runner MAY add `activity_sink: (map() -> :ok)` to `opts`. A
+- **Activity sink.** The runner MAY add `activity_sink: (Activity.t() -> non_neg_integer())` to `opts`. A
   backend that receives it MAY call it for non-terminal progress while the turn is running.
-  The runner journals each sink call as `agent_activity` with the next local
-  `activity_index`; the backend's terminal `activity` list is reconciled to those indices
+  The sink normalizes and synchronously journals each call as `agent_activity` with the
+  next local `activity_index`, then broadcasts a post-commit refresh notification and
+  returns the index. The backend's terminal `activity` list is reconciled to those indices
   before `agent_committed` / `agent_attempt_rejected` is written. The activity sink is
-  progress telemetry only: it does not change validation, retry, idempotency keys, or
-  workflow results.
+  telemetry only: it does not change validation, retry, attempt identity, or workflow
+  results.
 - **Codex `--output-schema` strictness.** The Codex provider passes a schema-backed turn's
   schema to the CLI with `--output-schema`. Before writing that temporary schema file, it
   normalizes every object schema recursively to force `"additionalProperties" => false`,
   overriding any author-supplied value. This provider-port normalization is for Codex/OpenAI
   structured-output strictness; it does not mutate `%Agent{schema}` in the inert tree, and
   the writer still validates the returned value against the original schema map.
-- **Turn independence and idempotency.** Because `CallProvider` receives only `(prompt, schema, key,
+- **Turn independence and attempt identity.** Because `CallProvider` receives only `(prompt, schema, key,
   opts)`, no conversation state, thread, or prior result is carried between turns. Every
   agent turn is independent; all context an agent needs MUST be present in its own literal
-  prompt (Principle 6). A backend MUST use `key` as its request-idempotency key so a
-  re-issued request after a lost commit returns the already-produced terminal provider
-  outcome without charging again. This includes `ExpectedProviderFailure`: after the backend
-  accepts a request under a key, a re-issued call with the same key MUST return the same
-  `{kind, detail, usage, activity}` without double charge, allowing resume to journal the
-  same `agent_failed` or `refine_role_failed` after a return-to-commit crash.
+  prompt (Principle 6). The `key` identifies the attempt in journal records and may be used
+  by a backend for tracing or its own deduplication, but the scheduler never reissues an
+  unsettled attempt and makes no exactly-once backend claim.
   *(Proposed §10 — dataflow: a proposed extension would widen the `prompt` input and this Turn-independence clause to §6.4.1′, admitting a deterministically-rendered template materialized to a `String.t()` by a pure journal fold before the call; `CallProvider`'s `(prompt, schema, key, opts)` signature is unchanged; see §10.)*
 
 **Provider-port callbacks.** A provider module has two callbacks:
@@ -2133,7 +1971,7 @@ Two non-obvious rules a conforming implementation MUST honor:
    (`%{type: "object", …}`) therefore has `schema["type"] == nil` and falls into this
    accept-all branch, so **all** output is accepted and fail-closed validation silently
    no-ops. Inline schema maps MUST use string keys (§3.2); a conforming implementation
-   SHOULD warn at compile time when a literal schema map's top-level `"type"` string key is
+   SHOULD warn during validation when a literal schema map's top-level `"type"` string key is
    absent.
 2. **A boolean is not a number.** `"number"` (and `"integer"`) MUST reject `true`/`false`
    even though some languages treat booleans as numeric. `"number"` accepts any integer or
@@ -2191,19 +2029,19 @@ exact property-check order is **implementation-defined but MUST be stable** for 
 schema map (deterministic across runs and across resume). Authors who need a specific
 which-field-fails-first guarantee MUST make at most one property fail per output.
 
-### 6.5 The exactly-once key
+### 6.5 Attempt identity
 
 ```
 IdempotencyKey = %{run_id, node_path :: address, iteration :: non_neg_integer, attempt :: non_neg_integer}
 ```
 
-- The **logical** exactly-once identity of a paid effect is `(run_id, node_path,
-  iteration)`.
+- The logical turn identity is `(run_id, node_path, iteration)`.
 - `iteration` is `0` for any node outside a dynamic loop; inside `while_budget`/`until_dry`
   it is the real per-iteration index, so the same body address keys a **distinct** paid
   effect each pass.
-- `attempt` (zero-based) refines the logical identity into a single **physical** provider
-  request, so each fail-closed retry reaches the backend under a distinct request key.
+- `attempt` (zero-based) refines the logical identity into a single physical provider
+  invocation. The writer journals this full key in `agent_started` before invoking the
+  provider. An unsettled full key is never invoked again.
 
 ### 6.6 Collect (declared reduction, loop-body only)
 
@@ -2304,7 +2142,7 @@ Rules a conforming implementation MUST honor:
   `seen_by` MUST therefore make the agent emit objects carrying those fields — **whether
   enforced by an object-typed element schema (`items` of `"type" => "object"` with the named
   `properties`, RECOMMENDED) or only by prompt contract** (the prompt instructing the agent
-  to include them). The coupling is unchecked at compile time, so this is a footgun: if the
+  to include them). The coupling is unchecked while loading, so this is a footgun: if the
   agent returns items **missing** a `seen_by` field, `Project(item, [:id])` yields
   `%{id: nil}` for **every** such item, they all collapse to one, and each round adds at most
   one item — so an `until_dry` loop can go dry (and stop) after `rounds` even though the
@@ -2427,7 +2265,7 @@ generic loop events.
 accumulators: Accumulator.Of(run_id), remaining: Ledger.Remaining(run_id),
 loop_address: loop_address, iteration: iteration}` for loop predicates. Gate/library
 predicates MAY pass the same map without `loop_address` only when they do not contain
-`dry`; a `dry` predicate outside a loop is a compile-time error.
+`dry`; a `dry` predicate outside a loop is a load-time error.
 
 `DryStreak` counts how many consecutive most-recent rounds added **nothing** to any
 accumulator, walking backward from the round just completed. A round is identified by its
@@ -2637,7 +2475,7 @@ atom-to-string conversion.
 ```
 RunParallel(node, run_id, provider, prior, ctx):
   - Let {seq} be CommitMarker(parallel_started, node, prior, ctx.seq).   ; payload %{address, branch_count}
-  - Let {cap} be node.max_concurrency or max(length(node.branches), 1).
+  - Let {cap} be min(node.max_concurrency or max(length(node.branches), 1), 8).
   - Let {results} be RunConcurrently(node.branches, cap, fn branch ->
       BuildAgent(branch, run_id, provider, prior, 0) end).     ; off-thread, no journal writes
   - Let {r} be CommitLanes(results, run_id, seq).             ; commit each branch's events in branch order
@@ -2651,13 +2489,17 @@ item_count, stage_count}`), fans out over `node.lanes` (each lane runs its stage
 **sequentially** via `RunLane(stages, run_id, provider, prior, 0)`), joins with no barrier,
 and commits `pipeline_completed`.
 
-`RunConcurrently(inputs, cap, fun)` runs `fun` over `inputs` with at most `cap` in flight,
-**ordered** (results in input order), with no timeout. Because results are gathered in
-input order, **scheduling is unobservable** in the journal: any concurrency strategy that
-preserves input-order commit is conforming. `fun` may return only a lane result
+`RunConcurrently(inputs, cap, fun)` runs `fun` over `inputs` with at most `min(cap, 8)` in flight,
+**ordered** (results in input order), with a finite 31-minute branch deadline. Terminal
+lane results are gathered and committed in input order. `agent_started` and
+`agent_activity` are exceptional because each is synchronously appended before or during
+the provider effect; their physical sequence reflects observed concurrent arrival. Read
+projections canonicalize agent ordering by address/iteration/attempt. `fun` may return only a lane result
 (`{:ok, …}` or `{:failed, …}`); if the provider crashes off-thread inside a lane (§6.4.1),
 that crash **propagates** through `RunConcurrently` and crashes the writer before
-`CommitLanes` runs, so the region commits **no** lane events (§6.1) — it is a
+`CommitLanes` runs, so the region commits **no terminal settlement** lane events (§6.1),
+although durable starts/activity may already exist. An unsettled start makes the run
+`outcome_unknown`; otherwise it is a
 `{:run_crashed, reason}`, never a lane `{:failed, …}`.
 
 `CommitLanes` and its result-threading variant `CommitLanesWithResults` are the two lane
@@ -2758,7 +2600,7 @@ RunLane(stages, run_id, provider, prior, lane_iteration):
   - Let {events} be an empty List and {result} be nil.
   - For each {stage} in stages, in order:
     - Let {r} be BuildAgent(stage, run_id, provider, prior, lane_iteration).
-      ; each stage re-addressed at compile time (§4.4)
+      ; each stage re-addressed while loading (§4.4)
     - If {r} is {:ok, stage_events, stage_result}:
       - Append {stage_events} to {events}; set {result} to {stage_result}.
     - If {r} is {:failed, stage_events, reason}:
@@ -2774,7 +2616,7 @@ RunLane(stages, run_id, provider, prior, lane_iteration):
   (§6.1). A lane thus fails closed at its first failing stage; later stages of that lane do
   not run.
 - **Sequential within a lane.** A lane's stages run strictly in order (each stage's paid
-  effect is keyed by its own compile-time address); only the lanes themselves run
+  effect is keyed by its own static address); only the lanes themselves run
   concurrently up to `cap` (§6.11).
 
 ### 6.10 Verify, Judge, Fan-out
@@ -2902,7 +2744,7 @@ RunFanout(node, run_id, provider, prior, ctx):
     - Let reason be {:fanout_failed, node.address, fanout_iteration, :zero_width}.
     - Return {:halt, ctx with seq = seq', reason}.
   - Let {branches} be MaterializeFanoutBranches(node, width).
-  - Let {cap} be node.max_concurrency or max(width, 1).
+  - Let {cap} be min(node.max_concurrency or max(width, 1), 8).
   - Let {results} be RunConcurrently(branches, cap,
       fn branch -> RunLane(branch, run_id, provider, prior, lane_iteration) end).
   - Let {r} be CommitLanes(results, run_id, seq).
@@ -2913,7 +2755,7 @@ RunFanout(node, run_id, provider, prior, ctx):
 DecideFanoutWidth(node, run_id, prior, seq, fanout_iteration):
   - If a `fanout_started` for (node.address, fanout_iteration) is in {prior}:
     - Return {that event's payload.width, seq}.
-  - Else width = ComputeFanoutWidth(node.width, run_id).
+  - Else width = min(ComputeFanoutWidth(node.width, run_id), 64).
   - Let seq' be CommitFanoutStarted(node, width, prior, seq, fanout_iteration).
   - Return {width, seq'}.
 
@@ -2971,7 +2813,7 @@ RunFanOut(node, run_id, provider, prior, ctx):
   - Let {branches} be, for each {i} from 0 to {width} - 1 inclusive,
       RebaseBody(node.body, node.address ++ [i]); if {width} is 0, {branches} is [].
       ; RebaseBody re-addresses stage s to branch_address ++ [s]
-  - Let {cap} be node.max_concurrency or max(width, 1).
+  - Let {cap} be min(node.max_concurrency or max(width, 1), 8).
   - RunConcurrently(branches, cap,
       fn branch -> RunLane(branch, run_id, provider, prior, 0) end); CommitLanes.
   - On {:ok, seq'}: Return {:cont, ctx with seq = CommitMarker(fan_out_completed, node, prior, seq')}.
@@ -2992,7 +2834,7 @@ the one execution-time raise that is not a validation failure; it surfaces as a 
 **Panels are observational unless explicitly bound.** Legacy `verify` and `judge` journal
 `verify_settled` / `judge_settled` projections but do not implicitly alter control flow.
 No node may read `ctx.last_result` as ambient panel context. A predicate may inspect a panel
-or fanout outcome only when that outcome has an explicit compile-time binding (`let` or
+or fanout outcome only when that outcome has an explicit static binding (`let` or
 `fanout bind:`) and the predicate is one of the closed forms in §3.8/§6.8 (`agree`,
 `path_exists`, `path_non_empty`, `path_count`, `path_equals`, `all`, `any`, or the
 count/budget comparisons). **The language still has no arbitrary conditional or branching
@@ -3007,13 +2849,12 @@ outside the workflow by folding the journal (`Status.verifications` / `Status.ju
 - `fanout` branches, `parallel` branches, `pipeline` lanes, `verify` voters, `judge`
   **candidate lanes**, and `fan_out` branches MAY run concurrently up to their `cap`. The
   `cap` sources are:
-  `fanout`/`parallel`/`pipeline`/`fan_out` take `node.max_concurrency` (default = all at once);
-  `verify` and `judge` have **no** `max_concurrency` option, so their cap is fixed at "all at
-  once" (`max(length(node.voters), 1)` and `max(length(node.scorers), 1)` respectively).
-  Because every region gathers results in input order and commits in input order, **the
-  observable journal is independent of scheduling**. A conforming implementation MAY use any
-  scheduling strategy (including fully sequential) as long as commit order matches input
-  order.
+  `fanout`/`parallel`/`pipeline`/`fan_out` take `node.max_concurrency`; omitted means every
+  lane is eligible. `verify` and `judge` make every panel lane eligible. In every case the
+  effective cap is `min(requested-or-width, 8)`. Terminal settlements are gathered and
+  committed in input order. Pre-effect `agent_started` and streamed `agent_activity`
+  append synchronously as concurrent tasks reach them, so their journal order is arrival
+  order; projections sort agents by stable address, iteration, and attempt.
 - Within a `fanout` lane, a `pipeline` lane, a `fan_out` branch, or a `judge` candidate lane, the constituent
   agents (stages / criterion scorers) run **sequentially**.
 - Top-level statements run **sequentially** in source order.
@@ -3039,6 +2880,11 @@ Event = %{run_id :: String.t() | nil, seq :: non_neg_integer() | nil,
 alone. Events are keyed by `(run_id, seq)`. Folds MUST stay total over unknown/new event
 types (the log is versioned and additive).
 
+The supervised journal process owns the single write connection. Folds and run-index reads
+use short-lived read-only SQLite connections, so API and LiveView reads do not serialize
+through the writer mailbox. Event blobs are limited to 16 MiB and decoded with safe ETF
+decoding; workflow loading cannot introduce new atoms.
+
 ### 7.2 Event constructors and payload keys
 
 Unless a payload-value pin below says a payload is exact or that a key is absent, the
@@ -3053,6 +2899,7 @@ additive log policy in §7.1.
 | `:run_started` | `tree_name, tree_version, node_count, budget, script_path` (no address) |
 | `:phase_entered` | `address, name` |
 | `:log_emitted` | `address, message` |
+| `:agent_started` | `address, iteration, attempt, idempotency_key, label, prompt` |
 | `:agent_committed` | `address, iteration, idempotency_key, label, prompt, result, usage, activity` |
 | `:agent_activity` | `address, iteration, attempt, activity_index, label, prompt, entry` |
 | `:agent_attempt_rejected` | `address, iteration, attempt, label, prompt, output, reason, usage, activity` |
@@ -3078,6 +2925,7 @@ additive log policy in §7.1.
 | `:refine_non_converged` | `address, reason, final_round, rounds, artifact, open_findings, role_failures, failed_reviewers, cold_read, report_snippets` |
 | `:refine_input_invalid` | `address, input, reason` |
 | `:run_completed` | `value` (terminal on success path; no address) |
+| `:run_failed` | `reason` (terminal unexpected failure or `{:outcome_unknown, attempt}`) |
 
 > *(Proposed §10 — dataflow: a proposed extension pins `agent_committed.prompt` and
 > `agent_attempt_rejected.prompt` to the materialized `EffectivePrompt` string for template-prompt
@@ -3105,7 +2953,7 @@ Payload-value pins (each is observable output, so it is normative):
 - **`verify_started.mode`** is the atom **tag** `:voters` or `:lenses` (`ModeTag(node.mode)`,
   §6.10), **not** the node's `mode` tuple. The companion `voter_count` and `threshold` keys
   carry the arity, so the tuple is fully recoverable without embedding it.
-- **`agent_committed.idempotency_key`** is the §6.5 `IdempotencyKey` map **verbatim** — the
+- **`agent_started.idempotency_key` / `agent_committed.idempotency_key`** is the §6.5 `IdempotencyKey` map **verbatim** — the
   4-key map `%{run_id, node_path, iteration, attempt}` (`node_path` is the node's address
   list, §4.2; `iteration` and `attempt` are the same non-negative integers §6.5 pins). It is
   **not** flattened, hashed, or rendered to a canonical string; the journaled payload and the
@@ -3116,11 +2964,10 @@ Payload-value pins (each is observable output, so it is normative):
   the `%Agent{label}` string or `nil`. A label is display metadata only (§3.2, Rule 5.3.6):
   it MUST NOT affect prompts, schemas, keys, validation, retry, control flow, or results.
 - **`agent_activity.activity_index`** is a non-negative integer local to
-  `(address, iteration, attempt)` when emitted by the runner's activity sink. The tuple
-  `(address, iteration, attempt, activity_index)` is replay-idempotent: a duplicate append
-  returns the original event and MUST NOT create a second event. Distinct repeated entries
-  use distinct indices and are preserved even when `entry.kind`, `entry.label`,
-  `entry.summary`, and `entry.status` are identical.
+  `(address, iteration, attempt)` when emitted by the runner's activity sink. The writer
+  assigns each sink observation exactly one increasing index and appends it synchronously
+  before notification. Distinct repeated entries use distinct indices and are preserved
+  even when their content is identical.
 - **`agent_committed.activity` / `agent_attempt_rejected.activity`** are ordered lists of
   activity entry maps for the completed attempt. Entries MAY carry `activity_index` when the
   runner reconciles them with streamed `agent_activity` events; read-model folds use that
@@ -3132,14 +2979,14 @@ Payload-value pins (each is observable output, so it is normative):
   remain visible in token/tool accounting.
 
 `run_completed` is the terminal success event; on failure the terminal event is
-`agent_failed`, `loop_exhausted`, `fanout_failed`, `refine_non_converged`, or
-`refine_input_invalid` and **no**
+`agent_failed`, `loop_exhausted`, `fanout_failed`, `refine_non_converged`,
+`refine_input_invalid`, or `run_failed` and **no**
 `run_completed` is written. Control-flow outcomes
 (`loop_decision`, `fanout_started` width keyed by address plus optional iteration,
 `fan_out_started` width, `verify_settled`, `judge_settled`) are journaled
 so that resume replays rather than recomputes them. A canonical minimal run journals, in
-order: `run_started, phase_entered, log_emitted, agent_committed, run_completed` with
-contiguous `seq` `0..4`.
+order: `run_started, phase_entered, log_emitted, agent_started, agent_committed,
+run_completed` with contiguous `seq` `0..5` when the provider emits no activity.
 
 ### 7.3 Status fold (read model)
 
@@ -3148,6 +2995,7 @@ over the journal (it consults no process state). `state` transitions:
 
 ```
 :pending --run_started--> :running --run_completed---------> :completed
+                                    --run_failed------------> :failed
                                     --agent_failed----------> :failed
                                     --loop_exhausted--------> :failed
                                     --fanout_failed---------> :failed
@@ -3166,15 +3014,17 @@ returned by `Workflow.Status.of/1` (§7.6). Of them, **only `logs` (verbatim) an
 `agentCount = length(agents)`** surface in the minimal §7.5 run-projection envelope; the
 full §7.5 projection additionally exposes `agents`, `rejected`, `verifications`,
 `judgments`, `refines`, `toolActivity`, and `rawRefs` for inspect/status clients that need
-the data behind the counts. Each is an **ordered list
-appended in `seq` order** (one entry per matching event, in the order the fold visits them):
+  the data behind the counts. Logs and event-style projections preserve `seq` order;
+  agent projections are upserted and sorted by `(address, iteration, attempt)` so
+  concurrent start/activity arrival cannot reorder the public list:
 
 - **`logs`** is an ordered list of **bare `message` strings** — exactly the `log_emitted`
   payload's `message` binary (§7.2), **not** a map. On each `log_emitted` the fold appends
   `payload.message`. (Because a body `log` commits at most once per address, §6.3, a loop
   emits one entry, not one per iteration.)
-- **`agents`** is an ordered list of agent projections. `agent_activity` upserts a
-  `:running` projection so long-running turns are visible before they commit. On
+- **`agents`** is an ordered list of agent projections. `agent_started` upserts a
+  `:running` projection before the provider call, and `agent_activity` augments that
+  attempt so long-running turns are visible before they settle. On
   `agent_committed`, the fold upserts the same `(address, iteration)` projection with
   `status: :completed` and the projected payload
   `%{address, iteration, label, prompt, result, usage, idempotency_key, activity}`. On
@@ -3231,6 +3081,10 @@ On `loop_exhausted`, it sets
 `failure = %{address: address, attempts: 0, reason: {:loop_exhausted, address, iterations}}`.
 On `fanout_failed`, it sets
 `failure = %{address: address, attempts: 0, reason: {:fanout_failed, address, iteration, reason}}`.
+On `run_failed({:outcome_unknown, attempt})`, it marks the matching running agent unknown
+and sets failure to `%{address: attempt.address, iteration: attempt.iteration,
+attempts: attempt.attempt + 1, reason: {:outcome_unknown, attempt}}`. Other `run_failed`
+events set a run-crash failure with no node address.
 The folded `failure` is therefore the **last** terminal failure event in `seq` order. In the
 common case — a single `agent_failed` (a top-level fail-closed node, or a concurrent region
 with exactly one failing lane) or one terminal refine failure — last equals first, so the
@@ -3263,7 +3117,7 @@ a projection, computable from the journal alone.
 The final value of a completed run is the `run_completed` payload's `value`, supplied by the
 workflow's final terminal statement (§5.10.2):
 
-- `return(literal)` stores that compile-time literal.
+- `return(literal)` stores that static literal.
 - `emit(~P"...")` stores the rendered UTF-8 text.
 - `emit_result(:binding)` stores the binding's structured public JSON projection. In this
   version the only result-capable binding is `refine`, whose public result shape is
@@ -3431,16 +3285,16 @@ uppercase**. All content is normative except clearly marked examples, counter-ex
 and notes, which are non-normative.
 
 **Observably-equivalent clause.** The algorithms in this document describe required
-*observable* behavior — the sequence of committed journal events, the run result, and the
+*observable* behavior — the committed journal events, the run result, and the
 exit code. A conforming implementation MAY use any internal strategy (any concurrency
-schedule, any storage engine, any host language) provided the observable result is
-identical to what these algorithms produce. In particular, because every concurrent region
-commits in input order (§6.11), a conforming implementation MAY execute lanes sequentially
-or in parallel — the journal MUST be the same either way.
+schedule, any storage engine, any host language) provided the observable result obeys these
+algorithms. Terminal lane settlements commit in input order; synchronous pre-effect start
+and activity events commit in concurrent arrival order, while public agent projections use
+stable address order (§6.11).
 
 Normative requirements a conforming implementation MUST satisfy:
 
-- **C1 (core calculus before product vocabulary).** It MUST reject, at compile time, any
+- **C1 (core calculus before product vocabulary).** It MUST reject, while loading, any
   form outside the closed vocabulary in §2.4. It MUST treat library/domain surface forms as
   desugaring targets, not as implicit semantic primitives. `gather`/`map` remain DEFER and
   `reduce`/`select` remain REJECT.
@@ -3465,9 +3319,10 @@ Normative requirements a conforming implementation MUST satisfy:
     while resume/status return the **last** (last-wins Status fold). A conforming
     implementation MUST reproduce **both** projections exactly; this is the single,
     pinned exception to "resume replays journaled decisions" (§6.1, §7.3).
-- **C5 (exactly-once).** A paid effect MUST be identified by `(run_id, node_path,
-  iteration)` and refined by `attempt`; a backend MUST use the idempotency key so an
-  effect is paid at most once and its result is never dropped.
+- **C5 (at-most-once effects).** A paid effect MUST be identified by `(run_id, node_path,
+  iteration, attempt)`. The writer MUST durably append `agent_started` before invoking it.
+  If no matching settlement exists, resume MUST terminate with `outcome_unknown` and MUST
+  NOT redeliver the attempt. A result may be unknowable; exactly-once is not claimed.
 - **C6 (fail closed).** A schema-backed agent whose output fails validation MUST retry
   on-thread up to its retry budget and then fail the node and abort the run with exit 8;
   it MUST NOT coerce, default, or accept malformed structured output.
@@ -3476,8 +3331,10 @@ Normative requirements a conforming implementation MUST satisfy:
   `max:`) or by the pinned budget width algorithm; an implementation MUST honor the declared
   exhaustion behavior (`:stop`, `:fail`, `:accept_current`, zero-width completion/failure)
   and MUST NOT rely on body progress to terminate.
-- **C8 (located errors).** Every validation failure MUST be reported as a compile-time
-  error located at the offending declaration in the author's source.
+  The reference additionally caps fanout width at 64 and in-flight workflow tasks at 8;
+  external turns and branch joins MUST have finite deadlines and bounded input/output.
+- **C8 (located errors).** Every validation failure MUST be reported as a typed load error
+  located at the offending declaration in the author's source.
 - **C9 (closed typed predicates).** Every condition MUST be one of the predicate forms in
   §3.8 and MUST evaluate by §6.8. An implementation MUST NOT admit arbitrary functions,
   closures, host expressions, truthiness, or implementation-defined predicates.
@@ -3485,10 +3342,10 @@ Normative requirements a conforming implementation MUST satisfy:
   lexically preceding producer and resolved by a pure fold. Rendering MUST use inert
   templates and deterministic projections; an implementation MUST NOT cache values in live
   process state or include values in idempotency keys.
-- **C11 (compile-time Elixir DSL).** For the Elixir embedding, validation MUST happen in
-  `Workflow.Compiler.parse/2` / declaration macros during `mix compile`; `use Workflow`
-  MUST inject only declaration setup and reflection, and generated workflow accessors MUST
-  return `Macro.escape`-able inert data.
+- **C11 (path-first inert loading).** The Elixir reference MUST accept exactly one bare
+  top-level workflow form, parse it as bounded existing-atom AST data, and validate through
+  `Workflow.Script.load_tree/1` plus `Workflow.Compiler.compile/3`. It MUST NOT compile or
+  evaluate source, expand author macros, load schema modules, or use module reflection.
 
 An implementation MAY add new node kinds and new event types (the log is additive), but it
 MUST preserve existing addresses (§4.2) and MUST keep folds total over unknown types. It
@@ -3649,7 +3506,7 @@ are rejected. Reviewer prompts MUST be literal strings; templates, interpolated 
 variables, and non-string terms are rejected. A reviewer MAY supply `adapter:` with one of
 the literal atoms `:findings_v1 | :defects_v1 | :violations_v1 | :concerns_v1`; when omitted
 the adapter is `:findings_v1`. Unknown keys, repeated keys, non-literal adapters, and
-unknown adapter atoms are rejected at compile time.
+unknown adapter atoms are rejected while loading.
 
 ```counter-example
 refine agent("draft"), reviewers: [reviewer(:a, "check")],
@@ -4585,7 +4442,7 @@ CompareOp : `>` | `<` | `>=` | `<=` | `==`
 JsonPointerString :: `"` JsonPointerCharacter* `"`      ; same raw-string rule as §10.4.1
 ```
 
-Validation is compile-time and closed:
+Validation is load-time and closed:
 
 - `gates:` MUST be a literal keyword list containing each gate key at most once.
 - `cold_read:` lowers its `ReviewerSpec` to a `cold_read_descriptor` at address
@@ -4594,7 +4451,7 @@ Validation is compile-time and closed:
   `refine_started.payload.gates`; resume MUST use those journaled descriptors.
 - `JsonPointerString` MUST be a literal RFC 6901 pointer string beginning with `"/"` or the
   empty string `""`; invalid escape sequences (`~` not followed by `0` or `1`) are rejected.
-- `path_equals` literals MUST pass `GateLiteralToJSON` below at compile time; unsupported
+- `path_equals` literals MUST pass `GateLiteralToJSON` below while loading; unsupported
   literal kinds and duplicate object keys after atom-to-string conversion are rejected.
 - A gate predicate evaluates against the provisional `BoundRefineResult` projection (§9.11),
   not against arbitrary agent output. Unknown paths evaluate to missing; they do not raise.
@@ -4859,7 +4716,7 @@ outside the implemented core.
    `Enum.map(fn … end)`, no anonymous function, ever (Rule 5.1.1 still holds; §10.4's struct
    stays closure-free).
 3. **Bound every fan-out.** If the deferred `map` ships, its runtime width MUST carry a
-   **compile-time structural cap** (`max: <pos-int literal>`), exactly as every loop carries
+   **static structural cap** (`max: <pos-int literal>`), exactly as every loop carries
    `max_iterations` (Principle 5). Width `= min(observed_length, max)`; the region has at most
    `max` lanes and provably terminates.
 
@@ -4867,7 +4724,7 @@ outside the implemented core.
 
 | Idiom | Verdict | One-line reason |
 |---|---|---|
-| **Template layer** (§10.4) | **ADOPT / IMPLEMENTED** — foundation | Nothing flows without it; inert struct + compile-time binary scanner + the render §4.4 already defines. Closure-free by construction. |
+| **Template layer** (§10.4) | **ADOPT / IMPLEMENTED** — foundation | Nothing flows without it; inert struct + load-time binary scanner + the render §4.4 already defines. Closure-free by construction. |
 | **`let`** (§10.5) | **ADOPT / IMPLEMENTED CORE** | The keystone; currently binds `agent(...)`, `synthesize(...)`, and `refine(...)`. No new `let` effect/event/key — a bound value is a fold over the producer's journaled output (`agent_committed` or `refine_completed.payload.artifact`). |
 | **prompt injection** (§10.6) | **ADOPT / IMPLEMENTED CORE** | The edge authors want ("improve this draft"); top-level `agent(~P"...")` renders previous `let` bindings and rides the existing `agent_committed.prompt`. |
 | **`emit`** (§10.7) | **ADOPT / IMPLEMENTED CORE** | Pure render, no paid effect; makes "flow N results into one document" a first-class terminal. |
@@ -4888,8 +4745,8 @@ artifact is bindable by the same `let` machinery.
 This section is a principled **strengthening** of "no value binding", not a loosening. The
 render §4.4 *already* splices data into prompts (`verify` splices `<subject>`, `judge` splices
 `<candidate>`, `synthesize` splices `Inputs: <inspect(inputs)>`); the implemented language is
-"only **compile-time-literal** data in prompts, through `RenderText`." This extension changes
-exactly one thing: it widens the *source* of `RenderText`'s input from "a compile-time literal"
+"only **static literal** data in prompts, through `RenderText`." This extension changes
+exactly one thing: it widens the *source* of `RenderText`'s input from "a static literal"
 to "a value already committed to the journal." The render itself is unchanged.
 
 When promoted, §10 would amend the following shipped clauses. Each amendment is a strengthening.
@@ -4920,7 +4777,7 @@ carry only the one-line forward-reference notes that point here.
   requires `is_binary(prompt)`; a `~P` template lowers to the AST tuple `{:sigil_P, meta, …}`, for
   which `is_binary/1` is false, so the literal-only rule categorically rejects it. The amendment: the
   agent-prompt AST is admissible iff **either** `is_binary(prompt)` **or** it is a `{:sigil_P, _, _}`
-  node lowered by `parse/2` to an inert closure-free `%Template{}` in an admissible position
+  node lowered by `compile/3` to an inert closure-free `%Template{}` in an admissible position
   (Rule P.1). This is a strengthening: it admits only the checked, closure-free `%Template{}` and
   still rejects every variable, call form, interpolation, and computed prompt the literal-only rule rejects.
 - **§2.3 Literal admissibility → §2.3′ (a `~P` template is a `Macro.quoted_literal?` exemption).**
@@ -4928,7 +4785,7 @@ carry only the one-line forward-reference notes that point here.
   call-form AST (`{:sigil_P, …}`), not a quoted literal, so the literal-only rule rejects it. The amendment:
   a prompt / `emit` / `gather` template MAY be a `~P` sigil that lowers to an inert, closure-free
   `%Template{}`, exempt from the `Macro.quoted_literal?` requirement **precisely because** it lowers
-  to escapable inert data (a `Macro.escape`-able struct, §10.4.2). Interpolation, closures, and
+  to inert struct data (§10.4.2). Interpolation, closures, and
   computed prompts remain non-literal and rejected; only the checked `%Template{}` is exempt.
 - **§6.4 commit path + §7.2 / §7.3 payload semantics → §6.4-commit′ / §7.2′ / §7.2-rejected′ /
   §7.3′.** For a template-prompt agent the commit path MUST store the materialized
@@ -4952,7 +4809,7 @@ carry only the one-line forward-reference notes that point here.
   distinction: **Principle 1** says product vocabulary must desugar before becoming primitive;
   **§2.4 → §2.4′** separates core forms, library forms, deferred forms, rejected
   forms, and contextual names; **§8 C1 → C1′** rejects any form outside that split; **Rule
-  5.1.3**'s vocabulary set widens only by named entries with their own `parse/2` clauses;
+  5.1.3**'s vocabulary set widens only by named entries with their own `compile/3` clauses;
   **§11.2** at-a-glance table documents the accepted authoring surface. `collect` remains
   **body-only**. The implemented dataflow core currently recognizes `let`, `emit`, and
   `emit_result`; `gather` and `map` remain DEFER.
@@ -4967,17 +4824,17 @@ one more structural cap (`map.max`) and loses nothing.
 
 Prompt injection (§10.6) and `emit` (§10.7) both render bound values into text through a
 **logic-less, inert template**. The `~P` template reuses **only the ideas** of EEx/HEEx — the
-`<%= @assign %>` hole surface and compile-time assigns-dependency tracking — and reuses **none of
+`<%= @assign %>` hole surface and load-time assigns-dependency tracking — and reuses **none of
 EEx's code**: no `EEx.tokenize`, no `EEx.Engine`, no embedded Elixir, no compile-to-closure. A
 `~P` template is lowered by a **hand-rolled binary scanner**, a plain function called from
-`Workflow.Compiler.parse/2` — the same single validation locus every other combinator uses —
+`Workflow.Compiler.compile/3` — the same single validation locus every other combinator uses —
 never by a self-expanding sigil macro.
 
 > **Note — no `sigil_P` macro exists.** `~P` is surface syntax only. No `defmacro sigil_P` is
-> defined or imported; `parse/2` recognizes the raw AST term
+> defined or imported; `compile/3` recognizes the raw AST term
 > `{:sigil_P, meta, [{:<<>>, _, [raw]}, mods]}` in an admissible prompt position and lowers it
 > with the plain function `Workflow.Template.parse/2`, keeping all template validation inside
-> `parse/2`.
+> `compile/3`.
 
 **10.4.1 Surface (lexical) grammar.** A template is written with the `~P` sigil (**P** for
 *prompt*), an **uppercase** sigil so its content is a **single raw literal binary** with **no
@@ -5052,21 +4909,21 @@ all dynamic holes in the closed `HoleExpr` vocabulary above.
   as strings in source order and is used for name-resolution; a formatted hole still
   contributes its underlying assign name.
 - An `@name` inside a template is **template syntax, not Elixir** — a scanned run of characters,
-  never a variable or module-attribute AST node; macro hygiene does not apply. The struct holds
-  **zero closures** and is `Macro.escape`-able into a compile-time constant (Principle 7).
+  never a variable or module-attribute AST node. The struct holds **zero closures** and is
+  stored directly in the inert tree (Principle 7).
 - **Addressing.** A `%Template{}` has **no address** — inert data embedded in a consuming node's
   field, exactly like `%Workflow.Node.BudgetSlices{}` (§4.2). It is rendered *within* the
   execution of the node that holds it (an `agent`, §10.6, or `emit`, §10.7), under that node's key.
 
-**10.4.3 Compile-time lowering (a hand-rolled binary scanner).** `Workflow.Template.parse/2` is a plain
-compiler function — a direct binary scanner over `raw` — called by `parse/2` the moment it
+**10.4.3 Load-time lowering (a hand-rolled binary scanner).** `Workflow.Template.parse/2` is a plain
+compiler function — a direct binary scanner over `raw` — called by `compile/3` the moment it
 matches a `{:sigil_P, meta, [{:<<>>, _, [raw]}, mods]}` node in an admissible prompt position; it
 does not assign semantics to `mods`; current modifiers are accepted as a no-op and MUST NOT affect
 the lowered template. It calls **no** `EEx.tokenize`, **no** `EEx.Engine`, and **never**
 `Code.string_to_quoted` on a hole body.
 
 ```
-Template.parse(raw, env):              ; a plain function CALLED FROM parse/2 — no macro expansion
+Template.parse(raw, env):              ; a plain function CALLED FROM compile/3 — no macro expansion
   - If raw contains the two-byte sequence `#{`: Return {:error, Finding at the sigil} (Rule T.9).
   - Return Scan(raw, empty List, empty List, empty List, env).
 
@@ -5234,14 +5091,14 @@ RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.C
 
 **10.4.6 Conformance (template layer).**
 
-- **DF-T1.** A `~P` template MUST be lowered by `parse/2` (via `Workflow.Template.parse/2`) at compile time
+- **DF-T1.** A `~P` template MUST be lowered by `compile/3` (via `Workflow.Template.parse/2`) while loading
   to an inert `%Template{}` whose `segments` entries are all binaries; it MUST NOT compile to a
   closure or quoted expression, and the scanner MUST NOT call `EEx.tokenize`, `EEx.Engine`, or
   `Code.string_to_quoted` on a hole body. The implemented core rejects raw `#{` (Rule T.9) and
   treats sigil modifiers as no-op surface metadata.
 - **DF-T2.** The scanner MUST admit only closed `HoleExpr` holes and literal text and MUST accept
   and reject **exactly** the §10.4.1 language — every other `<%…` opener and every raw `#{`
-  opener is a caller-located compile error at the sigil's `meta`.
+  opener is a caller-located validation error at the sigil's `meta`.
 - **DF-T3.** `RenderTemplate` MUST render assign values through §4.4's `RenderText` unchanged, so a
   template and the corresponding `verify`/`judge` splice render an identical binary identically.
 - **DF-T4.** `template.assigns` MUST list referenced assign names in source order as strings,
@@ -5249,7 +5106,7 @@ RenderText(term):                       ; §4.4 VERBATIM (the shipped Workflow.C
 
 ### 10.5 `let` — name a journaled output — Verdict: ADOPT
 
-`let` binds a compile-time **name to an address**; the value is always fetched by folding the
+`let` binds a static **name to an address**; the value is always fetched by folding the
 journal (`BoundValue`). It creates no new value, no new paid effect, no new event, and no key.
 For `agent` and `synthesize` producers, the producer's own `agent_committed` is the binding's
 sole record. For `refine` producers, `refine_completed` is the sole binding record.
@@ -5275,7 +5132,7 @@ future `GatherStmt` are paren-call forms that need no extra parentheses. Future 
 **only** block-bearing producer and MUST be parenthesized — `let :xs = (map … do … end)` —
 because without parens the `do…end` attaches to `let` (the outermost paren-less call), leaving
 `map` bodyless.
-`parse/2` matches the uniform one-arg shape
+`compile/3` matches the uniform one-arg shape
 `{:let, meta, [{:=, _, [name_ast, producer_ast]}]}`, requires `name_ast` to be an atom literal,
 and dispatches `producer_ast` back through the ordinary per-form entry under the in-scope
 `binding_env`, so every producer kind lowers unchanged. It MUST reject the two-arg
@@ -5284,7 +5141,7 @@ never repair it by reattaching the block.
 
 **10.5.2 Inert representation + addressing + idempotency.**
 
-The implemented core has **no `%Workflow.Node.Let{}` struct**. `let` is compile-time binding
+The implemented core has **no `%Workflow.Node.Let{}` struct**. `let` is static binding
 syntax: the producer node is inserted into the top-level node list at address `[i]`, exactly where
 an unbound producer would have appeared, and `BindingEnv` records `name → {:node, [i]}`. `let`
 therefore introduces **no key** of its own; the producer keys exactly as any agent/synthesize
@@ -5315,11 +5172,11 @@ deferred `map` binding would record `name → {:map, [i]}`.
 ```
 RunLet(producer, run_id, provider, prior, ctx):
   - Let r be RunNode(producer, run_id, provider, prior, ctx).   ; the producer's OWN path (§6.4)
-  - Return r.                                                   ; the binding is compile-time; nothing extra committed
+  - Return r.                                                   ; the binding is static; nothing extra committed
 ```
 
 `RunLet` is conceptual only in the implemented core: execution runs the producer's ordinary path.
-Determinism, exactly-once, and replay-safety are inherited verbatim. For an `agent`/`synthesize`
+Determinism, at-most-once effect handling, and replay-safety are inherited verbatim. For an `agent`/`synthesize`
 producer the producer commits one `agent_committed` at `[i]`, keyed and resumable exactly as any
 agent; on resume the binding is re-derived by `ResolveRef` (`{:node} → BoundValue` folding that
 same event). For `refine`, the producer commits its own refine events and the binding is
@@ -5463,7 +5320,7 @@ host/version caveat under a cross-version resume). This is admitted by the amend
 ### 10.7 `emit` — render the terminal result from bound values — Verdict: ADOPT
 
 Produce the run's terminal value by **rendering a template over bound values**, rather than by
-returning a compile-time literal (`return`).
+returning a static literal (`return`).
 
 **10.7.1 Surface grammar.** `EmitStmt : `emit` `(` TemplateLiteral `)`` — **template-only**,
 where `TemplateLiteral` is the §10.6.1 syntactic symbol for a `~P` sigil token (its raw
@@ -5560,7 +5417,7 @@ result-capable unless a future section defines a result projection for them.
 
 ```
 RunEmitResult(node, run_id, ctx):
-  - Let ref be node.binding_ref.                         ; resolved at compile time
+  - Let ref be node.binding_ref.                         ; resolved while loading
   - If ref is {:refine, address}:
     - Let value be BoundRefineResult(run_id, address).   ; §9.11
     - Return {:cont, ctx with return = value}.
@@ -5629,7 +5486,7 @@ generalized from **literal** to **journaled** inputs.
   journaled inputs and would contradict `gather`'s purpose as a fold over bound values.
 - **Struct + addressing.** `gather` is dispatched as a **schemaless agent turn** — an ephemeral
   `%Agent{schema: nil, retries: 0}` built at **runtime** over its rendered template — analogous to
-  how the implemented `synthesize` is dispatched: at **compile time** `synthesize` keeps its own
+  how the implemented `synthesize` is dispatched: while loading `synthesize` keeps its own
   distinct `%Node.Synthesize{}` struct (it is *not* rewritten to `%Agent{}`), and only at **runtime**
   dispatch does §6.3 construct an ephemeral `%Agent{… schema: nil, retries: 0}` and delegate to
   `RunAgent`. By the same choice `gather` needs no schema/retries and reduces to one schemaless agent
@@ -5691,7 +5548,7 @@ MapLane : AgentStmt                ; EXACTLY ONE agent per map lane (Tier-1); di
     not a list fails closed at runtime (`MapOverNotAList`, §10.11), never coerced.
     Counter-example: `map :x, max: 3 do agent(~P"do <%= @x %>") end` — no `over:` — REJECTED.
   - **Rule M.2 — `max:` is a REQUIRED positive-integer literal.** An unbounded map is
-    unexpressible; `max:` is a structural termination cap resolved at compile time, never a binding
+    unexpressible; `max:` is a structural termination cap resolved while loading, never a binding
     or a computed expression. Counter-example: `map :x, over: :xs, max: budget do agent(~P"<%= @x %>") end`
     — non-literal `max:` — REJECTED.
   - **Rule M.3 — the lane body is exactly one agent** (`MapLane`, Tier-1; multi-stage lanes are
@@ -5818,7 +5675,7 @@ reduce(:n, over: :items, with: :count)   # an in-language reducer — REJECTED (
 **Binding resolution (shared by every idiom).** `BindingRef` is `{:node, address}` |
 `{:refine, address}` | `{:fanout, address, fanout_scope}` | `{:map, address}` |
 `{:element, over_ref}`, where `fanout_scope` is `:global` or `{:loop_local, loop_address}`.
-`BindingEnv` is a compile-time ordered map `name(atom) → BindingRef` threaded through parsing so
+`BindingEnv` is a load-time ordered map `name(atom) → BindingRef` threaded through parsing so
 only lexically-preceding bindings are in scope (Rule T.5); there is **no** runtime name→value map.
 The implemented core emits `{:node, address}` refs for `agent`/`synthesize` producers and
 `{:refine, address}` refs for `refine` producers. Top-level `fanout bind: :name` emits
@@ -5830,7 +5687,7 @@ deferred `map` lane scope. At runtime a reference is resolved by the pure journa
 
 ```
 ResolveAssign(name, bindings, run_id, lane):   ; bindings :: %{atom() => BindingRef} (the node's field)
-  - Let ref be bindings[name].                 ; name resolved at compile time (Rules T.4/T.5); always present
+  - Let ref be bindings[name].                 ; name resolved while loading (Rules T.4/T.5); always present
   - Return ResolveRef(ref, run_id, lane).
 
 ResolveRef(ref, run_id, lane):
@@ -5885,7 +5742,7 @@ already-committed events; `{:element, over}` never folds directly but indexes th
 zero-based, so a `map`-lane agent template resolving `@element_name` (env `{:element, over}`,
 §10.9.2; `lane = %{index: e}`, §10.6.4) yields the `e`-th element of `over`'s resolved
 collection. Top-level bindings resolve at `iteration = 0`. Every per-form compile step (the
-recursive compile entry `parse/2` delegates to per form, §5) threads an additional in-scope
+recursive compiler entry delegates to each form, §5) threads an additional in-scope
 `binding_env` — a trailing-argument extension, not an overload: the in-scope `binding_env` at top
 level, the **empty** env `%{}` at the four nested positions (where templates are actively
 rejected), and the element-extended env at the `map` lane.
@@ -5902,7 +5759,7 @@ commits.
 **Result shape & exit codes.** Unchanged from §7 except for `emit_result`, which places a
 structured result projection in `run_completed.value`. A template that fails name resolution
 (Rules T.4/T.5) or violates a template-shape rule (Rules T.1–T.3, T.6–T.10) is a
-**compile-time** error located at the offending declaration (exit 6, validation — §7.5),
+**load-time** error located at the offending declaration (exit 6, validation — §7.5),
 never a runtime failure. A schema-bound injected `agent` still fails closed on malformed
 structured output (retry-then-fail, exit 8) exactly as §6.4.2; the rendered prompt changes
 what the agent is asked, not the error model.
@@ -5941,22 +5798,19 @@ This section is a practical guide for an agent authoring a workflow. It is non-n
 ### 11.1 How to write a valid workflow
 
 ```elixir
-defmodule MyFlow do
-  use Workflow
-
-  workflow "my-flow" do
-    phase("scope")
-    log("starting")
-    agent("Do one unit of scoped work. Return prose.")
-    return(:ok)
-  end
+workflow "my-flow" do
+  phase("scope")
+  log("starting")
+  agent("Do one unit of scoped work. Return prose.")
+  return(:ok)
 end
 ```
 
 Requirements you MUST meet:
 
-1. `use Workflow`, then one `workflow "literal-name" do … end` block.
-2. Every base prompt, name, and value is a **compile-time literal string/atom** — never a
+1. Put exactly one bare, top-level `workflow "literal-name" do … end` block in the file;
+   do not define a module or use/import a macro.
+2. Every base prompt, name, and value is a **static literal string/atom** — never a
    variable, never `"… #{interpolation} …"`, never a function call. For dataflow, use only
    `let` over a previous `agent`/`synthesize` and render with `~P` holes like `<%= @draft %>`.
 3. The block terminates with a final `return(<literal>)`, `emit(~P"...")`, or
@@ -5964,7 +5818,8 @@ Requirements you MUST meet:
 4. Inside a generic `loop` body use only `agent`, `log`, `phase`, `until`, `fanout`, and
    `collect`; legacy `while_budget`/`until_dry` bodies use only `agent`, `log`, `phase`,
    and `collect`.
-5. Compile with `mix compile`; every mistake is a located compile error.
+5. Call `workflow_validate` on the script path; every mistake is a typed, located
+   validation error before execution.
 
 Note (terminal placement): `return`, `emit`, and `emit_result` set the terminal value and
 must be the final top-level statement. There is no early-exit or "return early on a
@@ -6276,7 +6131,7 @@ workflow "per-item-distinct" do
 end
 ```
 
-Each `agent` prompt in production is a compile-time heredoc string with structured XML-style
+Each `agent` prompt in production is a static heredoc string with structured XML-style
 sections (task, structured_output_contract, verification_loop, action_safety) — never
 interpolated.
 

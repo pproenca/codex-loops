@@ -1,7 +1,7 @@
 defmodule Workflow.QualityCompilerTest do
   @moduledoc """
   The quality combinators (`verify`, `judge`, `synthesize`, `fan_out`) exercised at
-  the highest DSL seam — `Workflow.Compiler.parse/2` — directly against
+  the highest DSL seam — `Workflow.Compiler.compile/3` — directly against
   `quote`d/string-sourced input with no macro expansion. Assertions are on the
   inert, pre-addressed tree the compiler produces and on the located findings it
   returns (or the raises the forbidden-form catalog throws) for malformed input.
@@ -20,7 +20,7 @@ defmodule Workflow.QualityCompilerTest do
   alias Workflow.Node.Verify
 
   defp env, do: %{__ENV__ | file: "workflows/quality.ex", line: 1}
-  defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
+  defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
 
   describe "verify (bounded voting panel)" do
     test "voters mode expands into N pre-addressed, schema-bound, closure-free votes" do
@@ -295,10 +295,11 @@ defmodule Workflow.QualityCompilerTest do
       assert f.message =~ "must be `agent`"
     end
 
-    test "a closure in the body still raises via the forbidden-form catalog" do
-      assert_raise Workflow.CompileError, fn ->
-        parse("fan_out width: budget_slices(per: 2) do\n fn -> :x end\nend\nreturn :ok")
-      end
+    test "a closure in the body returns a forbidden-form finding" do
+      assert {:error, %Finding{message: message}} =
+               parse("fan_out width: budget_slices(per: 2) do\n fn -> :x end\nend\nreturn :ok")
+
+      assert message =~ "anonymous functions"
     end
   end
 

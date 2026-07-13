@@ -15,8 +15,6 @@ defmodule Workflow.LoopRunTest do
   use ExUnit.Case, async: true
 
   alias Workflow.Accumulator
-  alias Workflow.Catalog.LoopUntilBudget
-  alias Workflow.Catalog.LoopUntilDry
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
   alias Workflow.Ledger
@@ -27,8 +25,52 @@ defmodule Workflow.LoopRunTest do
   alias Workflow.Test.LoopProvider
   alias Workflow.Test.ScriptedProvider
 
+  defmodule LoopUntilBudget do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "loop-until-budget",
+        quote do
+          loop max_iterations: 1000, until: budget_remaining() <= 8 do
+            agent("do one unit of work")
+          end
+
+          return(:done)
+        end,
+        __ENV__
+      )
+    end
+  end
+
+  defmodule LoopUntilDry do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "loop-until-dry",
+        quote do
+          loop max_iterations: 1000, until: dry(rounds: 2, seen_by: [:id]) do
+            agent("find more items", schema: %{"type" => "array"})
+            collect(into: :items)
+          end
+
+          return(:done)
+        end,
+        __ENV__
+      )
+    end
+  end
+
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
-  defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
+
+  defp types(id) do
+    id
+    |> Journal.fold()
+    |> Enum.reject(&(&1.type == :agent_started))
+    |> Enum.map(& &1.type)
+  end
+
   defp events(id, type), do: id |> Journal.fold() |> Enum.filter(&(&1.type == type))
   defp decisions(id), do: id |> events(:loop_decision) |> Enum.map(& &1.payload.decision)
 
@@ -60,7 +102,7 @@ defmodule Workflow.LoopRunTest do
     # Budget 40, reserve 8, each turn bills 8: 40 -> 32 -> 24 -> 16 -> 8 (four turns),
     # then remaining is <= reserve, so the loop stops.
     assert {:ok, ^id} =
-             Run.run(LoopUntilBudget,
+             Run.run(LoopUntilBudget.tree(),
                run_id: id,
                budget: 40,
                provider: {EchoProvider, sink: self()}
@@ -121,7 +163,7 @@ defmodule Workflow.LoopRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(LoopUntilBudget,
+             Run.run(LoopUntilBudget.tree(),
                run_id: id,
                budget: 24,
                provider: {EchoProvider, sink: self()}
@@ -132,7 +174,7 @@ defmodule Workflow.LoopRunTest do
     # Re-invoking folds to :completed and reuses it verbatim — no decision recomputed,
     # no paid turn re-run, no new events appended.
     assert {:ok, ^id} =
-             Run.run(LoopUntilBudget, run_id: id, provider: {ExplodingProvider, []})
+             Run.run(LoopUntilBudget.tree(), run_id: id, provider: {ExplodingProvider, []})
 
     assert id |> Journal.fold() |> length() == before
     assert Status.of(id).state == :completed
@@ -149,7 +191,7 @@ defmodule Workflow.LoopRunTest do
     {:ok, script} = ScriptedProvider.start(dry_script())
 
     assert {:ok, ^id} =
-             Run.run(LoopUntilDry,
+             Run.run(LoopUntilDry.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -174,14 +216,14 @@ defmodule Workflow.LoopRunTest do
   end
 
   @tag :capture_log
-  test "killing a run mid-loop and resuming rebuilds the accumulator exactly" do
+  test "killing a run mid-loop preserves the accumulator and fails closed on an unknown turn" do
     id = run_id()
     {:ok, store} = LoopProvider.start(dry_script())
 
     # Crash in the return->commit window of iteration 1: iteration 0's items are
     # committed, iteration 1's paid effect happened server-side but never committed.
     assert {:error, {:run_crashed, :killed}} =
-             Run.run(LoopUntilDry,
+             Run.run(LoopUntilDry.tree(),
                run_id: id,
                provider: {LoopProvider, store: store, sink: self(), crash_at: 1}
              )
@@ -193,58 +235,64 @@ defmodule Workflow.LoopRunTest do
     assert Accumulator.of(id) == %{items: [%{"id" => 1}, %{"id" => 2}]}
     await_lease_released(id)
 
-    # Resume: iteration 0 replays from the journal (no re-collect); iteration 1's
-    # deduped provider replays its recorded output and finally commits; the loop
-    # drives to its dry stop.
-    assert {:ok, ^id} =
-             Run.run(LoopUntilDry,
+    assert {:error, {:outcome_unknown, %{address: [0, 0], iteration: 1, attempt: 0}}} =
+             Run.run(LoopUntilDry.tree(),
                run_id: id,
                provider: {LoopProvider, store: store, sink: self()}
              )
 
-    # Iteration 0 was NOT re-invoked; iteration 1 was (nothing was committed to replay).
+    # No settled or possibly-completed provider effect is repeated.
     refute_received {:agent_called, "find more items", 0}
-    assert_received {:agent_called, "find more items", 1}
+    refute_received {:agent_called, "find more items", 1}
 
-    # The accumulator rebuilt exactly — no lost item (3 present), no duplicate (2 once).
-    assert Accumulator.of(id) == %{items: [%{"id" => 1}, %{"id" => 2}, %{"id" => 3}]}
+    assert Accumulator.of(id) == %{items: [%{"id" => 1}, %{"id" => 2}]}
 
     # And iteration 1's paid effect was charged exactly once across the crash.
     key = %IdempotencyKey{run_id: id, node_path: [0, 0], iteration: 1, attempt: 0}
     assert LoopProvider.charges(store, key) == 1
 
-    assert Status.of(id).state == :completed
+    assert Status.of(id).state == :failed
   end
 
   # --- the predicate sub-vocabulary driving a real loop ---
 
   defmodule CountStop do
     @moduledoc false
-    use Workflow
 
     # No budget bound (remaining is :infinity, so `reserve: 0` never stops it); the
     # loop stops only when the predicate `count(:items) >= 2` holds.
-    workflow "count-stop" do
-      while_budget reserve: 0, until: count(:items) >= 2 do
-        agent("emit", schema: %{"type" => "array"})
-        collect(into: :items)
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "count-stop",
+        quote do
+          while_budget reserve: 0, until: count(:items) >= 2 do
+            agent("emit", schema: %{"type" => "array"})
+            collect(into: :items)
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule DryPredicateStop do
     @moduledoc false
-    use Workflow
 
-    workflow "dry-predicate-stop" do
-      while_budget reserve: 0, until: dry(rounds: 1, seen_by: [:id]) do
-        agent("emit", schema: %{"type" => "array"})
-        collect(into: :items)
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "dry-predicate-stop",
+        quote do
+          while_budget reserve: 0, until: dry(rounds: 1, seen_by: [:id]) do
+            agent("emit", schema: %{"type" => "array"})
+            collect(into: :items)
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -253,7 +301,7 @@ defmodule Workflow.LoopRunTest do
     {:ok, script} = ScriptedProvider.start([[%{"id" => 1}], [%{"id" => 2}]])
 
     assert {:ok, ^id} =
-             Run.run(CountStop,
+             Run.run(CountStop.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -279,7 +327,7 @@ defmodule Workflow.LoopRunTest do
       ])
 
     assert {:ok, ^id} =
-             Run.run(DryPredicateStop,
+             Run.run(DryPredicateStop.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -304,75 +352,100 @@ defmodule Workflow.LoopRunTest do
 
   defmodule GenericMaxLoop do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-max-loop" do
-      loop max_iterations: 2 do
-        agent("tick")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-max-loop",
+        quote do
+          loop max_iterations: 2 do
+            agent("tick")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule BodyUntilStop do
     @moduledoc false
-    use Workflow
 
-    workflow "body-until-stop" do
-      loop max_iterations: 5 do
-        agent("emit", schema: %{"type" => "array"})
-        collect(into: :items)
-        until(count(:items) >= 2)
-        agent("after")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "body-until-stop",
+        quote do
+          loop max_iterations: 5 do
+            agent("emit", schema: %{"type" => "array"})
+            collect(into: :items)
+            until(count(:items) >= 2)
+            agent("after")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule HeaderUntilStop do
     @moduledoc false
-    use Workflow
 
-    workflow "header-until-stop" do
-      loop max_iterations: 5, until: count(:items) >= 2 do
-        agent("emit", schema: %{"type" => "array"})
-        collect(into: :items)
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "header-until-stop",
+        quote do
+          loop max_iterations: 5, until: count(:items) >= 2 do
+            agent("emit", schema: %{"type" => "array"})
+            collect(into: :items)
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule ExhaustFail do
     @moduledoc false
-    use Workflow
 
-    workflow "generic-loop-exhaust-fail" do
-      loop max_iterations: 1, on_exhausted: :fail do
-        agent("tick")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "generic-loop-exhaust-fail",
+        quote do
+          loop max_iterations: 1, on_exhausted: :fail do
+            agent("tick")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule BodyUntilFanoutStop do
     @moduledoc false
-    use Workflow
 
-    workflow "body-until-fanout-stop" do
-      loop max_iterations: 3 do
-        fanout width: 2, bind: :checks do
-          agent("check")
-        end
+    def tree do
+      Workflow.Test.tree!(
+        "body-until-fanout-stop",
+        quote do
+          loop max_iterations: 3 do
+            fanout width: 2, bind: :checks do
+              agent("check")
+            end
 
-        until(agree(:checks, path: "/echo", equals: "check", threshold: :all))
-        agent("after")
-      end
+            until(agree(:checks, path: "/echo", equals: "check", threshold: :all))
+            agent("after")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -380,7 +453,7 @@ defmodule Workflow.LoopRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(GenericMaxLoop, run_id: id, provider: {EchoProvider, sink: self()})
+             Run.run(GenericMaxLoop.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     for _ <- 1..2, do: assert_received({:agent_called, "tick"})
     refute_received {:agent_called, _}
@@ -425,7 +498,7 @@ defmodule Workflow.LoopRunTest do
     {:ok, script} = ScriptedProvider.start([[%{"id" => 1}], [%{"id" => 2}]])
 
     assert {:ok, ^id} =
-             Run.run(HeaderUntilStop,
+             Run.run(HeaderUntilStop.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -474,7 +547,7 @@ defmodule Workflow.LoopRunTest do
       ])
 
     assert {:ok, ^id} =
-             Run.run(BodyUntilStop,
+             Run.run(BodyUntilStop.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -524,7 +597,7 @@ defmodule Workflow.LoopRunTest do
     id = run_id()
 
     assert {:error, {:loop_exhausted, [0], 1}} =
-             Run.run(ExhaustFail, run_id: id, provider: {EchoProvider, sink: self()})
+             Run.run(ExhaustFail.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     assert_received {:agent_called, "tick"}
     refute_received {:agent_called, _}
@@ -556,7 +629,7 @@ defmodule Workflow.LoopRunTest do
     event_count = id |> Journal.fold() |> length()
 
     assert {:error, {:loop_exhausted, [0], 1}} =
-             Run.run(ExhaustFail, run_id: id, provider: {ExplodingProvider, []})
+             Run.run(ExhaustFail.tree(), run_id: id, provider: {ExplodingProvider, []})
 
     assert id |> Journal.fold() |> length() == event_count
   end
@@ -565,7 +638,7 @@ defmodule Workflow.LoopRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(BodyUntilFanoutStop, run_id: id, provider: {EchoProvider, sink: self()})
+             Run.run(BodyUntilFanoutStop.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     for _ <- 1..2, do: assert_received({:agent_called, "check"})
     refute_received {:agent_called, "after"}

@@ -16,21 +16,22 @@ defmodule Workflow.Web.RunLiveBrowserTest do
 
   defmodule CompletedWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "browser-complete" do
+    def tree do
+      Workflow.Test.tree!("browser-complete", quote do
       phase("browser")
       log("browser smoke started")
       agent("render the completed browser smoke")
       return(:ok)
+      end, __ENV__)
     end
   end
 
   defmodule FailedWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "browser-failure" do
+    def tree do
+      Workflow.Test.tree!("browser-failure", quote do
       phase("browser")
 
       agent("return malformed output",
@@ -43,12 +44,13 @@ defmodule Workflow.Web.RunLiveBrowserTest do
       )
 
       return(:ok)
+      end, __ENV__)
     end
   end
 
   test "completed mock run is readable in a real browser", %{conn: conn} do
     id = run_id()
-    assert {:ok, ^id} = Run.run(CompletedWorkflow, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:ok, ^id} = Run.run(CompletedWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     conn
     |> visit("/runs/#{id}")
@@ -64,7 +66,7 @@ defmodule Workflow.Web.RunLiveBrowserTest do
     id = run_id()
 
     assert {:error, {:malformed_output, _address, _reason}} =
-             Run.run(FailedWorkflow, run_id: id, provider: {EchoProvider, sink: self()})
+             Run.run(FailedWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     conn
     |> visit("/runs/#{id}")
@@ -81,7 +83,7 @@ defmodule Workflow.Web.RunLiveBrowserTest do
     id = run_id()
 
     assert {:ok, ^id, writer} =
-             Run.start(CompletedWorkflow,
+             Run.start(CompletedWorkflow.tree(),
                run_id: id,
                provider: {StreamingGateProvider, sink: self()}
              )

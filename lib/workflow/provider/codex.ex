@@ -44,6 +44,7 @@ defmodule Workflow.Provider.Codex do
   ]
 
   @timeout_detail %{"message" => "codex turn timed out"}
+  @default_timeout 30 * 60 * 1_000
 
   @impl true
   def run_agent(prompt, schema, _key, opts) do
@@ -54,19 +55,35 @@ defmodule Workflow.Provider.Codex do
         try do
           case Containment.run_turn(prompt,
                  command: command,
-                 timeout: Keyword.get(opts, :timeout, :infinity),
-                 on_line: line_observer(accumulator)
+                 timeout: Keyword.get(opts, :timeout, @default_timeout),
+                 line_acc: accumulator,
+                 on_line: &StreamAccumulator.observe_line/2
                ) do
-            {:ok, _stdout} ->
+            {:ok, _stdout, accumulator} ->
               finish_accumulator(accumulator)
 
-            {:error, :timeout} ->
-              {:error, {:provider_failure, :timeout, @timeout_detail, nil, []}}
+            {:error, :timeout, accumulator} ->
+              {usage, activity} = StreamAccumulator.partial(accumulator)
+              {:error, {:provider_failure, :timeout, @timeout_detail, usage, activity}}
 
-            {:error, {:backend_exit, status, output}} when status in [126, 127] ->
+            {:error, :input_limit, accumulator} ->
+              {usage, activity} = StreamAccumulator.partial(accumulator)
+
+              {:error,
+               {:provider_failure, :model_limit, %{"message" => "codex prompt exceeded the containment input limit"}, usage,
+                activity}}
+
+            {:error, :output_limit, accumulator} ->
+              {usage, activity} = StreamAccumulator.partial(accumulator)
+
+              {:error,
+               {:provider_failure, :backend, %{"message" => "codex output exceeded the containment limit"}, usage,
+                activity}}
+
+            {:error, {:backend_exit, status, output}, _accumulator} when status in [126, 127] ->
               {:error, unavailable_failure(backend_start_message(status, output))}
 
-            {:error, {:backend_exit, status, output}} ->
+            {:error, {:backend_exit, status, output}, accumulator} ->
               case finish_accumulator(accumulator) do
                 {:error, {:provider_failure, :backend, _detail, _usage, _activity} = failure} ->
                   {:error, failure}
@@ -77,7 +94,6 @@ defmodule Workflow.Provider.Codex do
               end
           end
         after
-          delete_accumulator(accumulator)
           schema_file && File.rm(schema_file)
         end
 
@@ -177,26 +193,8 @@ defmodule Workflow.Provider.Codex do
     end
   end
 
-  defp new_accumulator(schema, activity_sink) do
-    table = :ets.new(:codex_stream_accumulator, [:set, :private])
-    :ets.insert(table, {:state, StreamAccumulator.new(schema, activity_sink)})
-    table
-  end
-
-  defp line_observer(accumulator), do: &observe_line(accumulator, &1)
-
-  defp observe_line(accumulator, line) do
-    [{:state, state}] = :ets.lookup(accumulator, :state)
-    :ets.insert(accumulator, {:state, StreamAccumulator.observe_line(state, line)})
-    :ok
-  end
-
-  defp finish_accumulator(accumulator) do
-    [{:state, state}] = :ets.lookup(accumulator, :state)
-    StreamAccumulator.finish(state)
-  end
-
-  defp delete_accumulator(accumulator), do: :ets.delete(accumulator)
+  defp new_accumulator(schema, activity_sink), do: StreamAccumulator.new(schema, activity_sink)
+  defp finish_accumulator(accumulator), do: StreamAccumulator.finish(accumulator)
 
   defp write_schema(schema) do
     path = Path.join(System.tmp_dir!(), "codex_schema_#{System.unique_integer([:positive])}.json")

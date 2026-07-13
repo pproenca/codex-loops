@@ -74,17 +74,18 @@ Before writing files, classify what the user means by "workflow":
 Author executable workflows as Elixir `.exs` files:
 
 ```elixir
-defmodule ExampleWorkflow do
-  use Workflow
-
-  workflow "example" do
-    phase "scout"
-    log "starting"
-    agent "Inspect README.md and summarize the project goal."
-    return :ok
-  end
+workflow "example" do
+  phase "scout"
+  log "starting"
+  agent "Inspect README.md and summarize the project goal."
+  return :ok
 end
 ```
+
+Each file contains exactly one bare, top-level `workflow` declaration. The
+scheduler parses it as inert data and never compiles or evaluates the file. Do
+not add `defmodule`, `use Workflow`, imports, or schema modules; pass structured
+output schemas as literal JSON Schema maps.
 
 Use a scout-first authoring loop:
 
@@ -107,7 +108,7 @@ Useful DSL forms:
 - `phase "title"`
 - `log "message"`
 - `agent "prompt"`
-- `agent "prompt", schema: %{...}, retries: n`
+- `agent "prompt", schema: %{...}, retries: n` where `n` is `0..5`
 - `let :name = agent(...)`
 - `let :name = synthesize(...)`
 - `let :name = refine(...)`
@@ -124,8 +125,8 @@ Useful DSL forms:
 - Explicit heterogeneous fanout lanes:
   `fanout width: 2 do lanes([[agent("a")], [agent("b"), agent("c")]]) end`.
 
-Prefer the generic core for new dynamic workflows. Use `loop max_iterations:`
-with either a header `until:` predicate or one body-local `until(predicate)`,
+Prefer the generic core for new dynamic workflows. Use `loop max_iterations:` in
+the range `1..1000` with either a header `until:` predicate or one body-local `until(predicate)`,
 but not both. Body-local `until` stops at that body point, cannot contain
 `dry(...)`, and can inspect an earlier loop-local `fanout bind:`.
 
@@ -135,7 +136,8 @@ equal to the lane count. Repeated-lane widths are integer, `budget_slices(per: n
 `path_count(:binding, "/json/pointer", max: m)`. Optional controls are `bind:`,
 `max_concurrency:`, and `on_zero: :complete | :fail`. A `fanout bind:` produces
 an ordered result list for later templates and predicates; lane prompts do not
-receive implicit per-lane data.
+receive implicit per-lane data. Runtime caps remain authoritative: no more than
+eight workflow tasks execute concurrently and fanout width never exceeds 64.
 
 Closed predicate examples. For `agree` over a fanout binding, each lane result
 must be a structured map, usually from a schema-backed agent:
@@ -193,11 +195,15 @@ workflow_open_ui run_id=<id-live>
 ```
 
 `workflow_status` is a polling snapshot. `workflow_inspect` is durable journal
-inspection. LiveView, opened through `workflow_open_ui`, is the realtime surface
-for progress messages and activity entries.
+inspection. LiveView, opened through `workflow_open_ui`, renders the same
+journal-backed projection: every activity entry is appended before a
+post-commit PubSub notification asks the UI to refresh.
 
 Use `workflow_resume run_id=<id> provider=codex` when a run failed and should
-reuse completed journaled nodes.
+reuse completed journaled nodes. Provider effects are at-most-once: a durable
+`agent_started` is written before each call, and an unsettled start is never
+redelivered. Resume terminates such a run with `outcome_unknown`; inspect it and
+start a fresh run only as an explicit decision.
 
 ## Development Gates
 

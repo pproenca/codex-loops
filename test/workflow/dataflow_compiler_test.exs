@@ -1,7 +1,7 @@
 defmodule Workflow.DataflowCompilerTest do
   @moduledoc """
   Compiler coverage for slice #15's dataflow core: `let`, `~P`, and `emit`.
-  Assertions stay at the highest seam — `Workflow.Compiler.parse/2` — so the
+  Assertions stay at the highest seam — `Workflow.Compiler.compile/3` — so the
   tests pin the inert tree shape and caller-located findings directly.
   """
   use ExUnit.Case, async: true
@@ -17,7 +17,7 @@ defmodule Workflow.DataflowCompilerTest do
   alias Workflow.Template.Hole
 
   defp env, do: %{__ENV__ | file: "workflows/dataflow.ex", line: 1}
-  defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
+  defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
 
   describe "let bindings and emit terminals" do
     test "binds an agent producer and compiles ~P to an inert template" do
@@ -125,7 +125,7 @@ defmodule Workflow.DataflowCompilerTest do
       env = %{__ENV__ | file: "workflows/dataflow.ex", line: 7}
 
       assert {:error, %Finding{line: 7} = f} =
-               Compiler.parse(Code.string_to_quoted!(~s|phase("p")\nlog("still running")|), env)
+               Compiler.compile("test", Code.string_to_quoted!(~s|phase("p")\nlog("still running")|), env)
 
       assert f.message =~ "must terminate with `return`, `emit`, or `emit_result`"
       assert Finding.format(f) =~ "workflows/dataflow.ex:7"

@@ -7,6 +7,8 @@ defmodule Workflow.Refine.Gate do
   formatter does not need to do.
   """
 
+  alias Workflow.JSONPointer
+
   @type compare_op :: :> | :< | :>= | :<= | :==
   @type predicate ::
           {:path_exists, String.t()}
@@ -15,10 +17,10 @@ defmodule Workflow.Refine.Gate do
           | {:path_equals, String.t(), term()}
 
   @spec evaluate(predicate(), map()) :: boolean()
-  def evaluate({:path_exists, pointer}, json), do: match?({:present, _}, resolve(json, pointer))
+  def evaluate({:path_exists, pointer}, json), do: match?({:present, _}, JSONPointer.resolve(json, pointer))
 
   def evaluate({:path_non_empty, pointer}, json) do
-    case resolve(json, pointer) do
+    case JSONPointer.resolve(json, pointer) do
       :missing -> false
       {:present, value} -> non_empty?(value)
     end
@@ -26,60 +28,20 @@ defmodule Workflow.Refine.Gate do
 
   def evaluate({:path_count, pointer, op, right}, json) do
     json
-    |> resolve(pointer)
+    |> JSONPointer.resolve(pointer)
     |> count()
     |> compare(op, right)
   end
 
   def evaluate({:path_equals, pointer, literal}, json) do
-    case resolve(json, pointer) do
+    case JSONPointer.resolve(json, pointer) do
       :missing -> false
       {:present, value} -> value == literal
     end
   end
 
   @spec valid_pointer?(term()) :: boolean()
-  def valid_pointer?(pointer) when is_binary(pointer) do
-    (pointer == "" or String.starts_with?(pointer, "/")) and valid_escapes?(pointer)
-  end
-
-  def valid_pointer?(_pointer), do: false
-
-  @spec resolve(map(), String.t()) :: {:present, term()} | :missing
-  def resolve(value, ""), do: {:present, value}
-
-  def resolve(value, "/" <> rest) do
-    rest
-    |> String.split("/")
-    |> Enum.map(&unescape_token/1)
-    |> Enum.reduce_while({:present, value}, fn token, {:present, current} ->
-      case step(current, token) do
-        {:present, _value} = present -> {:cont, present}
-        :missing -> {:halt, :missing}
-      end
-    end)
-  end
-
-  def resolve(_value, _pointer), do: :missing
-
-  defp step(current, token) when is_map(current) do
-    case Map.fetch(current, token) do
-      {:ok, value} -> {:present, value}
-      :error -> :missing
-    end
-  end
-
-  defp step(current, token) when is_list(current) do
-    with true <- canonical_index?(token),
-         {index, ""} <- Integer.parse(token),
-         true <- index < length(current) do
-      {:present, Enum.at(current, index)}
-    else
-      _other -> :missing
-    end
-  end
-
-  defp step(_current, _token), do: :missing
+  def valid_pointer?(pointer), do: JSONPointer.valid?(pointer)
 
   defp non_empty?(nil), do: false
   defp non_empty?(value) when is_binary(value), do: byte_size(value) > 0
@@ -98,29 +60,4 @@ defmodule Workflow.Refine.Gate do
   defp compare(left, :>=, right), do: left >= right
   defp compare(left, :<=, right), do: left <= right
   defp compare(left, :==, right), do: left == right
-
-  defp canonical_index?("0"), do: true
-
-  defp canonical_index?(token) do
-    String.match?(token, ~r/^[1-9][0-9]*$/)
-  end
-
-  defp valid_escapes?(pointer) do
-    pointer
-    |> String.graphemes()
-    |> valid_escape_tokens?()
-  end
-
-  defp valid_escape_tokens?([]), do: true
-
-  defp valid_escape_tokens?(["~", next | rest]) when next in ["0", "1"], do: valid_escape_tokens?(rest)
-
-  defp valid_escape_tokens?(["~" | _rest]), do: false
-  defp valid_escape_tokens?([_char | rest]), do: valid_escape_tokens?(rest)
-
-  defp unescape_token(token) do
-    token
-    |> String.replace("~1", "/")
-    |> String.replace("~0", "~")
-  end
 end

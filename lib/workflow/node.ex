@@ -75,11 +75,11 @@ defmodule Workflow.Node.Agent do
   `(run_id, address, iteration)`.
 
   `schema` is an inert, raw JSON-schema **map** (or `nil` for a schemaless turn),
-  materialized at compile time from either a map literal or a `schema … do … end`
-  module built by `Workflow.Schema.DSL`. When present the turn is **fail-closed**:
+  materialized from a literal map in the workflow source. When present the turn is
+  **fail-closed**:
   the provider's output is validated against the schema, invalid output is retried
   on-thread up to `retries` times, and exhausting the budget fails the node.
-  `schema`/`retries` are compile-time constants, so the node stays inert and
+  `schema`/`retries` are author-time constants, so the node stays inert and
   serializable — no closure is ever captured.
   """
   @enforce_keys [:address, :prompt]
@@ -290,7 +290,7 @@ defmodule Workflow.Node.Refine do
   reviser handles blocking findings, and a terminal refine event commits or
   fails the result.
   """
-  alias Workflow.Refine.ReviewerAdapter
+  alias Workflow.Refine.Reviewer
 
   @enforce_keys [:address, :input, :reviewers, :reviser, :until, :max_rounds]
   defstruct [
@@ -310,31 +310,18 @@ defmodule Workflow.Node.Refine do
 
   @type cold_read_gate :: %{
           predicate: gate_predicate(),
-          reviewer: %{
-            name: atom(),
-            prompt: String.t(),
-            adapter: ReviewerAdapter.t(),
-            agent: Workflow.Node.Agent.t()
-          }
+          reviewer: Reviewer.t()
         }
 
   @type repair_gate :: %{predicate: gate_predicate(), agent: Workflow.Node.Agent.t()}
   @type halt_gate :: %{predicate: gate_predicate()}
-
-  @type reviewer :: %{
-          index: non_neg_integer(),
-          name: atom(),
-          prompt: String.t(),
-          adapter: ReviewerAdapter.t(),
-          agent: Workflow.Node.Agent.t()
-        }
 
   @type t :: %__MODULE__{
           address: Workflow.Node.address(),
           input:
             {:producer, Workflow.Node.Agent.t()}
             | {:binding, atom(), Workflow.Node.binding_ref()},
-          reviewers: [reviewer()],
+          reviewers: [Reviewer.t()],
           reviser: Workflow.Node.Agent.t(),
           until: :unanimous,
           max_rounds: pos_integer(),

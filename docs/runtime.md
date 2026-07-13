@@ -22,18 +22,19 @@ Phoenix LiveView.
 
 ## Realtime And Durable Surfaces
 
-LiveView is the realtime surface. The Codex provider normalizes Codex JSONL
-events into activity entries, and the writer publishes those entries as
-progress messages on `Workflow.Run.Stream` while the provider turn is still
-running. A connected LiveView may render those progress messages immediately,
-before the agent settles.
+SQLite is authoritative for every read surface, including LiveView. Immediately
+before a provider attempt, the writer synchronously appends `agent_started`.
+As the Codex provider normalizes JSONL into activity entries, the same writer
+synchronously appends each `agent_activity`. Only after an append succeeds does
+it publish `{:journal_committed, ...}`. PubSub is therefore a refresh signal,
+not a second progress bus, and a connected or reconnecting LiveView always
+renders a journal fold.
 
-Progress messages are not authoritative run facts until persisted. A supervised
-`Workflow.Run.ActivityPersistenceSubscriber` listens to the progress-message bus
-and appends `agent_activity` journal events for reconnect and inspection. Agent
-settlement stays writer-owned: `agent_committed`, `agent_attempt_rejected`, and
-`agent_failed` are the events that drive replay, resume, retry, ledger, and
-terminal state.
+Agent settlement stays writer-owned: `agent_committed`,
+`agent_attempt_rejected`, and `agent_failed` close an attempt. Activity remains
+telemetry and does not decide validation, retry, budget, or terminal state. Its
+durability before notification means a slow or disconnected UI loses no state,
+and no subscriber is responsible for making activity durable.
 
 The scheduler API and MCP tools are polling snapshot or inspection surfaces:
 
@@ -46,8 +47,7 @@ The scheduler API and MCP tools are polling snapshot or inspection surfaces:
   watching.
 
 Raw refs are pointers to durable journal events. `eventCount` counts persisted
-journal events only, not transient progress messages seen by a connected
-LiveView.
+journal events. PubSub notifications do not add projection entries.
 
 ## Runtime Bundle
 
@@ -125,12 +125,31 @@ Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite` by default, or
 at `CODEX_LOOPS_JOURNAL_PATH` when set. Events are keyed by `{run_id, seq}` and
 folded to reconstruct status, summaries, and resume decisions.
 
+The supervised journal process owns one serialized write connection. Status,
+inspection, and LiveView folds open short-lived read-only SQLite connections,
+so concurrent readers do not queue through the journal process's mailbox. Event
+blobs are size-bounded and decoded with OTP's safe term option.
+
+## Provider Effects And Resume
+
+Provider attempts are at-most-once. The writer commits `agent_started`, including
+the attempt identity, before launching a provider subprocess. A matching
+`agent_committed`, `agent_attempt_rejected`, or `agent_failed` settles that
+attempt. Completed and rejected attempts replay from the journal on resume.
+
+If a writer or scheduler dies after `agent_started` but before settlement, the
+provider may or may not have completed or charged. Codex Loops does not pretend
+that the backend deduplicates the request and does not redeliver it. Resume
+appends `run_failed` with `outcome_unknown` and terminates. Operators must inspect
+the recorded attempt and start a new run deliberately if they want to try the
+work again.
+
 ## Providers
 
 - `mock`: offline provider used by `test`.
 - `codex`: live provider that shells out to the explicitly bound `codex exec --json
   --skip-git-repo-check`, folds each Codex event once, emits normalized activity
-  entries for realtime UI, and settles with a result plus token usage.
+  entries into the journal, and settles with a result plus token usage.
 
 Schema-backed turns use Codex structured output via `--output-schema`; the
 schema owns output shape, while prompts should carry semantic work
@@ -142,18 +161,27 @@ lexical path plus exact version. The native launcher passes that path into
 runtime configuration. The provider consumes normalized application
 configuration and never searches PATH or reads process environment.
 
+Every external provider process is one-shot and bounded: input and stdout are
+limited to 16 MiB, the default turn deadline is 30 minutes, stderr is discarded,
+and a timeout or size breach fails the attempt. Concurrent workflow work is
+bounded by a system cap of eight tasks, fanout width by 64 lanes, and requested
+per-node limits may reduce those caps further. Refine reviewers also have a
+finite per-reviewer deadline.
+
 ## Supervision
 
 The application supervises:
 
+- `Workflow.Journal`: SQLite write owner and boot gate.
 - `Workflow.Run.Registry`: unique per-run writer lease.
 - `Workflow.PubSub`: post-commit notifications.
-- `Workflow.Journal`: SQLite owner process.
-- `Workflow.Run.ActivityPersistenceSubscriber`: explicit subscriber that makes
-  progress activity durable.
 - `Workflow.Run.Supervisor`: dynamic supervisor for run writers.
 - `Workflow.Web.Endpoint`: optional endpoint, disabled by default unless
   `CODEX_LOOPS_SERVER=1` or `true`.
+
+These children use dependency order under `:rest_for_one`: if the journal,
+registry, or PubSub foundation restarts, downstream writers and the endpoint are
+restarted too. No writer can remain alive behind a replacement registry.
 
 ## Scope
 

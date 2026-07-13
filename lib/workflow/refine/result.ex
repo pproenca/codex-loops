@@ -9,7 +9,11 @@ defmodule Workflow.Refine.Result do
 
   alias Workflow.Event
   alias Workflow.Journal
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.OpenFinding
+  alias Workflow.Refine.ReviewerDecision
+  alias Workflow.Refine.RoleFailure
 
   @type result :: {:ok, map()} | {:error, {:unbound, Workflow.Node.binding_ref()}}
 
@@ -31,8 +35,8 @@ defmodule Workflow.Refine.Result do
   def public(attrs, events \\ [], run_id \\ nil, address \\ nil) do
     final_round = Map.get(attrs, :final_round)
     final_decision = final_decision(events, address, final_round)
-    open_findings = Map.get(attrs, :open_findings, [])
-    role_failures = Map.get(attrs, :role_failures, [])
+    open_findings = Enum.map(Map.get(attrs, :open_findings, []), &OpenFinding.from_payload/1)
+    role_failures = Enum.map(Map.get(attrs, :role_failures, []), &RoleFailure.from_payload/1)
     failed_reviewers = Map.get(attrs, :failed_reviewers, failed_reviewers(role_failures))
 
     report_snippets =
@@ -52,6 +56,7 @@ defmodule Workflow.Refine.Result do
       "reviewerDecisions" =>
         attrs
         |> Map.get(:reviewer_decisions, decision_field(final_decision, :reviewer_decisions, []))
+        |> Enum.map(&ReviewerDecision.from_payload/1)
         |> Enum.map(&reviewer_decision_json/1),
       "coldRead" => cold_read_json(Map.get(attrs, :cold_read)),
       "reportSnippets" => report_snippets,
@@ -78,7 +83,7 @@ defmodule Workflow.Refine.Result do
 
   defp decision_field(%Event{payload: payload}, field, default), do: Map.get(payload, field, default)
 
-  defp open_finding_json(finding) do
+  defp open_finding_json(%OpenFinding{} = finding) do
     %{
       "reviewer" => atom_string(finding.reviewer),
       "reviewerIndex" => finding.reviewer_index,
@@ -88,7 +93,7 @@ defmodule Workflow.Refine.Result do
     }
   end
 
-  defp reviewer_decision_json(decision) do
+  defp reviewer_decision_json(%ReviewerDecision{} = decision) do
     %{
       "reviewer" => atom_string(decision.reviewer),
       "reviewerIndex" => decision.reviewer_index,
@@ -99,7 +104,7 @@ defmodule Workflow.Refine.Result do
     }
   end
 
-  defp role_failure_json(failure) do
+  defp role_failure_json(%RoleFailure{} = failure) do
     %{
       "role" => atom_string(failure.role),
       "roleAddress" => failure.role_address,
@@ -119,8 +124,16 @@ defmodule Workflow.Refine.Result do
   defp cold_read_json(%{state: :completed} = cold_read) do
     %{
       "state" => "completed",
-      "openFindings" => Enum.map(Map.get(cold_read, :open_findings, []), &open_finding_json/1),
-      "reviewerDecision" => reviewer_decision_json(Map.fetch!(cold_read, :reviewer_decision)),
+      "openFindings" =>
+        cold_read
+        |> Map.get(:open_findings, [])
+        |> Enum.map(&OpenFinding.from_payload/1)
+        |> Enum.map(&open_finding_json/1),
+      "reviewerDecision" =>
+        cold_read
+        |> Map.fetch!(:reviewer_decision)
+        |> ReviewerDecision.from_payload()
+        |> reviewer_decision_json(),
       "reportSnippets" => Map.get(cold_read, :report_snippets, []),
       "repaired" => Map.get(cold_read, :repaired, false)
     }
@@ -129,7 +142,11 @@ defmodule Workflow.Refine.Result do
   defp cold_read_json(%{state: :failed} = cold_read) do
     %{
       "state" => "failed",
-      "roleFailure" => role_failure_json(Map.fetch!(cold_read, :role_failure)),
+      "roleFailure" =>
+        cold_read
+        |> Map.fetch!(:role_failure)
+        |> RoleFailure.from_payload()
+        |> role_failure_json(),
       "repaired" => Map.get(cold_read, :repaired, false)
     }
   end
@@ -189,6 +206,8 @@ defmodule Workflow.Refine.Result do
       "totalTokens" => usage.total_tokens
     }
   end
+
+  defp activity_entry_json(%Activity{} = entry), do: Activity.to_public_map(entry)
 
   defp activity_entry_json(entry) when is_map(entry) do
     Map.new(entry, fn {key, value} -> {activity_key(key), activity_value(value)} end)

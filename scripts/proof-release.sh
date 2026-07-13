@@ -92,15 +92,11 @@ base_url="http://$host:$port"
 run_id="run_release_proof_$(date +%s)_$$"
 
 cat > "$workflow" <<'EOF'
-defmodule ReleaseProofWorkflow do
-  use Workflow
-
-  workflow "scheduler-release-proof" do
-    phase "api"
-    log "scheduler release proof started"
-    agent "Reply with proof-ok"
-    return :ok
-  end
+workflow "scheduler-release-proof" do
+  phase "api"
+  log "scheduler release proof started"
+  agent "Reply with proof-ok"
+  return :ok
 end
 EOF
 

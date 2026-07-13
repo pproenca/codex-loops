@@ -3,7 +3,10 @@ defmodule Workflow.RefineRunTest do
 
   alias Workflow.Journal
   alias Workflow.Ledger
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.OpenFinding
+  alias Workflow.Refine.ReviewerDecision
   alias Workflow.Run
   alias Workflow.Status
   alias Workflow.Test.ExplodingProvider
@@ -11,6 +14,21 @@ defmodule Workflow.RefineRunTest do
   alias Workflow.Test.ScriptedProvider
 
   @moduletag :capture_log
+
+  defp activity_fields(%Activity{} = activity) do
+    activity
+    |> Map.from_struct()
+    |> Map.delete(:activity_index)
+  end
+
+  defp open_finding!(attrs), do: struct!(OpenFinding, attrs)
+
+  defp reviewer_decision!(attrs) do
+    attrs
+    |> Map.put_new(:adapter, :findings_v1)
+    |> Map.put_new(:status, :completed)
+    |> then(&struct!(ReviewerDecision, &1))
+  end
 
   defmodule ReplayStartedProvider do
     @moduledoc false
@@ -278,40 +296,50 @@ defmodule Workflow.RefineRunTest do
 
   defmodule InlineConverges do
     @moduledoc false
-    use Workflow
 
-    workflow "inline-converges" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 3
+    def tree do
+      Workflow.Test.tree!(
+        "inline-converges",
+        quote do
+          refine(agent("Draft."),
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 3
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule SequentialReviewerConverges do
     @moduledoc false
-    use Workflow
 
-    workflow "sequential-reviewer-converges" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 1,
-        max_concurrency: 1
+    def tree do
+      Workflow.Test.tree!(
+        "sequential-reviewer-converges",
+        quote do
+          refine(agent("Draft."),
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 1,
+            max_concurrency: 1
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
@@ -359,156 +387,139 @@ defmodule Workflow.RefineRunTest do
 
   defmodule ChangedInlineConverges do
     @moduledoc false
-    use Workflow
 
-    workflow "changed-inline-converges" do
-      refine(agent("Changed draft."),
-        reviewers: [
-          reviewer(:changed_spec, "Changed spec."),
-          reviewer(:changed_runtime, "Changed runtime."),
-          reviewer(:changed_extra, "Changed extra.")
-        ],
-        revise_with: agent("Changed fix."),
-        until: :unanimous,
-        max_rounds: 3,
-        max_concurrency: 3
+    def tree do
+      Workflow.Test.tree!(
+        "changed-inline-converges",
+        quote do
+          refine(agent("Changed draft."),
+            reviewers: [
+              reviewer(:changed_spec, "Changed spec."),
+              reviewer(:changed_runtime, "Changed runtime."),
+              reviewer(:changed_extra, "Changed extra.")
+            ],
+            revise_with: agent("Changed fix."),
+            until: :unanimous,
+            max_rounds: 3,
+            max_concurrency: 3
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule BoundConverges do
     @moduledoc false
-    use Workflow
 
-    workflow "bound-converges" do
-      let(:draft = agent("Draft."))
+    def tree do
+      Workflow.Test.tree!(
+        "bound-converges",
+        quote do
+          let(:draft = agent("Draft."))
 
-      refine(:draft,
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 3
+          refine(:draft,
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 3
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule BoundInvalidObject do
     @moduledoc false
-    use Workflow
 
-    workflow "bound-invalid-object" do
-      let(:draft = agent("Draft.", schema: %{"type" => "object", "required" => ["not_artifact"]}))
+    def tree do
+      Workflow.Test.tree!(
+        "bound-invalid-object",
+        quote do
+          let(:draft = agent("Draft.", schema: %{"type" => "object", "required" => ["not_artifact"]}))
 
-      refine(:draft,
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 3
+          refine(:draft,
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 3
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule BoundArtifactObjectConverges do
     @moduledoc false
-    use Workflow
 
-    workflow "bound-artifact-object-converges" do
-      let(:draft = agent("Draft.", schema: %{"type" => "object", "required" => ["artifact"]}))
+    def tree do
+      Workflow.Test.tree!(
+        "bound-artifact-object-converges",
+        quote do
+          let(:draft = agent("Draft.", schema: %{"type" => "object", "required" => ["artifact"]}))
 
-      refine(:draft,
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 3
+          refine(:draft,
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 3
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule NonConvergesFail do
     @moduledoc false
-    use Workflow
 
-    workflow "non-converges-fail" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 1
+    def tree do
+      Workflow.Test.tree!(
+        "non-converges-fail",
+        quote do
+          refine(agent("Draft."),
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 1
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defmodule NonConvergesAccept do
     @moduledoc false
-    use Workflow
 
-    workflow "non-converges-accept" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 1,
-        on_non_convergence: :accept_current
-      )
-
-      return(:ok)
-    end
-  end
-
-  defmodule AdapterConverges do
-    @moduledoc false
-    use Workflow
-
-    workflow "adapter-converges" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:findings, "Find findings."),
-          reviewer(:defects, "Find defects.", adapter: :defects_v1),
-          reviewer(:violations, "Find violations.", adapter: :violations_v1),
-          reviewer(:concerns, "Find concerns.", adapter: :concerns_v1)
-        ],
-        revise_with: agent("Fix."),
-        until: :unanimous,
-        max_rounds: 1,
-        max_concurrency: 1
-      )
-
-      return(:ok)
-    end
-  end
-
-  defmodule AcceptCurrentEmit do
-    @moduledoc false
-    use Workflow
-
-    workflow "accept-current-emit" do
-      let(
-        :final =
+    def tree do
+      Workflow.Test.tree!(
+        "non-converges-accept",
+        quote do
           refine(agent("Draft."),
             reviewers: [
               reviewer(:spec, "Check the spec."),
@@ -519,19 +530,167 @@ defmodule Workflow.RefineRunTest do
             max_rounds: 1,
             on_non_convergence: :accept_current
           )
-      )
 
-      emit(~P"Final: <%= @final %>")
+          return(:ok)
+        end,
+        __ENV__
+      )
+    end
+  end
+
+  defmodule AdapterConverges do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "adapter-converges",
+        quote do
+          refine(agent("Draft."),
+            reviewers: [
+              reviewer(:findings, "Find findings."),
+              reviewer(:defects, "Find defects.", adapter: :defects_v1),
+              reviewer(:violations, "Find violations.", adapter: :violations_v1),
+              reviewer(:concerns, "Find concerns.", adapter: :concerns_v1)
+            ],
+            revise_with: agent("Fix."),
+            until: :unanimous,
+            max_rounds: 1,
+            max_concurrency: 1
+          )
+
+          return(:ok)
+        end,
+        __ENV__
+      )
+    end
+  end
+
+  defmodule AcceptCurrentEmit do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "accept-current-emit",
+        quote do
+          let(
+            :final =
+              refine(agent("Draft."),
+                reviewers: [
+                  reviewer(:spec, "Check the spec."),
+                  reviewer(:runtime, "Check the runtime.")
+                ],
+                revise_with: agent("Fix."),
+                until: :unanimous,
+                max_rounds: 1,
+                on_non_convergence: :accept_current
+              )
+          )
+
+          emit(~P"Final: <%= @final %>")
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule GateColdRepairEmitResult do
     @moduledoc false
-    use Workflow
 
-    workflow "gate-cold-repair-emit-result" do
-      let(
-        :final =
+    def tree do
+      Workflow.Test.tree!(
+        "gate-cold-repair-emit-result",
+        quote do
+          let(
+            :final =
+              refine(agent("Draft."),
+                reviewers: [
+                  reviewer(:spec, "Check the spec."),
+                  reviewer(:runtime, "Check the runtime.")
+                ],
+                revise_with: agent("Repair."),
+                until: :unanimous,
+                max_rounds: 1,
+                on_non_convergence: :accept_current,
+                gates: [
+                  cold_read: [
+                    reviewer: reviewer(:cold, "Cold read."),
+                    when: path_non_empty("/openFindings")
+                  ],
+                  repair_when: path_non_empty("/coldRead/openFindings")
+                ]
+              )
+          )
+
+          emit_result(:final)
+        end,
+        __ENV__
+      )
+    end
+  end
+
+  defmodule GateHaltAcceptCurrent do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "gate-halt-accept-current",
+        quote do
+          refine(agent("Draft."),
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Repair."),
+            until: :unanimous,
+            max_rounds: 1,
+            on_non_convergence: :accept_current,
+            gates: [
+              halt_when: path_non_empty("/openFindings")
+            ]
+          )
+
+          return(:ok)
+        end,
+        __ENV__
+      )
+    end
+  end
+
+  defmodule GateRepairReplayExhausted do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "gate-repair-replay-exhausted",
+        quote do
+          refine(agent("Draft."),
+            reviewers: [
+              reviewer(:spec, "Check the spec."),
+              reviewer(:runtime, "Check the runtime.")
+            ],
+            revise_with: agent("Repair."),
+            until: :unanimous,
+            max_rounds: 1,
+            on_non_convergence: :accept_current,
+            gates: [
+              repair_when: path_non_empty("/openFindings")
+            ]
+          )
+
+          return(:ok)
+        end,
+        __ENV__
+      )
+    end
+  end
+
+  defmodule GateReplayColdTrue do
+    @moduledoc false
+
+    def tree do
+      Workflow.Test.tree!(
+        "gate-replay-cold-true",
+        quote do
           refine(agent("Draft."),
             reviewers: [
               reviewer(:spec, "Check the spec."),
@@ -543,119 +702,59 @@ defmodule Workflow.RefineRunTest do
             on_non_convergence: :accept_current,
             gates: [
               cold_read: [
-                reviewer: reviewer(:cold, "Cold read."),
+                reviewer: reviewer(:cold, "Journaled cold read."),
                 when: path_non_empty("/openFindings")
-              ],
-              repair_when: path_non_empty("/coldRead/openFindings")
+              ]
             ]
           )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      emit_result(:final)
-    end
-  end
-
-  defmodule GateHaltAcceptCurrent do
-    @moduledoc false
-    use Workflow
-
-    workflow "gate-halt-accept-current" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Repair."),
-        until: :unanimous,
-        max_rounds: 1,
-        on_non_convergence: :accept_current,
-        gates: [
-          halt_when: path_non_empty("/openFindings")
-        ]
-      )
-
-      return(:ok)
-    end
-  end
-
-  defmodule GateRepairReplayExhausted do
-    @moduledoc false
-    use Workflow
-
-    workflow "gate-repair-replay-exhausted" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Repair."),
-        until: :unanimous,
-        max_rounds: 1,
-        on_non_convergence: :accept_current,
-        gates: [
-          repair_when: path_non_empty("/openFindings")
-        ]
-      )
-
-      return(:ok)
-    end
-  end
-
-  defmodule GateReplayColdTrue do
-    @moduledoc false
-    use Workflow
-
-    workflow "gate-replay-cold-true" do
-      refine(agent("Draft."),
-        reviewers: [
-          reviewer(:spec, "Check the spec."),
-          reviewer(:runtime, "Check the runtime.")
-        ],
-        revise_with: agent("Repair."),
-        until: :unanimous,
-        max_rounds: 1,
-        on_non_convergence: :accept_current,
-        gates: [
-          cold_read: [
-            reviewer: reviewer(:cold, "Journaled cold read."),
-            when: path_non_empty("/openFindings")
-          ]
-        ]
-      )
-
-      return(:ok)
     end
   end
 
   defmodule GateReplayColdFalseEdit do
     @moduledoc false
-    use Workflow
 
-    workflow "gate-replay-cold-false-edit" do
-      refine(agent("Changed draft."),
-        reviewers: [
-          reviewer(:changed_spec, "Changed spec."),
-          reviewer(:changed_runtime, "Changed runtime.")
-        ],
-        revise_with: agent("Changed repair."),
-        until: :unanimous,
-        max_rounds: 1,
-        on_non_convergence: :accept_current,
-        gates: [
-          cold_read: [
-            reviewer: reviewer(:changed_cold, "Changed cold read."),
-            when: path_non_empty("/definitelyMissing")
-          ]
-        ]
+    def tree do
+      Workflow.Test.tree!(
+        "gate-replay-cold-false-edit",
+        quote do
+          refine(agent("Changed draft."),
+            reviewers: [
+              reviewer(:changed_spec, "Changed spec."),
+              reviewer(:changed_runtime, "Changed runtime.")
+            ],
+            revise_with: agent("Changed repair."),
+            until: :unanimous,
+            max_rounds: 1,
+            on_non_convergence: :accept_current,
+            gates: [
+              cold_read: [
+                reviewer: reviewer(:changed_cold, "Changed cold read."),
+                when: path_non_empty("/definitelyMissing")
+              ]
+            ]
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
     end
   end
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
   defp events(id), do: Journal.fold(id)
-  defp types(id), do: id |> events() |> Enum.map(& &1.type)
+
+  defp types(id) do
+    id
+    |> events()
+    |> Enum.reject(&(&1.type == :agent_started))
+    |> Enum.map(& &1.type)
+  end
 
   defp await_lease_released(run_id, tries \\ 200) do
     cond do
@@ -747,7 +846,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -904,7 +1003,7 @@ defmodule Workflow.RefineRunTest do
       ])
 
     assert {:ok, ^id} =
-             Run.run(AdapterConverges,
+             Run.run(AdapterConverges.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -983,7 +1082,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -1094,7 +1193,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(NonConvergesAccept,
+             Run.run(NonConvergesAccept.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -1150,14 +1249,14 @@ defmodule Workflow.RefineRunTest do
 
   test "resume after committed reviser reviews the revised artifact without rerunning prior roles" do
     id = run_id()
-    node = hd(InlineConverges.__workflow__(:tree).nodes)
+    node = hd(InlineConverges.tree().nodes)
 
     key = fn address, iteration ->
       %Workflow.IdempotencyKey{run_id: id, node_path: address, iteration: iteration, attempt: 0}
     end
 
     prior_events = [
-      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+      Workflow.Event.run_started(InlineConverges.tree()),
       Workflow.Event.refine_started(node),
       Workflow.Event.agent_committed(
         %Workflow.Node.Agent{address: [0, 0], prompt: "Draft."},
@@ -1196,18 +1295,18 @@ defmodule Workflow.RefineRunTest do
         approval_count: 1,
         total: 2,
         reviewer_decisions: [
-          %{reviewer: :spec, reviewer_index: 0, approved: false, clear: false},
-          %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+          reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: false, clear: false}),
+          reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
         ],
         artifact: "draft-v1",
         open_findings: [
-          %{
+          open_finding!(%{
             reviewer: :spec,
             reviewer_index: 0,
             id: "spec-gap",
             issue: "Spec is ambiguous.",
             fix: "Pin the behavior."
-          }
+          })
         ]
       }),
       Workflow.Event.agent_committed(
@@ -1225,7 +1324,7 @@ defmodule Workflow.RefineRunTest do
     end)
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -1272,10 +1371,10 @@ defmodule Workflow.RefineRunTest do
 
   test "resume replays refine_started descriptors instead of changed compiled source" do
     id = run_id()
-    node = hd(InlineConverges.__workflow__(:tree).nodes)
+    node = hd(InlineConverges.tree().nodes)
 
     prior_events = [
-      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+      Workflow.Event.run_started(InlineConverges.tree()),
       stable_refine_started_event(node)
     ]
 
@@ -1285,7 +1384,7 @@ defmodule Workflow.RefineRunTest do
     end)
 
     assert {:ok, ^id, _pid} =
-             Run.start(ChangedInlineConverges,
+             Run.start(ChangedInlineConverges.tree(),
                run_id: id,
                provider: {ReplayStartedProvider, sink: self()}
              )
@@ -1358,7 +1457,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -1367,7 +1466,14 @@ defmodule Workflow.RefineRunTest do
                     [approved: true, findings: []],
                     [approved: true, findings: []]
                   ],
-                  activity_entries: [%{kind: "note", summary: "reviewing"}],
+                  activity_entries: [
+                    %{
+                      kind: "note",
+                      label: "Review",
+                      summary: "reviewing",
+                      status: :running
+                    }
+                  ],
                   sink: self()}
              )
 
@@ -1382,7 +1488,14 @@ defmodule Workflow.RefineRunTest do
              %{payload: %{address: [0, 1, 1], iteration: 0, attempt: 0, activity_index: 0}}
            ] = streamed
 
-    assert Enum.all?(streamed, &(&1.payload.entry == %{kind: "note", summary: "reviewing"}))
+    assert Enum.all?(streamed, fn event ->
+             assert %Activity{
+                      kind: "note",
+                      label: "Review",
+                      summary: "reviewing",
+                      status: :running
+                    } = event.payload.entry
+           end)
 
     reviewer_events =
       id
@@ -1390,8 +1503,8 @@ defmodule Workflow.RefineRunTest do
       |> Enum.filter(&(&1.type == :agent_committed and match?([0, 1, _], &1.payload.address)))
 
     assert [
-             %{payload: %{activity: [%{activity_index: 0, kind: "note", summary: "reviewing"}]}},
-             %{payload: %{activity: [%{activity_index: 0, kind: "note", summary: "reviewing"}]}}
+             %{payload: %{activity: [%Activity{activity_index: 0, kind: "note", summary: "reviewing"}]}},
+             %{payload: %{activity: [%Activity{activity_index: 0, kind: "note", summary: "reviewing"}]}}
            ] = reviewer_events
   end
 
@@ -1399,7 +1512,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id, writer} =
-             Run.start(SequentialReviewerConverges,
+             Run.start(SequentialReviewerConverges.tree(),
                run_id: id,
                provider: {BlockingReviewerActivityProvider, sink: self()}
              )
@@ -1421,7 +1534,7 @@ defmodule Workflow.RefineRunTest do
                kind: "reasoning",
                label: "Reasoning",
                summary: "reviewing draft-v1",
-               status: "running"
+               status: :running
              }
            } = activity.payload
 
@@ -1461,7 +1574,7 @@ defmodule Workflow.RefineRunTest do
       ])
 
     assert {:ok, ^id} =
-             Run.run(BoundConverges,
+             Run.run(BoundConverges.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -1503,7 +1616,7 @@ defmodule Workflow.RefineRunTest do
       ])
 
     assert {:ok, ^id} =
-             Run.run(BoundArtifactObjectConverges,
+             Run.run(BoundArtifactObjectConverges.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -1540,7 +1653,7 @@ defmodule Workflow.RefineRunTest do
       ])
 
     assert {:error, {:invalid_refine_input, [1], :artifact_object_unexpected_shape}} =
-             Run.run(BoundInvalidObject,
+             Run.run(BoundInvalidObject.tree(),
                run_id: id,
                provider: {ScriptedProvider, script: script, sink: self()}
              )
@@ -1567,7 +1680,7 @@ defmodule Workflow.RefineRunTest do
              {:invalid_refine_input, [1], :artifact_object_unexpected_shape}
 
     assert {:error, {:invalid_refine_input, [1], :artifact_object_unexpected_shape}} =
-             Run.run(BoundInvalidObject,
+             Run.run(BoundInvalidObject.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -1579,11 +1692,11 @@ defmodule Workflow.RefineRunTest do
              )
   end
 
-  test "inline producer rejected attempt is journaled before a retry crashes" do
+  test "inline producer retry crashes leave a durable unknown-outcome marker" do
     id = run_id()
 
     assert {:error, {:run_crashed, _reason}} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider: {ProducerRetryCrashProvider, sink: self()}
              )
@@ -1605,8 +1718,8 @@ defmodule Workflow.RefineRunTest do
 
     flush_agent_calls()
 
-    assert {:ok, ^id} =
-             Run.run(InlineConverges,
+    assert {:error, {:outcome_unknown, %{address: [0, 0], iteration: 0, attempt: 1}}} =
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -1618,14 +1731,15 @@ defmodule Workflow.RefineRunTest do
                   sink: self()}
              )
 
-    assert_received {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 1}}
+    refute_received {:agent_called, _prompt, _key}
+    assert Status.of(id).state == :failed
   end
 
-  test "reviser rejected attempt is journaled before a retry crashes" do
+  test "reviser retry crashes leave a durable unknown-outcome marker" do
     id = run_id()
 
     assert {:error, {:run_crashed, _reason}} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider: {ReviserRetryCrashProvider, sink: self()}
              )
@@ -1647,8 +1761,8 @@ defmodule Workflow.RefineRunTest do
 
     flush_agent_calls()
 
-    assert {:ok, ^id} =
-             Run.run(InlineConverges,
+    assert {:error, {:outcome_unknown, %{address: [0, 2], iteration: 0, attempt: 1}}} =
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -1677,13 +1791,13 @@ defmodule Workflow.RefineRunTest do
                   sink: self()}
              )
 
-    assert_received {:agent_called, reviser_prompt, %{node_path: [0, 2], attempt: 1}}
-    assert reviser_prompt =~ "current-artifact:\ndraft-v1"
+    refute_received {:agent_called, _prompt, _key}
+    assert Status.of(id).state == :failed
   end
 
   test "resume commits producer failure when final rejected attempt was already journaled" do
     id = run_id()
-    node = hd(InlineConverges.__workflow__(:tree).nodes)
+    node = hd(InlineConverges.tree().nodes)
     {:producer, producer} = node.input
     final_reason = {:property, "artifact", :artifact_not_binary}
 
@@ -1704,14 +1818,14 @@ defmodule Workflow.RefineRunTest do
     append_events(
       id,
       [
-        Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+        Workflow.Event.run_started(InlineConverges.tree()),
         Workflow.Event.refine_started(node)
         | rejected
       ]
     )
 
     assert {:error, {:malformed_output, [0, 0], ^final_reason}} =
-             Run.run(InlineConverges, run_id: id, provider: {ExplodingProvider, []})
+             Run.run(InlineConverges.tree(), run_id: id, provider: {ExplodingProvider, []})
 
     assert %{
              payload: %{
@@ -1730,7 +1844,7 @@ defmodule Workflow.RefineRunTest do
 
   test "resume commits reviser failure when final rejected attempt was already journaled" do
     id = run_id()
-    node = hd(InlineConverges.__workflow__(:tree).nodes)
+    node = hd(InlineConverges.tree().nodes)
     {:producer, producer} = node.input
     [%{agent: spec_reviewer}, %{agent: runtime_reviewer}] = node.reviewers
     reviser = node.reviser
@@ -1743,13 +1857,13 @@ defmodule Workflow.RefineRunTest do
       "fix" => "Pin the behavior."
     }
 
-    open_finding = %{
+    open_finding = open_finding!(%{
       reviewer: :spec,
       reviewer_index: 0,
       id: "spec-gap",
       issue: "Spec is ambiguous.",
       fix: "Pin the behavior."
-    }
+    })
 
     rejected =
       for attempt <- 0..2 do
@@ -1768,7 +1882,7 @@ defmodule Workflow.RefineRunTest do
     append_events(
       id,
       [
-        Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+        Workflow.Event.run_started(InlineConverges.tree()),
         Workflow.Event.refine_started(node),
         Workflow.Event.agent_committed(
           producer,
@@ -1797,8 +1911,8 @@ defmodule Workflow.RefineRunTest do
           approval_count: 1,
           total: 2,
           reviewer_decisions: [
-            %{reviewer: :spec, reviewer_index: 0, approved: false, clear: false},
-            %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+            reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: false, clear: false}),
+            reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
           ],
           artifact: "draft-v1",
           open_findings: [open_finding]
@@ -1808,7 +1922,7 @@ defmodule Workflow.RefineRunTest do
     )
 
     assert {:error, {:malformed_output, [0, 2], ^final_reason}} =
-             Run.run(InlineConverges, run_id: id, provider: {ExplodingProvider, []})
+             Run.run(InlineConverges.tree(), run_id: id, provider: {ExplodingProvider, []})
 
     assert %{
              payload: %{
@@ -1828,7 +1942,7 @@ defmodule Workflow.RefineRunTest do
 
   test "resume uses reviewer timeout captured in refine_started payload" do
     id = run_id()
-    node = hd(InlineConverges.__workflow__(:tree).nodes)
+    node = hd(InlineConverges.tree().nodes)
 
     started =
       node
@@ -1838,7 +1952,7 @@ defmodule Workflow.RefineRunTest do
       end)
 
     append_events(id, [
-      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
+      Workflow.Event.run_started(InlineConverges.tree()),
       started
     ])
 
@@ -1847,7 +1961,7 @@ defmodule Workflow.RefineRunTest do
 
     try do
       assert {:ok, ^id} =
-               Run.run(InlineConverges,
+               Run.run(InlineConverges.tree(),
                  run_id: id,
                  provider: {SlowReviewerProvider, sink: self()}
                )
@@ -1870,7 +1984,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider: {ReviewerRoleFailureProvider, failure: :schema, sink: self()}
              )
@@ -1948,7 +2062,7 @@ defmodule Workflow.RefineRunTest do
     usage = %Usage{input_tokens: 7, output_tokens: 0, total_tokens: 7}
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider: {ReviewerRoleFailureProvider, failure: :provider_failure, sink: self()}
              )
@@ -1959,12 +2073,12 @@ defmodule Workflow.RefineRunTest do
     assert role_failure.detail == detail
     assert role_failure.usage == usage
 
-    assert Enum.map(role_failure.activity, &Map.delete(&1, :activity_index)) == [
+    assert Enum.map(role_failure.activity, &activity_fields/1) == [
              %{
                kind: "provider",
                label: "Provider",
                summary: "reviewer timed out",
-               status: "failed"
+               status: :failed
              }
            ]
 
@@ -1982,7 +2096,7 @@ defmodule Workflow.RefineRunTest do
 
     try do
       assert {:ok, ^id} =
-               Run.run(InlineConverges,
+               Run.run(InlineConverges.tree(),
                  run_id: id,
                  provider: {SlowReviewerProvider, sink: self()}
                )
@@ -2020,7 +2134,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider: {KilledReviewerProvider, sink: self()}
              )
@@ -2053,7 +2167,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(GateColdRepairEmitResult,
+             Run.run(GateColdRepairEmitResult.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -2153,7 +2267,7 @@ defmodule Workflow.RefineRunTest do
       timeout_id = run_id()
 
       assert {:ok, ^timeout_id} =
-               Run.run(GateColdRepairEmitResult,
+               Run.run(GateColdRepairEmitResult.tree(),
                  run_id: timeout_id,
                  provider: {ColdReadLaneFailureProvider, failure: :timeout, sink: self()}
                )
@@ -2172,7 +2286,7 @@ defmodule Workflow.RefineRunTest do
       killed_id = run_id()
 
       assert {:ok, ^killed_id} =
-               Run.run(GateColdRepairEmitResult,
+               Run.run(GateColdRepairEmitResult.tree(),
                  run_id: killed_id,
                  provider: {ColdReadLaneFailureProvider, failure: :killed, sink: self()}
                )
@@ -2198,17 +2312,17 @@ defmodule Workflow.RefineRunTest do
 
   test "repair gate replay turns exhausted rejected attempts into one role failure" do
     id = run_id()
-    tree = GateRepairReplayExhausted.__workflow__(:tree)
+    tree = GateRepairReplayExhausted.tree()
     node = hd(tree.nodes)
 
     open_findings = [
-      %{
+      open_finding!(%{
         reviewer: :spec,
         reviewer_index: 0,
         id: "base-gap",
         issue: "Base review found a gap.",
         fix: "Repair the base gap."
-      }
+      })
     ]
 
     repair_agent = %Workflow.Node.Agent{address: [0, 4], prompt: "Repair.", retries: 2}
@@ -2229,22 +2343,22 @@ defmodule Workflow.RefineRunTest do
         approval_count: 1,
         total: 2,
         reviewer_decisions: [
-          %{
+          reviewer_decision!(%{
             reviewer: :spec,
             reviewer_index: 0,
             approved: false,
             clear: false,
             adapter: :findings_v1,
             status: :completed
-          },
-          %{
+          }),
+          reviewer_decision!(%{
             reviewer: :runtime,
             reviewer_index: 1,
             approved: true,
             clear: true,
             adapter: :findings_v1,
             status: :completed
-          }
+          })
         ],
         artifact: "draft-v1",
         open_findings: open_findings,
@@ -2284,7 +2398,7 @@ defmodule Workflow.RefineRunTest do
     ])
 
     assert {:ok, ^id} =
-             Run.run(GateRepairReplayExhausted,
+             Run.run(GateRepairReplayExhausted.tree(),
                run_id: id,
                provider: {ExplodingProvider, []}
              )
@@ -2304,7 +2418,7 @@ defmodule Workflow.RefineRunTest do
     predicate = {:path_non_empty, "/openFindings"}
 
     assert {:error, {:did_not_converge, [0], {:gate, ^predicate}}} =
-             Run.run(GateHaltAcceptCurrent,
+             Run.run(GateHaltAcceptCurrent.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -2336,7 +2450,7 @@ defmodule Workflow.RefineRunTest do
 
   test "journaled gate decisions replay instead of recomputing edited predicates" do
     id = run_id()
-    tree = GateReplayColdTrue.__workflow__(:tree)
+    tree = GateReplayColdTrue.tree()
     node = hd(tree.nodes)
 
     key = fn address ->
@@ -2344,13 +2458,13 @@ defmodule Workflow.RefineRunTest do
     end
 
     open_findings = [
-      %{
+      open_finding!(%{
         reviewer: :spec,
         reviewer_index: 0,
         id: "base-gap",
         issue: "Base review found a gap.",
         fix: "Repair the base gap."
-      }
+      })
     ]
 
     seeded = [
@@ -2383,22 +2497,22 @@ defmodule Workflow.RefineRunTest do
         approval_count: 1,
         total: 2,
         reviewer_decisions: [
-          %{
+          reviewer_decision!(%{
             reviewer: :spec,
             reviewer_index: 0,
             approved: false,
             clear: false,
             adapter: :findings_v1,
             status: :completed
-          },
-          %{
+          }),
+          reviewer_decision!(%{
             reviewer: :runtime,
             reviewer_index: 1,
             approved: true,
             clear: true,
             adapter: :findings_v1,
             status: :completed
-          }
+          })
         ],
         artifact: "draft-v1",
         open_findings: open_findings,
@@ -2419,7 +2533,7 @@ defmodule Workflow.RefineRunTest do
     end)
 
     assert {:ok, ^id} =
-             Run.run(GateReplayColdFalseEdit,
+             Run.run(GateReplayColdFalseEdit.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -2446,7 +2560,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:error, {:did_not_converge, [0], :max_rounds}} =
-             Run.run(NonConvergesFail,
+             Run.run(NonConvergesFail.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -2477,7 +2591,7 @@ defmodule Workflow.RefineRunTest do
     flush_agent_calls()
 
     assert {:error, {:did_not_converge, [0], :max_rounds}} =
-             Run.run(NonConvergesFail,
+             Run.run(NonConvergesFail.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -2496,7 +2610,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(NonConvergesAccept,
+             Run.run(NonConvergesAccept.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -2540,7 +2654,7 @@ defmodule Workflow.RefineRunTest do
     id = run_id()
 
     assert {:ok, ^id} =
-             Run.run(AcceptCurrentEmit,
+             Run.run(AcceptCurrentEmit.tree(),
                run_id: id,
                provider:
                  {RefineProvider,
@@ -2574,8 +2688,8 @@ defmodule Workflow.RefineRunTest do
     end
 
     events = [
-      Workflow.Event.run_started(InlineConverges.__workflow__(:tree)),
-      Workflow.Event.refine_started(hd(InlineConverges.__workflow__(:tree).nodes)),
+      Workflow.Event.run_started(InlineConverges.tree()),
+      Workflow.Event.refine_started(hd(InlineConverges.tree().nodes)),
       Workflow.Event.agent_committed(
         %Workflow.Node.Agent{address: [0, 0], prompt: "Draft."},
         0,
@@ -2584,7 +2698,7 @@ defmodule Workflow.RefineRunTest do
         %Usage{}
       ),
       Workflow.Event.refine_round_started(
-        hd(InlineConverges.__workflow__(:tree).nodes),
+        hd(InlineConverges.tree().nodes),
         0,
         "draft-v1"
       ),
@@ -2602,18 +2716,18 @@ defmodule Workflow.RefineRunTest do
         %{"approved" => true, "findings" => []},
         %Usage{}
       ),
-      Workflow.Event.refine_round_decision(hd(InlineConverges.__workflow__(:tree).nodes), 0, %{
+      Workflow.Event.refine_round_decision(hd(InlineConverges.tree().nodes), 0, %{
         consensus: true,
         approval_count: 2,
         total: 2,
         reviewer_decisions: [
-          %{reviewer: :spec, reviewer_index: 0, approved: true, clear: true},
-          %{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true}
+          reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: true, clear: true}),
+          reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
         ],
         artifact: "draft-v1",
         open_findings: []
       }),
-      Workflow.Event.refine_completed(hd(InlineConverges.__workflow__(:tree).nodes), %{
+      Workflow.Event.refine_completed(hd(InlineConverges.tree().nodes), %{
         converged: true,
         final_round: 0,
         rounds: 1,
@@ -2628,7 +2742,7 @@ defmodule Workflow.RefineRunTest do
     end)
 
     assert {:ok, ^id} =
-             Run.run(InlineConverges,
+             Run.run(InlineConverges.tree(),
                run_id: id,
                provider:
                  {RefineProvider,

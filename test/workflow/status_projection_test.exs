@@ -8,25 +8,34 @@ defmodule Workflow.StatusProjectionTest do
   alias Workflow.Node.Loop
   alias Workflow.Node.Phase
   alias Workflow.Node.Refine
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.OpenFinding
+  alias Workflow.Refine.Reviewer
+  alias Workflow.Refine.ReviewerDecision
+  alias Workflow.Refine.RoleFailure
   alias Workflow.Scheduler.RunProjection
   alias Workflow.Status
   alias Workflow.Tree
 
-  test "transient progress activity updates agents without durable journal semantics" do
+  defp activity_fields(%Activity{} = activity) do
+    activity
+    |> Map.from_struct()
+    |> Map.delete(:activity_index)
+  end
+
+  defp activity_fields(activity) when is_map(activity) do
+    activity
+    |> Activity.normalize!()
+    |> activity_fields()
+  end
+
+  defp normalized_activity_fields(activity), do: activity |> Activity.normalize!() |> activity_fields()
+
+  test "durable progress activity updates the running agent and raw journal refs" do
     run_id = "status_projection_progress"
     node = %Agent{address: [1], prompt: "stream work", label: "stream:work"}
-
-    status =
-      [
-        Event.run_started(%Tree{name: "progress-status", nodes: [node]}),
-        Event.phase_entered(%Phase{address: [0], name: "stream"})
-      ]
-      |> stamp(run_id)
-      |> Status.fold(run_id)
-
-    event_count = status.event_count
-    raw_refs = status.raw_refs
+    key = %IdempotencyKey{run_id: run_id, node_path: [1], iteration: 0, attempt: 0}
 
     entry = %{
       kind: "reasoning",
@@ -35,29 +44,32 @@ defmodule Workflow.StatusProjectionTest do
       status: "running"
     }
 
-    progress = Event.agent_activity(node, 0, 0, 0, entry)
-    live_status = Status.apply_progress(progress, status)
+    journal_status =
+      [
+        Event.run_started(%Tree{name: "progress-status", nodes: [node]}),
+        Event.phase_entered(%Phase{address: [0], name: "stream"}),
+        Event.agent_started(node, 0, key),
+        Event.agent_activity(node, 0, 0, 0, entry)
+      ]
+      |> stamp(run_id)
+      |> Status.fold(run_id)
 
-    assert live_status.event_count == event_count
-    assert live_status.raw_refs == raw_refs
-    assert live_status.tool_activity == []
-    assert [%{status: :running, activity: [activity]}] = live_status.agents
-    assert Map.delete(activity, :activity_index) == entry
-
-    journal_status = Status.apply_event(%{progress | run_id: run_id, seq: 2}, live_status)
-
-    assert journal_status.event_count == event_count + 1
+    assert journal_status.event_count == 4
 
     assert Enum.map(journal_status.raw_refs.journal, & &1.type) == [
              "run_started",
              "phase_entered",
+             "agent_started",
              "agent_activity"
            ]
 
-    assert [%{activity: [deduped_activity]}] = journal_status.agents
-    assert Map.delete(deduped_activity, :activity_index) == entry
-    assert [%{entry: tool_activity, raw_ref: %{seq: 2, type: "agent_activity"}}] = journal_status.tool_activity
-    assert Map.delete(tool_activity, :activity_index) == entry
+    assert [%{status: :running, activity: [agent_activity]}] = journal_status.agents
+    assert activity_fields(agent_activity) == normalized_activity_fields(entry)
+
+    assert [%{entry: tool_activity, raw_ref: %{seq: 3, type: "agent_activity"}}] =
+             journal_status.tool_activity
+
+    assert activity_fields(tool_activity) == normalized_activity_fields(entry)
   end
 
   test "late persisted activity merges into settled and rejected attempt projections" do
@@ -96,7 +108,7 @@ defmodule Workflow.StatusProjectionTest do
              }
            ] = committed.agents
 
-    assert Map.delete(committed_activity, :activity_index) == entry
+    assert activity_fields(committed_activity) == normalized_activity_fields(entry)
 
     rejected =
       (prefix ++
@@ -117,7 +129,7 @@ defmodule Workflow.StatusProjectionTest do
              }
            ] = rejected.rejected
 
-    assert Map.delete(rejected_activity, :activity_index) == entry
+    assert activity_fields(rejected_activity) == normalized_activity_fields(entry)
 
     failed =
       (prefix ++
@@ -137,13 +149,13 @@ defmodule Workflow.StatusProjectionTest do
            ] = failed.agents
 
     assert failed.state == :failed
-    assert Map.delete(failed_activity, :activity_index) == entry
+    assert activity_fields(failed_activity) == normalized_activity_fields(entry)
   end
 
   test "status folds refines, tool activity, and ordered raw journal refs" do
     run_id = "status_projection_refine"
     node = refine_node()
-    cold_reader = get_in(node.gates, [:cold_read, :reviewer, :agent])
+    cold_reader = node.gates.cold_read.reviewer.agent
     usage = %Usage{input_tokens: 2, output_tokens: 3, total_tokens: 5}
 
     streamed_activity = %{
@@ -167,7 +179,7 @@ defmodule Workflow.StatusProjectionTest do
       status: "failed"
     }
 
-    role_failure = %{
+    role_failure = %RoleFailure{
       address: [0],
       role: :cold_read,
       role_address: [0, 3],
@@ -207,7 +219,7 @@ defmodule Workflow.StatusProjectionTest do
             approval_count: 0,
             total: 1,
             reviewer_decisions: [
-              %{
+              %ReviewerDecision{
                 reviewer: :spec,
                 reviewer_index: 0,
                 approved: false,
@@ -254,9 +266,9 @@ defmodule Workflow.StatusProjectionTest do
              %{entry: failed_entry, raw_ref: %{seq: 5, type: "refine_role_failed"}}
            ] = status.tool_activity
 
-    assert Map.delete(streamed_entry, :activity_index) == streamed_activity
-    assert Map.delete(committed_entry, :activity_index) == committed_activity
-    assert Map.delete(failed_entry, :activity_index) == failed_activity
+    assert activity_fields(streamed_entry) == normalized_activity_fields(streamed_activity)
+    assert activity_fields(committed_entry) == normalized_activity_fields(committed_activity)
+    assert activity_fields(failed_entry) == normalized_activity_fields(failed_activity)
 
     assert [refine] = status.refines
     assert refine.address == [0]
@@ -385,7 +397,7 @@ defmodule Workflow.StatusProjectionTest do
       address: [0],
       input: {:producer, producer},
       reviewers: [
-        %{
+        %Reviewer{
           index: 0,
           name: :spec,
           prompt: "Review.",
@@ -399,7 +411,7 @@ defmodule Workflow.StatusProjectionTest do
       gates: %{
         cold_read: %{
           predicate: {:path_non_empty, "/openFindings"},
-          reviewer: %{
+          reviewer: %Reviewer{
             index: 0,
             name: :cold,
             prompt: "Cold read.",
@@ -414,7 +426,7 @@ defmodule Workflow.StatusProjectionTest do
   end
 
   defp finding do
-    %{
+    %OpenFinding{
       reviewer: :spec,
       reviewer_index: 0,
       id: "spec-gap",

@@ -523,15 +523,11 @@ defmodule ProofMCPValidate do
 
   defp workflow_source do
     """
-    defmodule MCPLifecycleProofWorkflow do
-      use Workflow
-
-      workflow "mcp-lifecycle-proof" do
-        phase "proof"
-        log "mcp lifecycle proof"
-        agent "Reply with proof-ok"
-        return :ok
-      end
+    workflow "mcp-lifecycle-proof" do
+      phase "proof"
+      log "mcp lifecycle proof"
+      agent "Reply with proof-ok"
+      return :ok
     end
     """
   end
@@ -543,25 +539,17 @@ defmodule ProofMCPValidate do
       end)
 
     """
-    defmodule MCPRunningProofWorkflow do
-      use Workflow
-
-      workflow "mcp-running-proof" do
-        #{agents}
-        return :ok
-      end
+    workflow "mcp-running-proof" do
+      #{agents}
+      return :ok
     end
     """
   end
 
   defp invalid_workflow_source do
     """
-    defmodule MCPInvalidProofWorkflow do
-      use Workflow
-
-      workflow "mcp-invalid-proof" do
-        frobnicate "nope"
-      end
+    workflow "mcp-invalid-proof" do
+      frobnicate "nope"
     end
     """
   end

@@ -1,6 +1,6 @@
 defmodule Workflow.CompilerTest do
   @moduledoc """
-  Exercises the DSL at its highest seam — `Workflow.Compiler.parse/2` — directly
+  Exercises the DSL at its highest seam — `Workflow.Compiler.compile/3` — directly
   against `quote do ... end` / `Code.string_to_quoted!/1` input, with no macro
   expansion involved. String-sourced bodies give precise, asserted line numbers so
   we can prove diagnostics are caller-located.
@@ -18,7 +18,7 @@ defmodule Workflow.CompilerTest do
   defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
 
   # Parse a source string whose line numbers we can assert against directly.
-  defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
+  defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
 
   describe "accepting the closed vocabulary" do
     test "parses the demo body into an ordered, addressed, inert tree" do
@@ -30,7 +30,7 @@ defmodule Workflow.CompilerTest do
           return(:ok)
         end
 
-      assert {:ok, tree} = Compiler.parse(body, env())
+      assert {:ok, tree} = Compiler.compile("test", body, env())
 
       assert [
                %Phase{address: [0], name: "p"},
@@ -41,7 +41,7 @@ defmodule Workflow.CompilerTest do
     end
 
     test "parses a single-statement body (not wrapped in a __block__)" do
-      assert {:ok, tree} = Compiler.parse(quote(do: return(:ok)), env())
+      assert {:ok, tree} = Compiler.compile("test", quote(do: return(:ok)), env())
       assert [%Return{address: [0], value: :ok}] = tree.nodes
     end
 
@@ -93,7 +93,7 @@ defmodule Workflow.CompilerTest do
           return(:ok)
         end
 
-      assert {:ok, tree} = Compiler.parse(body, env())
+      assert {:ok, tree} = Compiler.compile("test", body, env())
 
       assert [%Agent{address: [0], prompt: "classify", schema: schema, retries: 2}, %Return{}] =
                tree.nodes
@@ -115,7 +115,7 @@ defmodule Workflow.CompilerTest do
           return(:ok)
         end
 
-      assert {:ok, tree} = Compiler.parse(body, env())
+      assert {:ok, tree} = Compiler.compile("test", body, env())
       assert [%Agent{retries: 5}, %Return{}] = tree.nodes
     end
 
@@ -155,56 +155,54 @@ defmodule Workflow.CompilerTest do
     end
   end
 
-  describe "forbidden-form catalog (raises, located)" do
+  describe "forbidden-form catalog (findings, located)" do
     test "rejects a call into an external module — Enum" do
-      err = assert_raise Workflow.CompileError, fn -> parse("Enum.map([], 1)\nreturn(:ok)") end
-      assert err.message =~ "external modules"
-      assert err.message =~ "workflows/demo.ex:1"
+      assert {:error, %Finding{} = finding} = parse("Enum.map([], 1)\nreturn(:ok)")
+      assert finding.message =~ "external modules"
+      assert Finding.format(finding) =~ "workflows/demo.ex:1"
     end
 
     test "rejects randomness — :rand — as non-deterministic" do
-      err = assert_raise Workflow.CompileError, fn -> parse(":rand.uniform()\nreturn(:ok)") end
-      assert err.message =~ "external modules"
-      assert err.message =~ ":rand.uniform"
+      assert {:error, %Finding{} = finding} = parse(":rand.uniform()\nreturn(:ok)")
+      assert finding.message =~ "external modules"
+      assert Finding.format(finding) =~ ":rand.uniform"
     end
 
     test "rejects wall-clock — System — as non-deterministic" do
-      err =
-        assert_raise Workflow.CompileError, fn ->
-          parse("System.monotonic_time()\nreturn(:ok)")
-        end
+      assert {:error, %Finding{} = finding} =
+               parse("System.monotonic_time()\nreturn(:ok)")
 
-      assert err.message =~ "external modules"
-      assert err.message =~ "System.monotonic_time"
+      assert finding.message =~ "external modules"
+      assert Finding.format(finding) =~ "System.monotonic_time"
     end
 
     test "rejects an anonymous function — the forbidden fn -> ... end form" do
-      err = assert_raise Workflow.CompileError, fn -> parse("fn -> :nope end\nreturn(:ok)") end
-      assert err.message =~ "anonymous functions"
-      assert err.message =~ "workflows/demo.ex:1"
+      assert {:error, %Finding{} = finding} = parse("fn -> :nope end\nreturn(:ok)")
+      assert finding.message =~ "anonymous functions"
+      assert Finding.format(finding) =~ "workflows/demo.ex:1"
     end
 
     test "rejects a stray literal/variable outside the vocabulary" do
-      assert_raise Workflow.CompileError, fn -> parse("42\nreturn(:ok)") end
-      assert_raise Workflow.CompileError, fn -> parse("some_var\nreturn(:ok)") end
+      assert {:error, %Finding{}} = parse("42\nreturn(:ok)")
+      assert {:error, %Finding{}} = parse("some_var\nreturn(:ok)")
     end
   end
 
   describe "unknown combinators carry a closed-vocabulary suggestion" do
     test "a near-miss surfaces a 'did you mean' from the vocabulary, at the user's line" do
-      err = assert_raise Workflow.CompileError, fn -> parse(~s|phase("p")\nretrun(:ok)|) end
+      assert {:error, %Finding{} = finding} = parse(~s|phase("p")\nretrun(:ok)|)
 
-      assert err.message =~ "unknown combinator `retrun`"
-      assert err.message =~ "did you mean `return`"
-      assert err.message =~ "workflows/demo.ex:2"
+      assert finding.message =~ "unknown combinator `retrun`"
+      assert finding.hint =~ "did you mean `return`"
+      assert Finding.format(finding) =~ "workflows/demo.ex:2"
     end
 
     test "a far miss still lists the closed vocabulary" do
-      err =
-        assert_raise Workflow.CompileError, fn -> parse(~s|frobnicate("boom")\nreturn(:ok)|) end
+      assert {:error, %Finding{} = finding} =
+               parse(~s|frobnicate("boom")\nreturn(:ok)|)
 
-      assert err.message =~ "unknown combinator `frobnicate`"
-      assert err.message =~ "expected one of: agent, log, phase, parallel, pipeline, return"
+      assert finding.message =~ "unknown combinator `frobnicate`"
+      assert finding.hint =~ "expected one of: agent, log, phase, parallel, pipeline, return"
     end
   end
 
@@ -237,7 +235,7 @@ defmodule Workflow.CompilerTest do
       env = %{__ENV__ | file: "workflows/demo.ex", line: 7}
 
       assert {:error, %Finding{line: 7} = f} =
-               Compiler.parse(Code.string_to_quoted!(~s|phase("p")\nlog("hi")|), env)
+               Compiler.compile("test", Code.string_to_quoted!(~s|phase("p")\nlog("hi")|), env)
 
       assert f.message =~ "must terminate with `return`, `emit`, or `emit_result`"
       assert Finding.format(f) =~ "workflows/demo.ex:7"

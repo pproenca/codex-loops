@@ -7,26 +7,24 @@ defmodule Workflow.Provider do
   retry policy). Every call reports `Usage` so the budget ledger can fold over
   agent events.
 
-  ## The idempotency key closes the return→commit window
+  ## Request identity and crash semantics
 
   Every call carries the paid effect's `Workflow.IdempotencyKey` — `(run_id,
   node_path, iteration)` refined by the `attempt` (retry) index, so each distinct
-  paid call — including each fail-closed retry — reaches the backend under a
-  distinct request key. The runner already reuses a *committed* turn from the
-  journal, so the provider is only ever invoked for a turn with no committed
-  result. But there is a narrow window between the provider returning and the
-  writer committing that result: if the writer crashes there, the effect happened
-  but was never journaled, and a naive resume would re-invoke the provider and
-  **double-spend**.
+  paid call — including each fail-closed retry — has a distinct, stable identity.
+  The writer records that identity in an `agent_started` event before calling the
+  backend and reuses a settled result from the journal without calling again.
 
-  A real backend uses this key as its own request-idempotency key (the same key
-  OpenAI/Codex accepts) so a re-issued request after a lost commit returns the
-  already-produced result **without charging again**. That makes the paid effect
-  exactly-once across the return→commit crash: the money is spent at most once and
-  the result is never dropped, because resume re-runs the (now free) deduped call
-  and commits it.
+  There is no portable way to make a third-party model call transactional with
+  the local SQLite commit. If the writer dies after `agent_started` but before a
+  matching settlement, the scheduler records `outcome_unknown` and never
+  redelivers that attempt. This is deliberately at-most-once: it prevents a hidden
+  double charge, while acknowledging that a result can be lost in the crash
+  window. Providers may use the key for tracing or backend deduplication, but
+  scheduler correctness does not assume that they do.
   """
 
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
 
   @type result :: term()
@@ -39,14 +37,7 @@ defmodule Workflow.Provider do
           | [failure_detail()]
           | %{optional(String.t()) => failure_detail()}
 
-  @type activity :: [
-          %{
-            optional(:kind) => String.t(),
-            optional(:label) => String.t(),
-            optional(:summary) => String.t(),
-            optional(:status) => String.t()
-          }
-        ]
+  @type activity :: [Activity.t()]
 
   @callback run_agent(
               prompt :: String.t(),

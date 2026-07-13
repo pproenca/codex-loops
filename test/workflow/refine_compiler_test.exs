@@ -8,7 +8,7 @@ defmodule Workflow.RefineCompilerTest do
   alias Workflow.Node.Return
 
   defp env, do: %{__ENV__ | file: "workflows/refine.ex", line: 1}
-  defp parse(source), do: Compiler.parse(Code.string_to_quoted!(source), env())
+  defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
 
   test "compiles a top-level inline producer refine into pre-addressed role agents" do
     {:ok, tree} =

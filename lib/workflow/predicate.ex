@@ -15,6 +15,7 @@ defmodule Workflow.Predicate do
   """
 
   alias Workflow.Compiler.Finding
+  alias Workflow.JSONPointer
 
   defmodule Count do
     @moduledoc "The size of a declared accumulator -- the left operand of a compare."
@@ -353,8 +354,8 @@ defmodule Workflow.Predicate do
   defp binding_ref?(_ref), do: false
 
   defp json_pointer(pointer, form, env) when is_binary(pointer) do
-    if valid_pointer?(pointer) do
-      {:ok, pointer}
+    if JSONPointer.valid?(pointer) do
+      {:ok, :binary.copy(pointer)}
     else
       {:error,
        Finding.at(
@@ -367,23 +368,6 @@ defmodule Workflow.Predicate do
 
   defp json_pointer(_pointer, form, env),
     do: {:error, Finding.at(env, form, "predicate JSON pointer must be a literal string")}
-
-  defp valid_pointer?(""), do: true
-  defp valid_pointer?("/" <> _rest = pointer), do: valid_pointer_escapes?(pointer)
-  defp valid_pointer?(_pointer), do: false
-
-  defp valid_pointer_escapes?(pointer) do
-    pointer
-    |> String.graphemes()
-    |> valid_escape_tokens?()
-  end
-
-  defp valid_escape_tokens?([]), do: true
-
-  defp valid_escape_tokens?(["~", next | rest]) when next in ["0", "1"], do: valid_escape_tokens?(rest)
-
-  defp valid_escape_tokens?(["~" | _rest]), do: false
-  defp valid_escape_tokens?([_char | rest]), do: valid_escape_tokens?(rest)
 
   defp literal_to_json(nil, _form, _env), do: {:ok, nil}
   defp literal_to_json(value, _form, _env) when is_boolean(value), do: {:ok, value}
@@ -517,13 +501,13 @@ defmodule Workflow.Predicate do
   def evaluate(%Dry{rounds: rounds}, ctx), do: dry_streak(ctx) >= rounds
 
   def evaluate(%PathExists{ref: ref, pointer: pointer}, ctx),
-    do: match?({:present, _value}, path_resolve(resolve_ref(ref, ctx), pointer))
+    do: match?({:present, _value}, resolve_path(resolve_ref(ref, ctx), pointer))
 
   def evaluate(%PathNonEmpty{ref: ref, pointer: pointer}, ctx),
-    do: ref |> resolve_ref(ctx) |> path_resolve(pointer) |> path_non_empty?()
+    do: ref |> resolve_ref(ctx) |> resolve_path(pointer) |> path_non_empty?()
 
   def evaluate(%PathEquals{ref: ref, pointer: pointer, literal: literal}, ctx) do
-    case ref |> resolve_ref(ctx) |> path_resolve(pointer) do
+    case ref |> resolve_ref(ctx) |> resolve_path(pointer) do
       {:present, value} -> json_equal?(value, literal)
       :missing -> false
     end
@@ -540,7 +524,7 @@ defmodule Workflow.Predicate do
   defp resolve(%BudgetRemaining{}, ctx), do: Map.get(ctx, :remaining, :infinity)
 
   defp resolve(%PathCount{ref: ref, pointer: pointer}, ctx),
-    do: ref |> resolve_ref(ctx) |> path_resolve(pointer) |> path_count()
+    do: ref |> resolve_ref(ctx) |> resolve_path(pointer) |> path_count()
 
   defp dry_streak(ctx), do: Map.get(ctx, :dry_streak, 0)
 
@@ -557,49 +541,8 @@ defmodule Workflow.Predicate do
   defp compare(:<=, a, b), do: a <= b
   defp compare(:==, a, b), do: a == b
 
-  defp path_resolve(:missing, _pointer), do: :missing
-  defp path_resolve(value, ""), do: {:present, value}
-
-  defp path_resolve(value, "/" <> rest) do
-    rest
-    |> String.split("/")
-    |> Enum.map(&unescape_token/1)
-    |> Enum.reduce_while({:present, value}, fn token, {:present, current} ->
-      case path_step(current, token) do
-        {:present, _value} = present -> {:cont, present}
-        :missing -> {:halt, :missing}
-      end
-    end)
-  end
-
-  defp path_resolve(_value, _pointer), do: :missing
-
-  defp path_step(current, token) when is_map(current) do
-    case Map.fetch(current, token) do
-      {:ok, value} ->
-        {:present, value}
-
-      :error ->
-        case Enum.find(current, fn {key, _value} ->
-               is_atom(key) and Atom.to_string(key) == token
-             end) do
-          {_key, value} -> {:present, value}
-          nil -> :missing
-        end
-    end
-  end
-
-  defp path_step(current, token) when is_list(current) do
-    with true <- canonical_index?(token),
-         {index, ""} <- Integer.parse(token),
-         {:ok, value} <- Enum.fetch(current, index) do
-      {:present, value}
-    else
-      _other -> :missing
-    end
-  end
-
-  defp path_step(_current, _token), do: :missing
+  defp resolve_path(:missing, _pointer), do: :missing
+  defp resolve_path(value, pointer), do: JSONPointer.resolve(value, pointer)
 
   defp path_non_empty?(:missing), do: false
   defp path_non_empty?({:present, nil}), do: false
@@ -619,7 +562,7 @@ defmodule Workflow.Predicate do
 
     matches =
       Enum.count(value, fn item ->
-        case path_resolve(item, pointer) do
+        case JSONPointer.resolve(item, pointer) do
           {:present, candidate} -> json_equal?(candidate, literal)
           :missing -> false
         end
@@ -682,15 +625,6 @@ defmodule Workflow.Predicate do
   defp runtime_object_key(key) when is_binary(key), do: {:ok, key}
   defp runtime_object_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
   defp runtime_object_key(_key), do: :error
-
-  defp canonical_index?("0"), do: true
-  defp canonical_index?(token), do: String.match?(token, ~r/^[1-9][0-9]*$/)
-
-  defp unescape_token(token) do
-    token
-    |> String.replace("~1", "/")
-    |> String.replace("~0", "~")
-  end
 
   defp finite_float?(value) when is_float(value), do: value - value == 0.0
 end

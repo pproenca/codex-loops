@@ -21,11 +21,12 @@ defmodule Workflow.LedgerTest do
 
   defmodule Demo do
     @moduledoc false
-    use Workflow
 
-    workflow "demo" do
+    def tree do
+      Workflow.Test.tree!("demo", quote do
       agent("say hello")
       return(:ok)
+      end, __ENV__)
     end
   end
 
@@ -33,11 +34,12 @@ defmodule Workflow.LedgerTest do
   # journal holds several paid usage events (rejections + a commit).
   defmodule Classify do
     @moduledoc false
-    use Workflow
 
-    workflow "classify" do
+    def tree do
+      Workflow.Test.tree!("classify", quote do
       agent("classify", schema: %{"type" => "object", "required" => ["label"]}, retries: 2)
       return(:ok)
+      end, __ENV__)
     end
   end
 
@@ -178,7 +180,7 @@ defmodule Workflow.LedgerTest do
     test "a target run exposes remaining after the agent turn, folded from the journal" do
       id = run_id()
       # EchoProvider bills 8 total tokens for the single turn.
-      assert {:ok, ^id} = Run.run(Demo, run_id: id, provider: echo(), budget: 100)
+      assert {:ok, ^id} = Run.run(Demo.tree(), run_id: id, provider: echo(), budget: 100)
 
       ledger = Ledger.of(id)
       assert ledger.total == 100
@@ -191,7 +193,7 @@ defmodule Workflow.LedgerTest do
 
     test "an unbounded run (no budget) folds to total nil and :infinity remaining" do
       id = run_id()
-      assert {:ok, ^id} = Run.run(Demo, run_id: id, provider: echo())
+      assert {:ok, ^id} = Run.run(Demo.tree(), run_id: id, provider: echo())
 
       ledger = Ledger.of(id)
       assert ledger.total == nil
@@ -204,7 +206,7 @@ defmodule Workflow.LedgerTest do
       # Two invalid outputs (rejected) then a valid one (committed): three paid turns
       # of 2 tokens each = 6 spent, against a target of 50.
       outputs = [%{"wrong" => 1}, %{"still" => "bad"}, %{"label" => "ok"}]
-      assert {:ok, ^id} = Run.run(Classify, run_id: id, provider: scripted(outputs), budget: 50)
+      assert {:ok, ^id} = Run.run(Classify.tree(), run_id: id, provider: scripted(outputs), budget: 50)
 
       ledger = Ledger.of(id)
       assert ledger.spent == 6
@@ -213,7 +215,7 @@ defmodule Workflow.LedgerTest do
       # Resume reads the same journal — the target and spend are reconstructed, never
       # re-supplied or double-counted.
       assert {:ok, ^id} =
-               Run.run(Classify, run_id: id, provider: {Workflow.Test.ExplodingProvider, []})
+               Run.run(Classify.tree(), run_id: id, provider: {Workflow.Test.ExplodingProvider, []})
 
       assert Ledger.of(id) == ledger
     end
@@ -222,7 +224,7 @@ defmodule Workflow.LedgerTest do
       id = run_id()
 
       assert {:error, {:provider_failure, [0], :timeout, %{"message" => "deadline"}}} =
-               Run.run(Demo,
+               Run.run(Demo.tree(),
                  run_id: id,
                  provider:
                    {ProviderFailureProvider,

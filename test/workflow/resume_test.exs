@@ -23,23 +23,33 @@ defmodule Workflow.ResumeTest do
   # A run whose first turn commits and whose second turn can be held in flight.
   defmodule TwoAgents do
     @moduledoc false
-    use Workflow
 
-    workflow "two-agents" do
-      agent("first")
-      agent("second")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "two-agents",
+        quote do
+          agent("first")
+          agent("second")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   # A single paid turn, used for lease-takeover and the return→commit crash window.
   defmodule OneAgent do
     @moduledoc false
-    use Workflow
 
-    workflow "one-agent" do
-      agent("do it")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "one-agent",
+        quote do
+          agent("do it")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -47,36 +57,51 @@ defmodule Workflow.ResumeTest do
   # *after* the whole parallel bracket is journaled but before the gate settles.
   defmodule FanoutThenGate do
     @moduledoc false
-    use Workflow
 
-    workflow "fanout-then-gate" do
-      parallel([agent("a"), agent("b")])
-      agent("gate")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "fanout-then-gate",
+        quote do
+          parallel([agent("a"), agent("b")])
+          agent("gate")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule InjectedThenGate do
     @moduledoc false
-    use Workflow
 
-    workflow "injected-then-gate" do
-      let(:draft = agent("draft"))
-      agent(~P"improve: <%= @draft %>")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "injected-then-gate",
+        quote do
+          let(:draft = agent("draft"))
+          agent(~P"improve: <%= @draft %>")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
   defmodule JournaledDynamicFanout do
     @moduledoc false
-    use Workflow
 
-    workflow "journaled-dynamic-fanout" do
-      fanout width: budget_slices(per: 10, max: 5) do
-        agent("branch")
-      end
+    def tree do
+      Workflow.Test.tree!(
+        "journaled-dynamic-fanout",
+        quote do
+          fanout width: budget_slices(per: 10, max: 5) do
+            agent("branch")
+          end
 
-      return(:ok)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -104,12 +129,12 @@ defmodule Workflow.ResumeTest do
   end
 
   @tag :capture_log
-  test "killing a run mid-agent-turn then resuming does not re-invoke the committed turn" do
+  test "resume fails closed when a durable start marker has no settlement" do
     id = run_id()
 
     # First run: agent "first" commits; the writer then blocks inside agent "second".
     {:ok, ^id, pid} =
-      Run.start(TwoAgents, run_id: id, provider: {GateProvider, sink: self(), gate_on: "second"})
+      Run.start(TwoAgents.tree(), run_id: id, provider: {GateProvider, sink: self(), gate_on: "second"})
 
     assert_receive {:agent_called, "first"}, @receive_timeout
     assert_receive {:agent_called, "second"}, @receive_timeout
@@ -121,32 +146,31 @@ defmodule Workflow.ResumeTest do
 
     kill_and_await(id, pid)
 
-    # Resume with a fresh call-counting provider.
-    assert {:ok, ^id} = Run.run(TwoAgents, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:error, {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}} =
+             Run.run(TwoAgents.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
-    # The committed turn ("first") was replayed from the journal — never re-invoked.
+    # Neither a settled turn nor a possibly-completed external effect is repeated.
     refute_received {:agent_called, "first"}
-    # Only the uncommitted turn ("second") ran on resume.
-    assert_received {:agent_called, "second"}
+    refute_received {:agent_called, "second"}
     refute_received {:agent_called, _}
 
     status = Status.of(id)
-    assert status.state == :completed
-    assert status.result == :ok
+    assert status.state == :failed
+    assert status.failure.reason == {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}
 
-    # Exactly one committed turn per address: agent "first" was not re-committed.
+    # The already-settled first turn remains committed exactly once.
     committed = Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
-    assert Enum.map(committed, & &1.payload.address) == [[0], [1]]
+    assert Enum.map(committed, & &1.payload.address) == [[0]]
   end
 
   @tag :capture_log
-  test "resuming past a completed fan-out region reuses its brackets, not re-emits them" do
+  test "resume preserves completed fan-out brackets before failing on an unknown gate outcome" do
     id = run_id()
 
     # First run: both branches commit and the parallel region is fully bracketed;
     # the writer then blocks inside the gate agent, mid-run.
     {:ok, ^id, pid} =
-      Run.start(FanoutThenGate,
+      Run.start(FanoutThenGate.tree(),
         run_id: id,
         provider: {GateProvider, sink: self(), gate_on: "gate"}
       )
@@ -162,15 +186,14 @@ defmodule Workflow.ResumeTest do
 
     kill_and_await(id, pid)
 
-    # Resume re-walks the tree from the top, re-entering the already-completed
-    # fan-out node before reaching the still-open gate.
-    assert {:ok, ^id} =
-             Run.run(FanoutThenGate, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:error, {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}} =
+             Run.run(FanoutThenGate.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
-    # Only the uncommitted gate turn ran on resume; the settled branches replayed.
+    # Settled branches replay from the journal and the possibly-completed gate is
+    # never invoked again.
     refute_received {:agent_called, "a"}
     refute_received {:agent_called, "b"}
-    assert_received {:agent_called, "gate"}
+    refute_received {:agent_called, "gate"}
 
     # The bracket is exactly-once: resume did not double-emit the started/completed
     # markers, so a fold that pairs them sees a single region.
@@ -178,32 +201,34 @@ defmodule Workflow.ResumeTest do
     assert Enum.count(types, &(&1 == :parallel_started)) == 1
     assert Enum.count(types, &(&1 == :parallel_completed)) == 1
 
-    assert Status.of(id).state == :completed
+    assert Status.of(id).state == :failed
   end
 
   @tag :capture_log
-  test "one live writer holds the lease; a stale lease is taken over on resume" do
+  test "one live writer holds the lease and a released lease still fails closed on unknown outcome" do
     id = run_id()
 
-    {:ok, ^id, pid} = Run.start(OneAgent, run_id: id, provider: {GateProvider, sink: self()})
+    {:ok, ^id, pid} = Run.start(OneAgent.tree(), run_id: id, provider: {GateProvider, sink: self()})
     assert_receive {:agent_called, "do it"}, @receive_timeout
     assert_receive {:at_agent, ^pid}, @receive_timeout
 
     # A second writer cannot hold the same run while the first is live.
     assert {:error, {:already_running, ^pid}} =
-             Run.start(OneAgent, run_id: id, provider: {GateProvider, sink: self()})
+             Run.start(OneAgent.tree(), run_id: id, provider: {GateProvider, sink: self()})
 
     # The live writer dies; the registry releases the lease via its monitor — no
     # heartbeat, no pid-probe poll.
     kill_and_await(id, pid)
 
-    # Resume takes over the freed lease and drives the run to completion.
-    assert {:ok, ^id} = Run.run(OneAgent, run_id: id, provider: {EchoProvider, sink: self()})
-    assert Status.of(id).state == :completed
+    assert {:error, {:outcome_unknown, %{address: [0], iteration: 0, attempt: 0}}} =
+             Run.run(OneAgent.tree(), run_id: id, provider: {EchoProvider, sink: self()})
+
+    refute_received {:agent_called, "do it"}
+    assert Status.of(id).state == :failed
   end
 
   @tag :capture_log
-  test "a crash between provider-return and commit neither double-spends nor drops the effect" do
+  test "a crash between provider-return and commit is reported as outcome unknown" do
     id = run_id()
     {:ok, store} = LedgeredProvider.start()
     key = %IdempotencyKey{run_id: id, node_path: [0], iteration: 0}
@@ -211,7 +236,7 @@ defmodule Workflow.ResumeTest do
     # First run: the provider records the paid effect, then hard-kills the writer
     # before it can commit — the exact return→commit window.
     assert {:error, {:run_crashed, :killed}} =
-             Run.run(OneAgent,
+             Run.run(OneAgent.tree(),
                run_id: id,
                provider: {LedgeredProvider, store: store, sink: self(), crash_once: true}
              )
@@ -225,34 +250,27 @@ defmodule Workflow.ResumeTest do
 
     await_lease_released(id)
 
-    # Resume: the deduping provider replays the effect; the commit finally lands.
-    assert {:ok, ^id} =
-             Run.run(OneAgent,
+    assert {:error, {:outcome_unknown, %{address: [0], iteration: 0, attempt: 0}}} =
+             Run.run(OneAgent.tree(),
                run_id: id,
                provider: {LedgeredProvider, store: store, sink: self()}
              )
 
-    # It was re-invoked (nothing was committed to replay from) ...
-    assert_received {:agent_called, "do it"}
-    # ... but the paid effect was NOT charged a second time: exactly-once.
+    refute_received {:agent_called, "do it"}
     assert LedgeredProvider.charges(store, key) == 1
 
-    # And the effect was not dropped: it is committed exactly once and accounted once.
-    committed = Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
-    assert [%{payload: %{result: %{"echo" => "do it"}}}] = committed
-
     status = Status.of(id)
-    assert status.state == :completed
-    assert status.result == :ok
-    assert Ledger.of(id).spent == 2
+    assert status.state == :failed
+    assert status.failure.reason == {:outcome_unknown, %{address: [0], iteration: 0, attempt: 0}}
+    assert Ledger.of(id).spent == 0
   end
 
   @tag :capture_log
-  test "resume re-renders a top-level injected prompt from journaled bindings without re-running the producer" do
+  test "journaled bindings do not bypass fail-closed handling for an unknown injected turn" do
     id = run_id()
 
     {:ok, ^id, pid} =
-      Run.start(InjectedThenGate,
+      Run.start(InjectedThenGate.tree(),
         run_id: id,
         provider: {GateProvider, sink: self(), gate_on: "improve: %{}"}
       )
@@ -266,25 +284,18 @@ defmodule Workflow.ResumeTest do
 
     kill_and_await(id, pid)
 
-    assert {:ok, ^id} =
-             Run.run(InjectedThenGate, run_id: id, provider: {EchoProvider, sink: self()})
+    assert {:error, {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}} =
+             Run.run(InjectedThenGate.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
     refute_received {:agent_called, "draft"}
-    assert_received {:agent_called, "improve: %{}"}
+    refute_received {:agent_called, "improve: %{}"}
     refute_received {:agent_called, _}
-
-    committed =
-      Enum.find(
-        Journal.fold(id),
-        &(&1.type == :agent_committed and &1.payload.address == [1])
-      )
-
-    assert committed.payload.prompt == "improve: %{}"
+    assert Status.of(id).state == :failed
   end
 
   test "resume replays a journaled generic fanout width instead of recomputing budget_slices" do
     id = run_id()
-    tree = JournaledDynamicFanout.__workflow__(:tree)
+    tree = JournaledDynamicFanout.tree()
     [fanout, _return] = tree.nodes
 
     :ok = Journal.register_run(id)
@@ -292,7 +303,7 @@ defmodule Workflow.ResumeTest do
     :ok = Journal.append(id, 1, Event.fanout_started(fanout, 3))
 
     assert {:ok, ^id} =
-             Run.run(JournaledDynamicFanout,
+             Run.run(JournaledDynamicFanout.tree(),
                run_id: id,
                budget: 5,
                provider: {EchoProvider, sink: self()}

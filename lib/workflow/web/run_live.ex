@@ -11,8 +11,8 @@ defmodule Workflow.Web.RunLive do
 
     * After a writer crash it shows what was *committed*, not a process's
       uncommitted belief.
-    * A mid-run reconnect reconstructs the full view from the scheduler snapshot
-      in `mount/3` — the initial render already reflects every prior commit.
+    * A mid-run reconnect subscribes, returns from `mount/3`, then reconstructs the
+      full view from the scheduler snapshot in the first mailbox turn.
     * The `{:journal_committed, ...}` broadcast is treated only as a *signal to
       refresh*: its payload is discarded and the whole read model is re-derived.
       Refreshing is idempotent, so an event seen by both the initial snapshot and a
@@ -20,7 +20,6 @@ defmodule Workflow.Web.RunLive do
   """
   use Phoenix.LiveView
 
-  alias Workflow.Event
   alias Workflow.Run.Stream, as: RunStream
   alias Workflow.Scheduler
   alias Workflow.Scheduler.RunProjection
@@ -30,23 +29,22 @@ defmodule Workflow.Web.RunLive do
 
   @impl true
   def mount(%{"run_id" => run_id}, _session, socket) do
-    # Subscribe before the first fold so no commit slips through the gap between
-    # folding and subscribing; the idempotent re-fold absorbs any overlap.
+    status = %Status{run_id: run_id}
+    socket = assign_projection(socket, run_id, status, RunProjection.from_status(status))
+
+    # Subscribe before scheduling the first fold so no commit slips through the
+    # gap. Returning first keeps SQLite work out of the supervised mount path.
     if connected?(socket) do
       RunStream.subscribe(run_id)
-      schedule_refresh()
+      send(self(), :refresh)
     end
 
-    {:ok, assign_projection(socket, run_id)}
+    {:ok, socket}
   end
 
   @impl true
   def handle_info({:journal_committed, run_id, _event}, socket) do
     {:noreply, assign_projection(socket, run_id)}
-  end
-
-  def handle_info({:run_stream_event, run_id, %Event{} = event}, socket) do
-    {:noreply, assign_stream_event(socket, run_id, event)}
   end
 
   def handle_info(:refresh, socket) do
@@ -71,17 +69,6 @@ defmodule Workflow.Web.RunLive do
   # The single point where state enters the socket: one scheduler-owned snapshot.
   defp assign_projection(socket, run_id) do
     %{status: status, run_projection: run_projection} = scheduler_snapshot(run_id)
-    assign_projection(socket, run_id, status, run_projection)
-  end
-
-  defp assign_stream_event(socket, run_id, %Event{} = event) do
-    status = Status.apply_progress(event, socket.assigns.status)
-
-    run_projection = %{
-      RunProjection.from_status(status)
-      | lifecycle_action: socket.assigns.run_projection.lifecycle_action
-    }
-
     assign_projection(socket, run_id, status, run_projection)
   end
 
@@ -687,17 +674,14 @@ defmodule Workflow.Web.RunLive do
 
   defp agent_title(%{prompt: prompt}), do: prompt |> String.split(~r/\s+/, trim: true) |> Enum.take(4) |> Enum.join(" ")
 
-  defp agent_status(%{status: status}) when status in [:completed, "completed"], do: "completed"
-  defp agent_status(%{status: status}) when status in [:running, "running"], do: "running"
-  defp agent_status(%{status: status}) when status in [:failed, "failed"], do: "failed"
+  defp agent_status(%{status: :completed}), do: "completed"
+  defp agent_status(%{status: :running}), do: "running"
+  defp agent_status(%{status: :failed}), do: "failed"
   defp agent_status(_agent), do: "pending"
 
   defp status_label(%{status: :completed}), do: "Completed"
-  defp status_label(%{status: "completed"}), do: "Completed"
   defp status_label(%{status: :running}), do: "Running"
-  defp status_label(%{status: "running"}), do: "Running"
   defp status_label(%{status: :failed}), do: "Failed"
-  defp status_label(%{status: "failed"}), do: "Failed"
   defp status_label(_agent), do: "Pending"
 
   defp agent_marker(%Status{} = status, agent) do
@@ -714,10 +698,9 @@ defmodule Workflow.Web.RunLive do
     Enum.count(rejected, &(&1.address == address and &1.iteration == iteration))
   end
 
-  defp agent_outcome_marker(%{status: status}) when status in [:completed, "completed"], do: "outcome"
-
-  defp agent_outcome_marker(%{status: status}) when status in [:failed, "failed"], do: "failed"
-  defp agent_outcome_marker(%{status: status}) when status in [:running, "running"], do: "active"
+  defp agent_outcome_marker(%{status: :completed}), do: "outcome"
+  defp agent_outcome_marker(%{status: :failed}), do: "failed"
+  defp agent_outcome_marker(%{status: :running}), do: "active"
   defp agent_outcome_marker(_agent), do: "pending"
 
   defp agent_meta(agent) do
@@ -757,7 +740,13 @@ defmodule Workflow.Web.RunLive do
   end
 
   defp activity_label(entry), do: Map.get(entry, :label) || Map.get(entry, "label") || "Activity"
-  defp activity_status(entry), do: Map.get(entry, :status) || Map.get(entry, "status")
+  defp activity_status(entry) do
+    case Map.get(entry, :status) || Map.get(entry, "status") do
+      nil -> nil
+      status when is_atom(status) -> Atom.to_string(status)
+      status when is_binary(status) -> status
+    end
+  end
   defp activity_summary(entry), do: Map.get(entry, :summary) || Map.get(entry, "summary")
 
   defp formatted_tool_call(entry) do

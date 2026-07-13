@@ -1,6 +1,6 @@
 defmodule Workflow.Idempotency do
   @moduledoc """
-  Exactly-once resolution for paid effects, decided **purely from the journal**.
+  Settlement resolution for paid effects, decided **purely from the journal**.
 
   `resolve/3` folds the prior events for `(node_path, iteration)` into the node's
   settled outcome so a resume never re-runs a paid effect:
@@ -13,6 +13,10 @@ defmodule Workflow.Idempotency do
       at that attempt index rather than re-calling the provider from zero (which
       would double-pay for the already-journaled rejections).
     * `:none` — no prior outcome; the node must run for the first time.
+
+  Before invoking a provider, the writer journals `agent_started`. If a writer dies
+  with such a marker and no matching settlement, the outcome is unknowable. Resume
+  fails that run instead of redelivering a possibly-paid effect.
   """
 
   @type outcome ::
@@ -45,4 +49,40 @@ defmodule Workflow.Idempotency do
         :none
     end
   end
+
+  @type unsettled_attempt :: %{
+          address: Workflow.Node.address(),
+          iteration: non_neg_integer(),
+          attempt: non_neg_integer()
+        }
+
+  @spec unsettled_attempt([Workflow.Event.t()]) :: {:ok, unsettled_attempt()} | :none
+  def unsettled_attempt(events) do
+    Enum.find_value(events, :none, fn
+      %{type: :agent_started, payload: payload} ->
+        if settled_attempt?(events, payload), do: false, else: {:ok, Map.take(payload, [:address, :iteration, :attempt])}
+
+      _event ->
+        false
+    end)
+  end
+
+  defp settled_attempt?(events, started) do
+    Enum.any?(events, fn
+      %{type: :agent_committed, payload: payload} ->
+        same_turn?(payload, started) and payload.idempotency_key.attempt == started.attempt
+
+      %{type: :agent_attempt_rejected, payload: payload} ->
+        same_turn?(payload, started) and payload.attempt == started.attempt
+
+      %{type: :agent_failed, payload: payload} ->
+        same_turn?(payload, started) and payload.attempts > started.attempt
+
+      _event ->
+        false
+    end)
+  end
+
+  defp same_turn?(left, right),
+    do: left.address == right.address and left.iteration == right.iteration
 end

@@ -9,11 +9,16 @@ defmodule Workflow.CodexProviderEnvTest do
 
   defmodule EchoWorkflow do
     @moduledoc false
-    use Workflow
 
-    workflow "codex_env_echo" do
-      agent("say hello")
-      return(:ok)
+    def tree do
+      Workflow.Test.tree!(
+        "codex_env_echo",
+        quote do
+          agent("say hello")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -64,13 +69,17 @@ defmodule Workflow.CodexProviderEnvTest do
     id = "codex_env_missing_#{System.unique_integer([:positive])}"
 
     assert {:error, {:provider_failure, [0], :unavailable, detail}} =
-             Run.run(EchoWorkflow, run_id: id, provider: Provider.select(:codex, []))
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: Provider.select(:codex, []))
 
     assert detail["config"] == "codex_command"
     assert detail["message"] =~ "Codex command was not configured"
     assert detail["hint"] =~ "codex-loops install --codex"
 
-    assert id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :agent_failed]
+    assert id |> Journal.fold() |> Enum.map(& &1.type) == [
+             :run_started,
+             :agent_started,
+             :agent_failed
+           ]
 
     failed = Enum.find(Journal.fold(id), &(&1.type == :agent_failed))
     assert failed.payload.reason == {:provider_failure, :unavailable, detail}
@@ -86,14 +95,20 @@ defmodule Workflow.CodexProviderEnvTest do
     id = "codex_env_backend_exit_#{System.unique_integer([:positive])}"
 
     assert {:error, {:provider_failure, [0], :unavailable, detail}} =
-             Run.run(EchoWorkflow,
+             Run.run(EchoWorkflow.tree(),
                run_id: id,
                provider: {Codex, command: {"/bin/sh", ["-c", "exit 127"]}}
              )
 
     assert detail["config"] == "codex_command"
     assert detail["message"] =~ "exit status 127"
-    assert id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :agent_failed]
+
+    assert id |> Journal.fold() |> Enum.map(& &1.type) == [
+             :run_started,
+             :agent_started,
+             :agent_failed
+           ]
+
     assert Status.of(id).state == :failed
   end
 

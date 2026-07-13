@@ -26,8 +26,7 @@ defmodule Workflow.BindingResolutionTest do
       )
     ]
 
-    assert {:ok, %{"echo" => "wanted"}} =
-             apply(Workflow.BoundValue, :fold, [events, {:node, [3]}])
+    assert {:ok, %{"echo" => "wanted"}} = Workflow.BoundValue.fold(events, {:node, [3]})
   end
 
   test "bound value folds a completed refine artifact from a hand-built journal" do
@@ -47,8 +46,7 @@ defmodule Workflow.BindingResolutionTest do
       }
     ]
 
-    assert {:ok, "accepted spec"} =
-             apply(Workflow.BoundValue, :fold, [events, {:refine, [2]}])
+    assert {:ok, "accepted spec"} = Workflow.BoundValue.fold(events, {:refine, [2]})
   end
 
   test "bound list folds ordered lane results for a map reference from a hand-built journal" do
@@ -72,7 +70,7 @@ defmodule Workflow.BindingResolutionTest do
     ]
 
     assert {:ok, [%{"echo" => "alpha"}, %{"echo" => "beta"}]} =
-             apply(Workflow.BoundList, :fold, [events, {:map, [9]}])
+             Workflow.BoundList.fold(events, {:map, [9]})
   end
 
   test "bound list folds ordered lane results for a fanout reference from journal markers" do
@@ -111,7 +109,7 @@ defmodule Workflow.BindingResolutionTest do
     ]
 
     assert {:ok, [%{"echo" => "alpha"}, %{"echo" => "beta"}]} =
-             apply(Workflow.BoundList, :fold, [events, {:fanout, [4], :global}])
+             Workflow.BoundList.fold(events, {:fanout, [4], :global})
   end
 
   test "bound list resolves a zero-width fanout binding to an empty list" do
@@ -123,9 +121,9 @@ defmodule Workflow.BindingResolutionTest do
     }
 
     assert {:ok, []} =
-             apply(Workflow.BoundList, :fold, [
+             Workflow.BoundList.fold(
                [Event.fanout_started(fanout, 0)],
                {:fanout, [4], :global}
-             ])
+             )
   end
 end

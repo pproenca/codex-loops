@@ -1,8 +1,6 @@
 defmodule Workflow.SchedulerTest do
   use ExUnit.Case, async: false
 
-  import ExUnit.CaptureIO
-
   alias Workflow.Journal
   alias Workflow.Provider.Mock
   alias Workflow.Run
@@ -20,16 +18,7 @@ defmodule Workflow.SchedulerTest do
   end
 
   defp write_workflow(block) do
-    mod = "SchedulerFixture#{System.unique_integer([:positive])}"
-
-    source = """
-    defmodule #{mod} do
-      use Workflow
-      #{block}
-    end
-    """
-
-    write_script(source)
+    write_script(block)
   end
 
   defp demo_workflow do
@@ -133,7 +122,7 @@ defmodule Workflow.SchedulerTest do
   defp bad_workflow do
     write_workflow(~S"""
     workflow "scheduler-bad" do
-      frobnicate "nope"
+      raise "nope"
       return :ok
     end
     """)
@@ -145,12 +134,9 @@ defmodule Workflow.SchedulerTest do
     path = Path.join(dir, "wf_syntax_#{System.unique_integer([:positive])}.exs")
 
     File.write!(path, """
-    defmodule SchedulerSyntaxFixture#{System.unique_integer([:positive])} do
-      use Workflow
-      workflow "bad" do
-        agent "unterminated
-        return :ok
-      end
+    workflow "bad" do
+      agent "unterminated
+      return :ok
     end
     """)
 
@@ -162,234 +148,30 @@ defmodule Workflow.SchedulerTest do
   end
 
   defp compile_error_workflow do
-    write_workflow("""
-    unquote(:outside_quote)
-
+    write_workflow(~S"""
     workflow "compile-bad" do
+      System.system_time()
       return :ok
     end
     """)
-  end
-
-  defp top_level_raise_workflow do
-    write_workflow("""
-    raise "boom"
-
-    workflow "raise-bad" do
-      return :ok
-    end
-    """)
-  end
-
-  defp outer_top_level_raise_workflow do
-    mod = "SchedulerOuterRaiseFixture#{System.unique_integer([:positive])}"
-
-    write_script(
-      """
-      raise "outer boom"
-
-      defmodule #{mod} do
-        use Workflow
-
-        workflow "outer-raise-bad" do
-          return :ok
-        end
-      end
-      """,
-      "wf_outer_raise"
-    )
-  end
-
-  defp no_use_workflow do
-    mod = "SchedulerNoUseFixture#{System.unique_integer([:positive])}"
-
-    write_script(
-      """
-      defmodule #{mod} do
-        workflow "no-use" do
-          return :ok
-        end
-      end
-      """,
-      "wf_no_use"
-    )
-  end
-
-  defp workflow_before_use_workflow do
-    mod = "SchedulerUseAfterFixture#{System.unique_integer([:positive])}"
-
-    write_script(
-      """
-      defmodule #{mod} do
-        workflow "use-after" do
-          return :ok
-        end
-
-        use Workflow
-      end
-      """,
-      "wf_use_after"
-    )
-  end
-
-  defp dynamic_module_header_workflow do
-    write_script(
-      """
-      defmodule (raise "module name boom") do
-        use Workflow
-
-        workflow "dynamic-module" do
-          return :ok
-        end
-      end
-      """,
-      "wf_dynamic_module"
-    )
-  end
-
-  defp schema_after_workflow do
-    suffix = System.unique_integer([:positive])
-    schema = "SchedulerLateSchema#{suffix}"
-    mod = "SchedulerLateSchemaFixture#{suffix}"
-
-    write_script(
-      """
-      import Workflow.Schema.DSL
-
-      defmodule #{mod} do
-        use Workflow
-
-        workflow "schema-after" do
-          agent "summarize", schema: #{schema}
-          return :ok
-        end
-      end
-
-      schema #{schema} do
-        string :summary
-      end
-      """,
-      "wf_schema_after"
-    )
-  end
-
-  defp schema_redefinition_workflow do
-    mod = "SchedulerSchemaRedefinitionFixture#{System.unique_integer([:positive])}"
-
-    write_script(
-      """
-      import Workflow.Schema.DSL
-
-      schema Workflow.Scheduler do
-        string :summary
-      end
-
-      defmodule #{mod} do
-        use Workflow
-
-        workflow "schema-redefinition" do
-          agent "summarize", schema: Workflow.Scheduler
-          return :ok
-        end
-      end
-      """,
-      "wf_schema_redefinition"
-    )
-  end
-
-  defp return_schema_keyword_workflow do
-    suffix = System.unique_integer([:positive])
-    schema = "SchedulerReturnSchema#{suffix}"
-    mod = "SchedulerReturnSchemaFixture#{suffix}"
-
-    path =
-      write_script(
-        """
-        import Workflow.Schema.DSL
-
-        schema #{schema} do
-          string :summary
-        end
-
-        defmodule #{mod} do
-          use Workflow
-
-          workflow "schema-return-keyword" do
-            return [schema: #{schema}]
-          end
-        end
-        """,
-        "wf_schema_return_keyword"
-      )
-
-    {path, String.to_atom(schema)}
   end
 
   defp schema_backed_workflow do
-    suffix = System.unique_integer([:positive])
-    schema = "SchedulerLocalSchema#{suffix}"
-    mod = "SchedulerSchemaFixture#{suffix}"
-
     write_script(
-      """
-      import Workflow.Schema.DSL
+      ~S"""
+      workflow "schema-backed" do
+        agent "summarize",
+          schema: %{
+            "type" => "object",
+            "properties" => %{"summary" => %{"type" => "string"}},
+            "required" => ["summary"]
+          }
 
-      schema #{schema} do
-        string :summary
-      end
-
-      defmodule #{mod} do
-        use Workflow
-
-        workflow "schema-backed" do
-          agent "summarize", schema: #{schema}
-          return :ok
-        end
+        return :ok
       end
       """,
       "wf_schema"
     )
-  end
-
-  defp fake_workflow_reflection do
-    mod = "SchedulerFakeFixture#{System.unique_integer([:positive])}"
-
-    source = """
-    defmodule #{mod} do
-      use Workflow
-      def __workflow__(:tree), do: %Workflow.Tree{name: "fake", nodes: []}
-    end
-    """
-
-    write_script(source, "wf_fake")
-  end
-
-  defp forged_workflow_marker do
-    mod = "SchedulerForgedFixture#{System.unique_integer([:positive])}"
-
-    source = """
-    defmodule #{mod} do
-      use Workflow
-      def __workflow__(:source), do: :workflow_dsl
-      def __workflow__(:tree), do: %Workflow.Tree{name: "forged", nodes: []}
-    end
-    """
-
-    write_script(source, "wf_forged")
-  end
-
-  defp self_registered_fake_workflow do
-    mod = "SchedulerSelfRegisteredFixture#{System.unique_integer([:positive])}"
-
-    source = """
-    defmodule #{mod} do
-      use Workflow
-      Workflow.Script.register_compiled_workflow(__ENV__.file, __MODULE__, make_ref())
-      def __workflow__(:tree), do: %Workflow.Tree{name: "self-registered", nodes: []}
-    end
-    """
-
-    write_script(source, "wf_self_registered")
   end
 
   test "health reports the supervised runtime boundary dependencies" do
@@ -431,7 +213,7 @@ defmodule Workflow.SchedulerTest do
     assert projection.phase == "draft"
     assert projection.logs == ["ready"]
     assert projection.agent_count == 1
-    assert projection.event_count == 5
+    assert projection.event_count == 6
     assert projection.usage.total_tokens == 0
     assert projection.result == :ok
     assert projection.failure == nil
@@ -455,12 +237,13 @@ defmodule Workflow.SchedulerTest do
 
     assert {:ok, %{run_id: ^id, events: events}} = Scheduler.get_run_events(id)
 
-    assert Enum.map(events, & &1.seq) == [0, 1, 2, 3, 4]
+    assert Enum.map(events, & &1.seq) == [0, 1, 2, 3, 4, 5]
 
     assert Enum.map(events, & &1.type) == [
              "run_started",
              "phase_entered",
              "log_emitted",
+             "agent_started",
              "agent_committed",
              "run_completed"
            ]
@@ -469,8 +252,9 @@ defmodule Workflow.SchedulerTest do
              %{seq: 0, type: "run_started"},
              %{seq: 1, type: "phase_entered", address: [0]},
              %{seq: 2, type: "log_emitted", address: [1]},
-             %{seq: 3, type: "agent_committed", address: [2]},
-             %{seq: 4, type: "run_completed"}
+             %{seq: 3, type: "agent_started", address: [2]},
+             %{seq: 4, type: "agent_committed", address: [2]},
+             %{seq: 5, type: "run_completed"}
            ] = events
   end
 
@@ -686,7 +470,7 @@ defmodule Workflow.SchedulerTest do
 
     assert error.status == 422
     assert error.code == "scheduler.validation.workflow_dsl"
-    assert error.details.reason =~ "unknown combinator `frobnicate`"
+    assert error.details.reason =~ "unknown combinator `raise`"
 
     assert {:error, %Scheduler.Error{} = error} =
              Scheduler.resume_run(id, %{"script_path" => path, "provider" => "bogus"})
@@ -722,7 +506,7 @@ defmodule Workflow.SchedulerTest do
   end
 
   @tag :capture_log
-  test "resume through scheduler does not repeat already committed agent effects" do
+  test "resume through scheduler fails closed without repeating an unknown effect" do
     path = two_agent_workflow()
     id = run_id("scheduler_resume_once")
     {:ok, tree} = Script.load_tree(path)
@@ -744,14 +528,17 @@ defmodule Workflow.SchedulerTest do
     kill_and_await(id, writer)
 
     assert {:ok, %{run_id: ^id, state: :accepted}} = Scheduler.resume_run(id)
-    wait_for_projection(id)
+    projection = wait_for_projection(id, :failed)
 
     assert id
            |> Journal.fold()
            |> Enum.filter(&(&1.type == :agent_committed))
-           |> Enum.map(& &1.payload.address) == [[0], [1]]
+           |> Enum.map(& &1.payload.address) == [[0]]
 
-    assert {:ok, %{state: :completed, event_count: event_count}} = Scheduler.get_run(id)
+    assert projection.failure.reason ==
+             {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}
+
+    assert {:ok, %{state: :failed, event_count: event_count}} = Scheduler.get_run(id)
     assert event_count == length(Journal.fold(id))
   end
 
@@ -896,7 +683,7 @@ defmodule Workflow.SchedulerTest do
     assert Journal.run_ids() == run_ids
   end
 
-  test "validates a same-file schema-backed workflow script through the scheduler context" do
+  test "validates a literal-schema workflow script through the scheduler context" do
     path = schema_backed_workflow()
     run_ids = Journal.run_ids()
 
@@ -941,7 +728,7 @@ defmodule Workflow.SchedulerTest do
     assert error.message == "Workflow script failed validation."
     assert error.details.path == path
     assert error.details.type == :workflow_dsl
-    assert error.details.reason =~ "unknown combinator `frobnicate`"
+    assert error.details.reason =~ "unknown combinator `raise`"
   end
 
   test "syntax errors return a typed scheduler validation error" do
@@ -972,166 +759,14 @@ defmodule Workflow.SchedulerTest do
 
   test "ordinary compile errors return a typed scheduler validation error" do
     path = compile_error_workflow()
-    parent = self()
-
-    capture_io(:stderr, fn ->
-      send(parent, {:validation_result, Scheduler.validate_workflow(%{"script_path" => path})})
-    end)
-
-    assert_received {:validation_result, {:error, %Scheduler.Error{} = error}}
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "cannot compile module"
-  end
-
-  test "top-level compile-time exceptions return a typed scheduler validation error" do
-    path = top_level_raise_workflow()
 
     assert {:error, %Scheduler.Error{} = error} =
              Scheduler.validate_workflow(%{"script_path" => path})
 
     assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
+    assert error.code == "scheduler.validation.workflow_dsl"
     assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "boom"
-  end
-
-  test "outer top-level script forms return a typed scheduler validation error" do
-    path = outer_top_level_raise_workflow()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "outer boom"
-  end
-
-  test "workflow declarations without use Workflow return a typed scheduler validation error" do
-    path = no_use_workflow()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "must `use Workflow`"
-  end
-
-  test "workflow declarations before use Workflow return a typed scheduler validation error" do
-    path = workflow_before_use_workflow()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "must appear after `use Workflow`"
-  end
-
-  test "dynamic workflow module headers return a typed scheduler validation error" do
-    path = dynamic_module_header_workflow()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "module name must be a literal alias"
-  end
-
-  test "same-file schema definitions after workflow modules are rejected" do
-    path = schema_after_workflow()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "schema definitions must appear before the workflow module"
-  end
-
-  test "same-file schemas cannot redefine existing scheduler modules" do
-    path = schema_redefinition_workflow()
-    assert Code.ensure_loaded?(Scheduler)
-    assert function_exported?(Scheduler, :validate_workflow, 1)
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "would redefine an existing module"
-    assert Code.ensure_loaded?(Scheduler)
-    assert function_exported?(Scheduler, :validate_workflow, 1)
-    assert {:ok, _health} = Scheduler.health()
-  end
-
-  test "same-file schema inlining is scoped to agent options" do
-    {path, schema_atom} = return_schema_keyword_workflow()
-
-    assert {:ok, %Workflow.Tree{nodes: [%Workflow.Node.Return{value: value}]}} =
-             Script.load_tree(path)
-
-    assert [{:schema, {:__aliases__, _meta, [^schema_atom]}}] = value
-
-    assert {:ok, validation} = Scheduler.validate_workflow(%{"script_path" => path})
-    assert validation.workflow_name == "schema-return-keyword"
-    assert validation.node_count == 1
-  end
-
-  test "hand-written workflow reflection does not bypass the compile gate" do
-    path = fake_workflow_reflection()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "unsupported top-level workflow script form"
-  end
-
-  test "forged workflow marker does not bypass the compile gate" do
-    path = forged_workflow_marker()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "unsupported top-level workflow script form"
-  end
-
-  test "self-registered workflow reflection does not bypass the compile gate" do
-    path = self_registered_fake_workflow()
-
-    assert {:error, %Scheduler.Error{} = error} =
-             Scheduler.validate_workflow(%{"script_path" => path})
-
-    assert error.status == 422
-    assert error.code == "scheduler.validation.compile"
-    assert error.details.path == path
-    assert error.details.type == :compile
-    assert error.details.reason =~ "unsupported top-level workflow script form"
+    assert error.details.type == :workflow_dsl
+    assert error.details.reason =~ "external modules"
   end
 end

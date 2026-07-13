@@ -1,11 +1,10 @@
 defmodule Workflow.Compiler do
   @moduledoc """
-  Turns a quoted workflow body into an inert `%Workflow.Tree{}` at compile time.
+  Turns a workflow name and quoted body into an inert `%Workflow.Tree{}`.
 
-  This is the whole DSL. It is a plain function — deliberately *not* a macro — so
-  it can be unit-tested directly against `quote do ... end` input with no macro
-  expansion, and so all parsing/validation lives in one testable place. The
-  `workflow/2` macro is a thin shell that calls this and escapes the result.
+  This is the whole language implementation. It consumes AST as data, performs no
+  expansion or evaluation, and returns either the compiled tree or one structured,
+  caller-located finding.
 
   ## Failure modes
 
@@ -18,7 +17,7 @@ defmodule Workflow.Compiler do
 
     * **Outside the vocabulary** — a closure (`fn -> ... end`), a call to any
       external module (`:rand.*`, `System.*`, `Enum.*`, ...), an unknown bare call,
-      or a stray literal/variable — **raises** `Workflow.CompileError`. Unknown
+      or a stray literal/variable — returns `{:error, %Finding{}}`. Unknown
       combinators carry a closed-vocabulary suggestion ("did you mean ...").
     * **A known combinator with the wrong argument shape** (per-node option error)
       returns `{:error, %Finding{}}` located at the declaration site.
@@ -26,9 +25,8 @@ defmodule Workflow.Compiler do
       `return` — return `{:error, %Finding{}}` located at the offending
       declaration (or the workflow itself, for a missing `return`).
 
-  The `workflow/2` macro turns any `{:error, finding}` into a raised, formatted
-  `Workflow.CompileError`, so both channels surface as a located `mix compile`
-  failure.
+  There is one failure channel for every expected authoring error: a tagged
+  finding. `Workflow.Script` formats that finding at the path boundary.
   """
 
   alias Workflow.Compiler.Finding
@@ -55,6 +53,7 @@ defmodule Workflow.Compiler do
   alias Workflow.Node.WhileBudget
   alias Workflow.Predicate
   alias Workflow.Refine.Gate
+  alias Workflow.Refine.Reviewer
   alias Workflow.Refine.ReviewerAdapter
   alias Workflow.RenderText
   alias Workflow.Template
@@ -124,17 +123,25 @@ defmodule Workflow.Compiler do
   # stays inert and never changes execution or idempotency.
   @agent_option_keys [:schema, :retries, :label]
   @default_retries 2
+  @max_agent_retries 5
 
   # A structural safety bound so every loop terminates even if its budget/dryness
   # condition never fires. Authors may lower it with `max_iterations:`.
   @default_max_iterations 1000
+  @max_loop_iterations 1000
+  @max_fanout_width 64
 
-  @spec parse(Macro.t(), Macro.Env.t()) :: {:ok, Tree.t()} | {:error, Finding.t()}
-  def parse(block, env) do
+  @spec compile(String.t(), Macro.t(), Macro.Env.t()) ::
+          {:ok, Tree.t()} | {:error, Finding.t()}
+  def compile(name, block, env) when is_binary(name) do
     with {:ok, nodes} <- build(statements(block), 0, [], MapSet.new(), env, %{}),
          :ok <- validate_tree(nodes, env) do
-      {:ok, %Tree{nodes: nodes}}
+      {:ok, %Tree{name: name, nodes: nodes}}
     end
+  end
+
+  def compile(name, block, env) do
+    {:error, Finding.at(env, block, "workflow name must be a string literal, got: #{Macro.to_string(name)}")}
   end
 
   # A single-statement body is not wrapped in a __block__.
@@ -381,7 +388,7 @@ defmodule Workflow.Compiler do
   defp node({:loop, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:max_iterations, :until, :on_exhausted], form, env),
-         {:ok, cap} <- required_integer(opts, :max_iterations, 1, form, env),
+         {:ok, cap} <- loop_iterations(opts, form, env, required: true),
          {:ok, until_pred} <- optional_predicate(opts, form, env, binding_env),
          {:ok, on_exhausted} <- on_exhausted(opts, form, env),
          {:ok, body} <-
@@ -600,39 +607,36 @@ defmodule Workflow.Compiler do
   defp node({combinator, _meta, _args} = form, _address, env, _binding_env) when combinator in @combinators,
     do: {:error, Finding.at(env, form, "`#{combinator}` was called with invalid arguments")}
 
-  # --- Forbidden-form catalog: everything below raises, so non-determinism and
-  # escape hatches are unrepresentable in a compiled tree. ---
+  # --- Forbidden-form catalog: non-determinism and escape hatches return located
+  # findings and are unrepresentable in a compiled tree. ---
 
   # Anonymous functions destroy total-validation, serialization, and resume.
   defp node({:fn, _meta, _clauses} = form, _address, env, _binding_env) do
-    raise_finding(
-      Finding.at(env, form, "anonymous functions are not part of the workflow vocabulary",
-        hint: "a workflow is inert, serializable data — it cannot capture a closure"
-      )
-    )
+    {:error,
+     Finding.at(env, form, "anonymous functions are not part of the workflow vocabulary",
+       hint: "a workflow is inert, serializable data — it cannot capture a closure"
+     )}
   end
 
   # Any call into an external module — `:rand.*`, `System.*`, `Enum.*`, ... .
   defp node({{:., _, [_module, _fun]}, _meta, _args} = form, _address, env, _binding_env) do
-    raise_finding(
-      Finding.at(env, form, "calls to external modules are not part of the workflow vocabulary",
-        hint: "a workflow must be deterministic and self-contained (no #{callee(form)})"
-      )
-    )
+    {:error,
+     Finding.at(env, form, "calls to external modules are not part of the workflow vocabulary",
+       hint: "a workflow must be deterministic and self-contained (no #{callee(form)})"
+     )}
   end
 
   # An unknown bare call: reject with a closed-vocabulary suggestion.
   defp node({name, _meta, args} = form, _address, env, _binding_env) when is_atom(name) and is_list(args) do
-    raise_finding(Finding.at(env, form, "unknown combinator `#{name}`", hint: suggest(name)))
+    {:error, Finding.at(env, form, "unknown combinator `#{name}`", hint: suggest(name))}
   end
 
   # Anything else — a stray literal, a variable, an operator: outside the vocabulary.
   defp node(form, _address, env, _binding_env) do
-    raise_finding(
-      Finding.at(env, form, "unknown workflow form outside the combinator vocabulary",
-        hint: "expected one of: #{vocabulary()}"
-      )
-    )
+    {:error,
+     Finding.at(env, form, "unknown workflow form outside the combinator vocabulary",
+       hint: "expected one of: #{vocabulary()}"
+     )}
   end
 
   # --- Schema-backed agent options (per-node findings, located at the call) ---
@@ -666,12 +670,6 @@ defmodule Workflow.Compiler do
           {:error, schema_finding(form, env)}
         end
 
-      # A schema module built by `Workflow.Schema.DSL`: resolve the alias and lift
-      # its inert JSON-schema map into the node, so `schema: Bugs` is identical to
-      # passing that map literally — the node still carries plain, serializable data.
-      {:ok, {:__aliases__, _, _} = alias_ast} ->
-        schema_from_module(Macro.expand(alias_ast, env), form, env)
-
       {:ok, _not_a_map_literal} ->
         {:error, schema_finding(form, env)}
 
@@ -679,31 +677,11 @@ defmodule Workflow.Compiler do
         if Keyword.has_key?(kw, :retries) do
           {:error,
            Finding.at(env, form, "`agent` with `retries:` requires a `schema:`",
-             hint: "schema-backed agents fail closed; give schema: %{...} or a schema module"
+             hint: "schema-backed agents fail closed; give schema: %{...}"
            )}
         else
           {:ok, nil}
         end
-    end
-  end
-
-  # Reflect the compiled schema map out of a `schema … do … end` module. The remote
-  # call establishes a compile-time dependency, so the schema module is compiled
-  # before this workflow; a module that is not a schema is a located finding.
-  defp schema_from_module(module, form, env) when is_atom(module) do
-    case Code.ensure_compiled(module) do
-      {:module, ^module} ->
-        if function_exported?(module, :__schema__, 1) do
-          {:ok, module.__schema__(:json)}
-        else
-          {:error,
-           Finding.at(env, form, "`schema:` module #{inspect(module)} is not a schema",
-             hint: "define it with `schema #{inspect(module)} do ... end`"
-           )}
-        end
-
-      {:error, _reason} ->
-        {:error, Finding.at(env, form, "`schema:` references an unknown module #{inspect(module)}")}
     end
   end
 
@@ -718,8 +696,11 @@ defmodule Workflow.Compiler do
       :error ->
         {:ok, @default_retries}
 
-      {:ok, n} when is_integer(n) and n >= 0 ->
+      {:ok, n} when is_integer(n) and n >= 0 and n <= @max_agent_retries ->
         {:ok, n}
+
+      {:ok, n} when is_integer(n) and n > @max_agent_retries ->
+        {:error, Finding.at(env, form, "`agent` retries must be at most #{@max_agent_retries}")}
 
       {:ok, _} ->
         {:error, Finding.at(env, form, "`agent` retries must be a non-negative integer")}
@@ -754,7 +735,7 @@ defmodule Workflow.Compiler do
   end
 
   # Each branch must be a single `agent` turn (the concurrency shape fans out agent
-  # turns). Reuse `node/3` so a malformed branch raises the same located diagnostic
+  # turns). Reuse `node/4` so a malformed branch returns the same located diagnostic
   # it would at top level; then require the result be an %Agent{}.
   defp agent_branches(branches, address, env, binding_env) do
     branches
@@ -983,7 +964,7 @@ defmodule Workflow.Compiler do
 
   # A loop body permits the body vocabulary plus `collect`; loops, fan-out, and
   # `return` are rejected here (keeping the iteration key a single integer), while
-  # closures/external calls still raise via the shared forbidden-form catalog.
+  # closures/external calls return findings through the shared forbidden-form catalog.
   defp body_node({:collect, _meta, [opts]} = form, address, env, _binding_env, _mode),
     do: collect(opts, form, address, env)
 
@@ -1162,10 +1143,22 @@ defmodule Workflow.Compiler do
   end
 
   defp max_iterations(opts, form, env) do
+    loop_iterations(opts, form, env, required: false)
+  end
+
+  defp loop_iterations(opts, form, env, required: required?) do
     case Keyword.fetch(opts, :max_iterations) do
-      :error -> {:ok, @default_max_iterations}
-      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
-      {:ok, _} -> {:error, Finding.at(env, form, "`max_iterations` must be a positive integer")}
+      :error when required? ->
+        {:error, Finding.at(env, form, "a loop requires `max_iterations:`")}
+
+      :error ->
+        {:ok, @default_max_iterations}
+
+      {:ok, n} when is_integer(n) and n > 0 and n <= @max_loop_iterations ->
+        {:ok, n}
+
+      {:ok, _} ->
+        {:error, Finding.at(env, form, "`max_iterations` must be between 1 and #{@max_loop_iterations}")}
     end
   end
 
@@ -1477,7 +1470,14 @@ defmodule Workflow.Compiler do
         retries: 0
       }
 
-      {:ok, %{index: index, name: name, prompt: prompt, adapter: adapter, agent: agent}}
+      {:ok,
+       %Reviewer{
+         index: index,
+         name: name,
+         prompt: prompt,
+         adapter: adapter,
+         agent: agent
+       }}
     end
   end
 
@@ -1908,8 +1908,11 @@ defmodule Workflow.Compiler do
 
   defp fanout_width(opts, form, env, binding_env) do
     case Keyword.fetch(opts, :width) do
-      {:ok, n} when is_integer(n) and n >= 0 ->
+      {:ok, n} when is_integer(n) and n >= 0 and n <= @max_fanout_width ->
         {:ok, n}
+
+      {:ok, n} when is_integer(n) and n > @max_fanout_width ->
+        {:error, Finding.at(env, form, "`fanout` literal width must be at most #{@max_fanout_width}")}
 
       {:ok, {:budget_slices, _meta, [budget_opts]}} ->
         fanout_budget_slices_width(budget_opts, form, env)
@@ -2194,8 +2197,8 @@ defmodule Workflow.Compiler do
   end
 
   # Parse a list of statements that must each be an `agent` turn (shared by fanouts).
-  # Reuses `node/3`, so a closure/external call still raises via the forbidden-form
-  # catalog and any malformed agent surfaces its own located finding.
+  # Reuses `node/4`, so closure/external-call and malformed-agent failures all
+  # surface as located findings.
   defp agent_lane(stmts, address, env, binding_env, combinator) do
     parse_agent_lane(stmts, fn _stage_index -> address end, env, binding_env, combinator)
   end
@@ -2363,6 +2366,4 @@ defmodule Workflow.Compiler do
   defp vocabulary, do: Enum.map_join(@combinators, ", ", &Atom.to_string/1)
 
   defp callee({{:., _, [module, fun]}, _, _}), do: "#{Macro.to_string(module)}.#{fun}"
-
-  defp raise_finding(%Finding{} = finding), do: raise(Workflow.CompileError, Finding.format(finding))
 end

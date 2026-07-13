@@ -47,7 +47,9 @@ Codex proofs remain manual because they require credentials and spend a turn.
 
 ## Workflow Scripts
 
-Author executable workflows as Elixir `.exs` files using `use Workflow`.
+Author executable workflows as Elixir `.exs` files containing exactly one bare,
+top-level `workflow "name" do ... end` declaration. The scheduler parses the
+declaration as inert data; workflow files do not define modules or use macros.
 Agents should validate and mock-run through the MCP tools before live execution:
 
 ```text

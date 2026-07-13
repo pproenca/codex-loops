@@ -100,7 +100,7 @@ defmodule Workflow.Scheduler do
 
   @spec get_run(String.t()) :: {:ok, RunProjection.t()} | {:error, Error.t()}
   def get_run(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
-    if run_id in Journal.run_ids() do
+    if Journal.run_exists?(run_id) do
       {:ok, run_projection(run_id)}
     else
       {:error, Error.run_not_found(run_id)}
@@ -119,14 +119,18 @@ defmodule Workflow.Scheduler do
   """
   @spec get_run_snapshot(String.t()) :: {:ok, run_snapshot()} | {:error, Error.t()}
   def get_run_snapshot(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
-    {:ok, run_snapshot(run_id)}
+    if Journal.run_exists?(run_id) do
+      {:ok, run_snapshot(run_id)}
+    else
+      {:error, Error.run_not_found(run_id)}
+    end
   end
 
   def get_run_snapshot(_run_id), do: {:error, Error.invalid_run_id()}
 
   @spec get_run_events(String.t()) :: {:ok, RunEventsProjection.t()} | {:error, Error.t()}
   def get_run_events(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
-    if run_id in Journal.run_ids() do
+    if Journal.run_exists?(run_id) do
       {:ok, RunEventsProjection.from_events(run_id, Journal.fold(run_id))}
     else
       {:error, Error.run_not_found(run_id)}

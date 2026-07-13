@@ -8,9 +8,11 @@ Codex Loops coordinates local workflow runs for Codex. This language keeps durab
 A durable fact about a workflow run, stored in the run journal and folded to replay, resume, project, or account for the run.
 _Avoid_: realtime event, progress event, PubSub event
 
-**Progress message**:
-A transient PubSub delivery about work happening now, used by live surfaces and subscribers but not authoritative for replay or resume.
-_Avoid_: journal event, durable event
+**Commit notification**:
+A transient PubSub delivery sent only after a journal append succeeds. It tells
+live surfaces to refold the journal; it never carries authority or state that is
+absent from SQLite.
+_Avoid_: progress event, durable event, activity event
 
 **Activity entry**:
 A normalized provider progress item for an agent attempt, such as lifecycle, tool, reasoning, warning, or assistant-output activity.
@@ -19,6 +21,18 @@ _Avoid_: raw Codex event, journal event
 **Agent settlement**:
 The authoritative outcome of a paid agent attempt: committed, rejected, or failed.
 _Avoid_: provider result event, final progress message
+
+**Agent start marker**:
+A durable `agent_started` journal event written before a provider call. A start
+without a matching settlement makes the paid effect unknowable; it is never
+redelivered and resume terminates with `outcome_unknown`.
+_Avoid_: provider request receipt, exactly-once guarantee
+
+**At-most-once provider effect**:
+The scheduler invokes an attempt only after its start marker is durable and never
+redelivers an unsettled attempt. A crash may leave the outcome unknown, but cannot
+make the scheduler silently spend the same attempt again.
+_Avoid_: exactly-once result, backend idempotency guarantee
 
 **Codex event**:
 A raw JSON object emitted by `codex exec --json`; it is provider protocol input before Codex Loops normalizes it.

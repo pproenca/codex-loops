@@ -43,17 +43,17 @@ Use `serve`, `restart`, `logs`, `--server`, `--journal`, `--model`, and
 ## Workflow Example
 
 ```elixir
-defmodule AuditWorkflow do
-  use Workflow
-
-  workflow "audit-workflow" do
-    phase "audit"
-    log "starting audit"
-    agent "Inspect the auth boundary and report the highest-risk issue."
-    return :ok
-  end
+workflow "audit-workflow" do
+  phase "audit"
+  log "starting audit"
+  agent "Inspect the auth boundary and report the highest-risk issue."
+  return :ok
 end
 ```
+
+A workflow file contains exactly one bare, top-level `workflow` declaration.
+The scheduler parses that declaration as data; it does not compile the file,
+execute it, or discover a module through reflection.
 
 Drive it through MCP:
 

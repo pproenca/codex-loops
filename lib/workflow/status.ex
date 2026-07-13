@@ -8,7 +8,11 @@ defmodule Workflow.Status do
 
   alias Workflow.Event
   alias Workflow.Journal
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.OpenFinding
+  alias Workflow.Refine.ReviewerDecision
+  alias Workflow.Refine.RoleFailure
 
   defstruct run_id: nil,
             state: :pending,
@@ -50,21 +54,6 @@ defmodule Workflow.Status do
     |> then(&apply_known_event(event, &1))
   end
 
-  @doc """
-  Apply a transient provider progress message to a run projection.
-
-  Progress messages are not journal events until a subscriber persists them, so
-  this path deliberately avoids raw refs, tool-activity refs, refine refs, and the
-  durable event count. It only lets a connected LiveView show the in-flight
-  activity entry immediately.
-  """
-  @spec apply_progress(Event.t(), t()) :: t()
-  def apply_progress(%Event{type: :agent_activity} = event, %__MODULE__{} = status) do
-    apply_agent_activity(event, status, :progress)
-  end
-
-  def apply_progress(%Event{} = _event, %__MODULE__{} = status), do: status
-
   defp apply_known_event(%Event{type: :run_started, payload: p}, s) do
     tick(%{s | state: :running, tree_name: p.tree_name, tree_version: p.tree_version})
   end
@@ -76,6 +65,31 @@ defmodule Workflow.Status do
 
   defp apply_known_event(%Event{type: :log_emitted, payload: p}, s) do
     tick(%{s | logs: s.logs ++ [p.message]})
+  end
+
+  defp apply_known_event(%Event{type: :agent_started, payload: p}, s) do
+    s = ensure_phase(s)
+
+    agent = %{
+      address: p.address,
+      iteration: p.iteration,
+      label: Map.get(p, :label),
+      prompt: p.prompt,
+      result: nil,
+      usage: %Usage{},
+      attempt: p.attempt,
+      idempotency_key: p.idempotency_key,
+      status: :running,
+      activity: [],
+      phase_id: s.current_phase_id,
+      phase_name: phase_name(s)
+    }
+
+    tick(%{
+      s
+      | agents: upsert_in_flight_agent(s.agents, agent),
+        phases: upsert_in_flight_agent_in_phase(s.phases, s.current_phase_id, agent)
+    })
   end
 
   defp apply_known_event(%Event{type: :agent_committed, payload: p}, s) do
@@ -109,7 +123,7 @@ defmodule Workflow.Status do
 
   defp apply_known_event(%Event{type: :agent_activity} = event, s) do
     event
-    |> apply_agent_activity(s, :journal)
+    |> apply_agent_activity(s)
     |> tick()
   end
 
@@ -167,7 +181,11 @@ defmodule Workflow.Status do
           attempt: p.attempts - 1,
           idempotency_key: existing && Map.get(existing, :idempotency_key),
           status: :failed,
-          activity: merge_activity((existing && existing.activity) || (rejection && rejection.activity), failed_activity),
+          activity:
+            merge_activity(
+              (existing && existing.activity) || (rejection && rejection.activity),
+              failed_activity
+            ),
           phase_id: phase_id,
           phase_name: phase_name
         },
@@ -303,11 +321,30 @@ defmodule Workflow.Status do
     tick(%{s | state: :completed, result: p.value})
   end
 
-  defp apply_known_event(%Event{type: :run_failed, payload: p}, s) do
-    tick(%{s | state: :failed, failure: %{address: nil, iteration: 0, attempts: 0, reason: {:run_crashed, p.reason}}})
+  defp apply_known_event(%Event{type: :run_failed, payload: %{reason: {:outcome_unknown, attempt} = reason}}, s) do
+    s = settle_outcome_unknown_agent(s, attempt)
+
+    tick(%{
+      s
+      | state: :failed,
+        failure: %{
+          address: attempt.address,
+          iteration: attempt.iteration,
+          attempts: attempt.attempt + 1,
+          reason: reason
+        }
+    })
   end
 
-  defp apply_agent_activity(%Event{payload: p}, s, mode) when mode in [:journal, :progress] do
+  defp apply_known_event(%Event{type: :run_failed, payload: p}, s) do
+    tick(%{
+      s
+      | state: :failed,
+        failure: %{address: nil, iteration: 0, attempts: 0, reason: {:run_crashed, p.reason}}
+    })
+  end
+
+  defp apply_agent_activity(%Event{payload: p}, s) do
     s = ensure_phase(s)
     existing = find_agent_attempt(s.agents, p.address, p.iteration, p.attempt)
     rejection = find_rejected_attempt(s.rejected, p.address, p.iteration, p.attempt)
@@ -393,7 +430,7 @@ defmodule Workflow.Status do
 
   defp update_refines(%__MODULE__{} = status, %Event{type: :refine_role_failed, payload: p} = event) do
     upsert_refine(status, p.address, fn refine ->
-      role_failures = merge_role_failures(refine.role_failures, [p])
+      role_failures = merge_role_failures(refine.role_failures, [RoleFailure.from_payload(p)])
 
       refine
       |> Map.put(:role_failures, role_failures)
@@ -494,25 +531,47 @@ defmodule Workflow.Status do
   end
 
   defp apply_refine_payload(refine, payload, state, role_failure_mode) do
+    payload_role_failures =
+      payload
+      |> Map.get(:role_failures, [])
+      |> Enum.map(&RoleFailure.from_payload/1)
+
     role_failures =
       case role_failure_mode do
-        :replace -> Map.get(payload, :role_failures, refine.role_failures)
-        :merge -> merge_role_failures(refine.role_failures, Map.get(payload, :role_failures, []))
+        :replace ->
+          if Map.has_key?(payload, :role_failures),
+            do: payload_role_failures,
+            else: refine.role_failures
+
+        :merge ->
+          merge_role_failures(refine.role_failures, payload_role_failures)
       end
+
+    open_findings =
+      payload
+      |> Map.get(:open_findings, refine.open_findings)
+      |> Enum.map(&OpenFinding.from_payload/1)
+
+    reviewer_decisions =
+      payload
+      |> Map.get(:reviewer_decisions, refine.reviewer_decisions)
+      |> Enum.map(&ReviewerDecision.from_payload/1)
+
+    cold_read = normalize_cold_read(Map.get(payload, :cold_read, refine.cold_read))
 
     refine
     |> Map.put(:state, state)
     |> put_if_present(:converged, payload, :converged)
     |> put_if_present(:rounds, payload, :rounds)
     |> put_if_present(:final_round, payload, :final_round)
-    |> put_if_present(:open_findings, payload, :open_findings)
+    |> Map.put(:open_findings, open_findings)
     |> Map.put(:role_failures, role_failures)
     |> Map.put(
       :failed_reviewers,
       Map.get(payload, :failed_reviewers, failed_reviewers(role_failures))
     )
-    |> put_if_present(:reviewer_decisions, payload, :reviewer_decisions)
-    |> put_if_present(:cold_read, payload, :cold_read)
+    |> Map.put(:reviewer_decisions, reviewer_decisions)
+    |> Map.put(:cold_read, cold_read)
     |> put_if_present(:report_snippets, payload, :report_snippets)
     |> maybe_put_artifact_preview(payload)
     |> refresh_final_open_defects()
@@ -577,17 +636,17 @@ defmodule Workflow.Status do
   end
 
   defp role_failures_as_defects(role_failures) do
-    Enum.map(role_failures, fn failure ->
+    Enum.map(role_failures, fn %RoleFailure{} = failure ->
       %{
         kind: :role_failure,
         role: failure.role,
         role_address: failure.role_address,
-        reviewer: Map.get(failure, :reviewer),
-        reviewer_index: Map.get(failure, :reviewer_index),
+        reviewer: failure.reviewer,
+        reviewer_index: failure.reviewer_index,
         id: "role_failure:#{failure.role}:#{address_path(failure.role_address)}",
         issue: "Refine role failed: #{role_failure_reason_code(failure.reason)}",
         fix:
-          "Re-run or revise with the available successful findings; provider/runtime detail: #{inspect(Map.get(failure, :detail))}",
+          "Re-run or revise with the available successful findings; provider/runtime detail: #{inspect(failure.detail)}",
         reason: failure.reason
       }
     end)
@@ -604,18 +663,34 @@ defmodule Workflow.Status do
   defp role_failure_reason_code(_reason), do: "unknown"
 
   defp merge_role_failures(left, right) do
-    Enum.uniq_by(left ++ right, &{&1.role, &1.role_address, &1.round, Map.get(&1, :reviewer_index)})
+    Enum.uniq_by(left ++ right, fn %RoleFailure{} = failure ->
+      {failure.role, failure.role_address, failure.round, failure.reviewer_index}
+    end)
   end
 
   defp failed_reviewers(role_failures) do
     role_failures
-    |> Enum.map(&Map.get(&1, :reviewer))
+    |> Enum.map(fn %RoleFailure{reviewer: reviewer} -> reviewer end)
     |> Enum.reject(&is_nil/1)
     |> Enum.uniq()
   end
 
+  defp normalize_cold_read(nil), do: nil
+
+  defp normalize_cold_read(%{state: :completed} = cold_read) do
+    cold_read
+    |> Map.update(:open_findings, [], &Enum.map(&1, fn finding -> OpenFinding.from_payload(finding) end))
+    |> Map.update!(:reviewer_decision, &ReviewerDecision.from_payload/1)
+  end
+
+  defp normalize_cold_read(%{state: :failed} = cold_read) do
+    Map.update!(cold_read, :role_failure, &RoleFailure.from_payload/1)
+  end
+
   defp artifact_preview(artifact) when is_binary(artifact) do
-    binary_part(artifact, 0, min(byte_size(artifact), 4096))
+    artifact
+    |> binary_part(0, min(byte_size(artifact), 4096))
+    |> :binary.copy()
   end
 
   defp artifact_preview(artifact), do: inspect(artifact)
@@ -644,6 +719,24 @@ defmodule Workflow.Status do
 
   defp find_agent_attempt(agents, address, iteration, attempt) do
     Enum.find(agents, &agent_attempt_match?(&1, address, iteration, attempt))
+  end
+
+  defp settle_outcome_unknown_agent(%__MODULE__{} = status, %{address: address, iteration: iteration, attempt: attempt}) do
+    settle = &settle_outcome_unknown_agent(&1, address, iteration, attempt)
+
+    %{
+      status
+      | agents: Enum.map(status.agents, settle),
+        phases: Enum.map(status.phases, fn phase -> %{phase | agents: Enum.map(phase.agents, settle)} end)
+    }
+  end
+
+  defp settle_outcome_unknown_agent(agent, address, iteration, attempt) do
+    if agent_attempt_match?(agent, address, iteration, attempt) do
+      Map.put(agent, :status, :failed)
+    else
+      agent
+    end
   end
 
   defp find_rejected_attempt(rejections, address, iteration, attempt) do
@@ -696,19 +789,22 @@ defmodule Workflow.Status do
   end
 
   defp upsert_in_flight_agent(agents, agent) do
-    if Enum.any?(agents, &agent_attempt_match?(&1, agent.address, agent.iteration, agent.attempt)) do
-      Enum.map(agents, fn
-        existing
-        when existing.address == agent.address and existing.iteration == agent.iteration and
-               existing.attempt == agent.attempt ->
-          agent
-
-        existing ->
+    agents =
+      if Enum.any?(agents, &agent_attempt_match?(&1, agent.address, agent.iteration, agent.attempt)) do
+        Enum.map(agents, fn
           existing
-      end)
-    else
-      agents ++ [agent]
-    end
+          when existing.address == agent.address and existing.iteration == agent.iteration and
+                 existing.attempt == agent.attempt ->
+            agent
+
+          existing ->
+            existing
+        end)
+      else
+        [agent | agents]
+      end
+
+    sort_agents(agents)
   end
 
   defp upsert_settled_agent(agents, agent) do
@@ -723,7 +819,8 @@ defmodule Workflow.Status do
 
     agents = Enum.reverse(agents)
 
-    if inserted?, do: agents, else: agents ++ [agent]
+    agents = if inserted?, do: agents, else: [agent | agents]
+    sort_agents(agents)
   end
 
   defp remove_rejected_agent(agents, address, iteration, attempt) do
@@ -784,6 +881,10 @@ defmodule Workflow.Status do
 
   defp maybe_put_activity_index(entry, nil), do: entry
 
+  defp maybe_put_activity_index(%Activity{activity_index: nil} = entry, index), do: Activity.with_index(entry, index)
+
+  defp maybe_put_activity_index(%Activity{} = entry, _index), do: entry
+
   defp maybe_put_activity_index(entry, index) when is_map(entry), do: Map.put_new(entry, :activity_index, index)
 
   defp maybe_put_provider_failure(agent, {:provider_failure, kind, detail}),
@@ -796,14 +897,19 @@ defmodule Workflow.Status do
   defp add_failed_usage(%Usage{} = aggregate, _failed_usage), do: aggregate
 
   defp merge_activity(left, right) do
-    Enum.reduce(List.wrap(right), List.wrap(left), fn entry, acc ->
-      if activity_index(entry) != nil and Enum.any?(acc, &same_activity?(&1, entry)) do
-        acc
-      else
-        acc ++ [entry]
-      end
-    end)
+    left = List.wrap(left)
+
+    additions =
+      right
+      |> List.wrap()
+      |> Enum.reject(fn entry ->
+        activity_index(entry) != nil and Enum.any?(left, &same_activity?(&1, entry))
+      end)
+
+    left ++ additions
   end
+
+  defp sort_agents(agents), do: Enum.sort_by(agents, &{&1.address, &1.iteration, agent_attempt(&1) || 0})
 
   defp activity_index(entry), do: Map.get(entry, :activity_index) || Map.get(entry, "activity_index")
 

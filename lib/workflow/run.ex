@@ -1,7 +1,6 @@
 defmodule Workflow.Run do
   @moduledoc """
-  Public API for executing a workflow. Accepts a compiled `%Workflow.Tree{}` or a
-  module that `use`s `Workflow`.
+  Public API for executing an already compiled `%Workflow.Tree{}`.
 
     * `start/2` — claim the write lease and begin executing asynchronously.
       Returns `{:error, {:already_running, pid}}` if a live writer already holds
@@ -21,10 +20,10 @@ defmodule Workflow.Run do
           | {:budget, non_neg_integer()}
           | {:script_path, String.t()}
 
-  @spec start(Tree.t() | module(), [option()]) ::
+  @spec start(Tree.t(), [option()]) ::
           {:ok, String.t(), pid()} | {:error, term()}
-  def start(workflow, opts) do
-    with {:ok, run_id, pid} <- spawn_writer(workflow, opts) do
+  def start(%Tree{} = tree, opts) do
+    with {:ok, run_id, pid} <- spawn_writer(tree, opts) do
       # The writer holds its lease but idles until told to `:begin`; releasing it
       # here starts the work now that the caller has the pid.
       send(pid, :begin)
@@ -32,9 +31,9 @@ defmodule Workflow.Run do
     end
   end
 
-  @spec run(Tree.t() | module(), [option()]) :: {:ok, String.t()} | {:error, term()}
-  def run(workflow, opts) do
-    with {:ok, run_id, pid} <- spawn_writer(workflow, opts) do
+  @spec run(Tree.t(), [option()]) :: {:ok, String.t()} | {:error, term()}
+  def run(%Tree{} = tree, opts) do
+    with {:ok, run_id, pid} <- spawn_writer(tree, opts) do
       # Monitor *before* the writer runs a single effect: the writer idles until it
       # receives `:begin`, so this ordering guarantees the monitor is in place
       # before any provider call (or a mid-turn crash) can happen. Without it, a
@@ -79,8 +78,6 @@ defmodule Workflow.Run do
       end
     end
   end
-
-  defp spawn_writer(module, opts) when is_atom(module), do: spawn_writer(module.__workflow__(:tree), opts)
 
   defp resolve_provider(opts) do
     opts

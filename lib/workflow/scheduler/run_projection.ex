@@ -7,7 +7,12 @@ defmodule Workflow.Scheduler.RunProjection do
   reads and LiveView renders use the same scheduler snapshot.
   """
 
+  alias Workflow.Idempotency
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.OpenFinding
+  alias Workflow.Refine.ReviewerDecision
+  alias Workflow.Refine.RoleFailure
   alias Workflow.Status
 
   @enforce_keys [
@@ -121,6 +126,13 @@ defmodule Workflow.Scheduler.RunProjection do
       running? ->
         unavailable(:pause_unavailable, "Pause unavailable", "Pause is not implemented.")
 
+      outcome_unknown?(status, events) ->
+        unavailable(
+          :resume_unavailable,
+          "Resume unavailable",
+          "A provider attempt has an unknown outcome; replay could duplicate a paid effect."
+        )
+
       recoverable?(status, events, known?) ->
         %{
           action: :resume,
@@ -181,6 +193,10 @@ defmodule Workflow.Scheduler.RunProjection do
   defp recoverable?(%Status{state: :running}, events, true), do: journaled_script_path?(events)
   defp recoverable?(_status, _events, _known?), do: false
 
+  defp outcome_unknown?(%Status{state: :running}, events), do: Idempotency.unsettled_attempt(events) != :none
+
+  defp outcome_unknown?(%Status{}, _events), do: false
+
   defp incomplete_without_script?(%Status{state: :running}, events), do: not journaled_script_path?(events)
 
   defp incomplete_without_script?(_status, _events), do: false
@@ -227,7 +243,7 @@ defmodule Workflow.Scheduler.RunProjection do
       "usage" => usage_map(agent.usage),
       "idempotencyKey" => idempotency_key_map(agent.idempotency_key),
       "status" => atom_string(agent.status),
-      "activity" => json_value(agent.activity),
+      "activity" => Enum.map(agent.activity, &activity_map/1),
       "phaseId" => Map.get(agent, :phase_id),
       "phaseName" => Map.get(agent, :phase_name)
     }
@@ -244,7 +260,7 @@ defmodule Workflow.Scheduler.RunProjection do
       "prompt" => rejection.prompt,
       "output" => jsonable(rejection.output),
       "reason" => inspect(rejection.reason),
-      "activity" => json_value(rejection.activity),
+      "activity" => Enum.map(rejection.activity, &activity_map/1),
       "phaseId" => Map.get(rejection, :phase_id),
       "phaseName" => Map.get(rejection, :phase_name)
     }
@@ -288,7 +304,7 @@ defmodule Workflow.Scheduler.RunProjection do
     }
   end
 
-  defp open_finding_map(finding) do
+  defp open_finding_map(%OpenFinding{} = finding) do
     %{
       "reviewer" => atom_string(finding.reviewer),
       "reviewerIndex" => finding.reviewer_index,
@@ -314,28 +330,28 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp final_open_defect_map(finding), do: open_finding_map(finding)
 
-  defp role_failure_map(failure) do
+  defp role_failure_map(%RoleFailure{} = failure) do
     %{
       "role" => atom_string(failure.role),
       "roleAddress" => failure.role_address,
       "round" => failure.round,
-      "reviewer" => maybe_atom_string(Map.get(failure, :reviewer)),
-      "reviewerIndex" => Map.get(failure, :reviewer_index),
+      "reviewer" => maybe_atom_string(failure.reviewer),
+      "reviewerIndex" => failure.reviewer_index,
       "attempts" => failure.attempts,
       "reason" => reason_json(failure.reason),
-      "detail" => json_value(Map.get(failure, :detail)),
-      "usage" => usage_map(Map.get(failure, :usage)),
-      "activity" => json_value(Map.get(failure, :activity, []))
+      "detail" => json_value(failure.detail),
+      "usage" => usage_map(failure.usage),
+      "activity" => Enum.map(failure.activity, &activity_map/1)
     }
   end
 
-  defp reviewer_decision_map(decision) do
+  defp reviewer_decision_map(%ReviewerDecision{} = decision) do
     %{
       "reviewer" => atom_string(decision.reviewer),
       "reviewerIndex" => decision.reviewer_index,
       "approved" => decision.approved,
       "clear" => decision.clear,
-      "adapter" => atom_string(Map.get(decision, :adapter)),
+      "adapter" => atom_string(decision.adapter),
       "status" => atom_string(decision.status)
     }
   end
@@ -362,10 +378,13 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp tool_activity_map(activity) do
     %{
-      "entry" => json_value(activity.entry),
+      "entry" => activity_map(activity.entry),
       "rawRef" => raw_ref_map(activity.raw_ref)
     }
   end
+
+  defp activity_map(%Activity{} = activity), do: Activity.to_public_map(activity)
+  defp activity_map(activity), do: json_value(activity)
 
   defp refine_raw_refs_map(raw_refs) do
     %{

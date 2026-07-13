@@ -9,6 +9,7 @@ defmodule Workflow.Template do
 
   alias __MODULE__.Hole
   alias Workflow.Compiler.Finding
+  alias Workflow.JSONPointer
 
   defmodule Hole do
     @moduledoc "A parsed, inert template hole."
@@ -35,7 +36,7 @@ defmodule Workflow.Template do
       {:error,
        Finding.at(env, nil, "template interpolation is not allowed", hint: "use `<%= @name %>` holes over `let` bindings")}
     else
-      scan(source, [], [], [], env)
+      scan(source, [], [], env)
     end
   end
 
@@ -43,23 +44,21 @@ defmodule Workflow.Template do
   def to_parts(%__MODULE__{segments: segments, holes: holes}, bindings) do
     [head | tail] = segments
 
-    holes
-    |> Enum.zip(tail)
-    |> Enum.reduce([{:text, head}], fn {%Hole{} = hole, segment}, parts ->
-      ref = fetch_binding!(hole.assign, bindings)
-      parts ++ [hole_part(hole, binding_part(ref)), {:text, segment}]
-    end)
+    formatted =
+      holes
+      |> Enum.zip(tail)
+      |> Enum.flat_map(fn {%Hole{} = hole, segment} ->
+        ref = fetch_binding!(hole.assign, bindings)
+        [hole_part(hole, binding_part(ref)), {:text, segment}]
+      end)
+
+    [{:text, head} | formatted]
   end
 
-  defp scan(source, segments, holes, assigns, env) do
+  defp scan(source, segments, holes, env) do
     case :binary.match(source, "<%") do
       :nomatch ->
-        {:ok,
-         %__MODULE__{
-           segments: Enum.reverse([source | segments]),
-           holes: Enum.reverse(holes),
-           assigns: Enum.reverse(assigns)
-         }}
+        {:ok, retain_template([source | segments], holes)}
 
       {index, 2} ->
         literal = binary_part(source, 0, index)
@@ -83,13 +82,7 @@ defmodule Workflow.Template do
                   )
 
                 with {:ok, %Hole{} = parsed} <- parse_hole(trim_template_ws(hole), env) do
-                  scan(
-                    remaining,
-                    [literal | segments],
-                    [parsed | holes],
-                    [parsed.assign | assigns],
-                    env
-                  )
+                  scan(remaining, [literal | segments], [parsed | holes], env)
                 end
             end
 
@@ -181,7 +174,7 @@ defmodule Workflow.Template do
 
   defp pointer_arg(source, env) do
     with {:ok, pointer} <- quoted_string(source),
-         :ok <- validate_json_pointer(pointer) do
+         :ok <- JSONPointer.validate(pointer) do
       {:ok, pointer}
     else
       _error ->
@@ -204,20 +197,6 @@ defmodule Workflow.Template do
   defp quoted_string(<<char::utf8, rest::binary>>, acc), do: quoted_string(rest, [<<char::utf8>> | acc])
 
   defp quoted_string(_invalid, _acc), do: :error
-
-  defp validate_json_pointer(""), do: :ok
-
-  defp validate_json_pointer(<<"/", rest::binary>>) do
-    if valid_pointer_escapes?(rest), do: :ok, else: :error
-  end
-
-  defp validate_json_pointer(_other), do: :error
-
-  defp valid_pointer_escapes?(<<>>), do: true
-  defp valid_pointer_escapes?(<<"~0", rest::binary>>), do: valid_pointer_escapes?(rest)
-  defp valid_pointer_escapes?(<<"~1", rest::binary>>), do: valid_pointer_escapes?(rest)
-  defp valid_pointer_escapes?(<<"~", _rest::binary>>), do: false
-  defp valid_pointer_escapes?(<<_char::utf8, rest::binary>>), do: valid_pointer_escapes?(rest)
 
   defp non_negative_integer_arg(source, env) do
     source = trim_template_ws(source)
@@ -296,4 +275,20 @@ defmodule Workflow.Template do
 
   defp hole_part(%Hole{op: :identity}, value_part), do: value_part
   defp hole_part(%Hole{} = hole, value_part), do: {:formatter, hole, value_part}
+
+  defp retain_hole(%Hole{assign: assign, args: %{pointer: pointer}} = hole) do
+    %{hole | assign: :binary.copy(assign), args: %{pointer: :binary.copy(pointer)}}
+  end
+
+  defp retain_hole(%Hole{assign: assign} = hole), do: %{hole | assign: :binary.copy(assign)}
+
+  defp retain_template(segments, holes) do
+    holes = holes |> Enum.reverse() |> Enum.map(&retain_hole/1)
+
+    %__MODULE__{
+      segments: segments |> Enum.reverse() |> Enum.map(&:binary.copy/1),
+      holes: holes,
+      assigns: Enum.map(holes, & &1.assign)
+    }
+  end
 end

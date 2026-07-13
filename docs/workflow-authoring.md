@@ -12,20 +12,22 @@ directly.
 Author executable workflows as Elixir `.exs` files:
 
 ```elixir
-defmodule ExampleWorkflow do
-  use Workflow
-
-  workflow "example" do
-    phase "scout"
-    log "starting"
-    agent "Inspect README.md and summarize the project goal."
-    return :ok
-  end
+workflow "example" do
+  phase "scout"
+  log "starting"
+  agent "Inspect README.md and summarize the project goal."
+  return :ok
 end
 ```
 
 Save repo-local workflows under `.codex/workflows/<name>.exs` unless the caller
 asks for another path.
+
+The file MUST contain exactly one bare, top-level `workflow` declaration. Do not
+wrap it in `defmodule`, write `use Workflow`, import a DSL, or define a schema
+module. The loader reads at most 1 MiB of UTF-8 source, parses it as AST data,
+and never compiles or evaluates the file. The closed vocabulary accepts only
+known atoms; arbitrary source text cannot mint atoms in the scheduler VM.
 
 ## DSL
 
@@ -33,8 +35,8 @@ asks for another path.
 - `phase "title"` records progress.
 - `log "message"` records a journal log.
 - `agent "prompt"` runs one provider turn.
-- `agent "prompt", schema: %{...}, retries: n` requests structured output and
-  fails closed after invalid attempts. For the Codex provider, the schema is
+- `agent "prompt", schema: %{...}, retries: n` requests structured output, where
+  `n` is `0..5`, and fails closed after invalid attempts. For the Codex provider, the schema is
   passed with `--output-schema`.
 - `let :name = agent(...)`, `let :name = synthesize(...)`, and
   `let :name = refine(...)` bind a top-level producer's journaled output for
@@ -75,7 +77,7 @@ loop max_iterations: 3, until: count(:items) >= 2, on_exhausted: :fail do
 end
 ```
 
-`loop max_iterations:` requires a positive integer. It may use either a header
+`loop max_iterations:` requires an integer from `1` through `1000`. It may use either a header
 `until:` predicate or one body-local `until(predicate)`, but not both. A
 body-local `until` stops the loop at that point in the body and skips later body
 nodes for the current iteration; it cannot contain `dry(...)`, and only one
@@ -95,7 +97,9 @@ emit ~P"Reviews: <%= @reviews %>"
 `path_count(:binding, "/json/pointer", max: m)`. It also supports optional
 `bind:`, `max_concurrency:`, and `on_zero: :complete | :fail`. A `bind:` name
 produces the ordered lane result list for later top-level templates and
-predicates. Inside a generic loop, a previous `fanout bind:` can be used by a
+predicates. Requested concurrency is still subject to the runtime-wide cap of
+eight tasks, and resolved fanout width is capped at 64. Inside a generic loop,
+a previous `fanout bind:` can be used by a
 later body-local `until`:
 
 ```elixir
@@ -113,8 +117,16 @@ loop max_iterations: 2 do
 end
 ```
 
-User-authored heterogeneous `lanes([...])` are not available in the shipped
-compiler. Deferred dataflow `gather` and `map` also remain unavailable.
+For heterogeneous work, a literal width may match an explicit list of non-empty
+agent lanes:
+
+```elixir
+fanout width: 2 do
+  lanes([[agent("check the API")], [agent("check the UI"), agent("check the docs")]])
+end
+```
+
+Deferred dataflow `gather` and `map` remain unavailable.
 
 ## Schema-Backed Prompts
 
@@ -124,6 +136,8 @@ such as "return JSON matching this schema." Instead, write the prompt to explain
 what evidence to inspect, what the fields mean, how to judge edge cases, and any
 domain constraints the schema cannot express. The writer validates the final
 provider output locally and retries or fails closed when it does not conform.
+`schema:` accepts a literal JSON Schema map; there is no schema-module or
+schema-sub-DSL form.
 
 Closed predicate examples that match the live parser/evaluator. For `agree`
 over a fanout binding, each lane result must be a structured map, usually from a
@@ -156,47 +170,39 @@ predicates in that same generic loop body.
 Valid text-producing example:
 
 ```elixir
-defmodule DraftImproveWorkflow do
-  use Workflow
+workflow "draft-improve" do
+  let :draft = agent("Draft a concise project update. Return prose.")
 
-  workflow "draft-improve" do
-    let :draft = agent("Draft a concise project update. Return prose.")
+  let :improved = agent(~P"""
+  Improve this draft for clarity and actionability.
 
-    let :improved = agent(~P"""
-    Improve this draft for clarity and actionability.
+  Draft:
+  <%= @draft %>
+  """)
 
-    Draft:
-    <%= @draft %>
-    """)
+  emit(~P"""
+  # Project Update
 
-    emit(~P"""
-    # Project Update
-
-    <%= @improved %>
-    """)
-  end
+  <%= @improved %>
+  """)
 end
 ```
 
 Valid structured-result example:
 
 ```elixir
-defmodule ReviewWorkflow do
-  use Workflow
+workflow "review-loop" do
+  let :final = refine(agent("Draft a migration plan."),
+    reviewers: [
+      reviewer(:spec, "Check the plan against the spec."),
+      reviewer(:runtime, "Check runtime and test risks.")
+    ],
+    revise_with: agent("Revise the plan using the review findings."),
+    until: :unanimous,
+    max_rounds: 1
+  )
 
-  workflow "review-loop" do
-    let :final = refine(agent("Draft a migration plan."),
-      reviewers: [
-        reviewer(:spec, "Check the plan against the spec."),
-        reviewer(:runtime, "Check runtime and test risks.")
-      ],
-      revise_with: agent("Revise the plan using the review findings."),
-      until: :unanimous,
-      max_rounds: 1
-    )
-
-    emit_result(:final)
-  end
+  emit_result(:final)
 end
 ```
 
@@ -233,16 +239,24 @@ workflow_status run_id=<id-live>
 workflow_open_ui run_id=<id-live>
 ```
 
-Use `workflow_open_ui` to watch realtime activity in LiveView. `workflow_status`
-polls the run projection, and `workflow_inspect` returns durable journal
+Use `workflow_open_ui` to watch activity in LiveView. Every activity entry is
+durably appended before the UI is notified. `workflow_status` polls the same
+journal-backed projection, and `workflow_inspect` returns durable journal
 summaries and raw refs.
 
 ## Resume
 
-Resume replays the event log and reuses completed nodes. Failed runs can be
-retried with:
+Resume replays the event log and reuses completed nodes. It can continue after
+settled attempts and deterministic control-flow markers:
 
 ```text
 workflow_resume run_id=<id> provider=codex
 workflow_status run_id=<id>
 ```
+
+Provider effects are at-most-once. The scheduler writes `agent_started` before
+each provider call. If that marker has no matching committed, rejected, or
+failed settlement, the effect may have happened and its outcome is unknowable;
+resume does not redeliver it. Instead the run terminates with
+`outcome_unknown`. Starting a fresh run after inspecting that attempt is an
+explicit operator decision.

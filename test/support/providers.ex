@@ -31,6 +31,13 @@ defmodule Workflow.Test.GateProvider do
 
   alias Workflow.Provider.Usage
 
+  @doc "Releases a writer currently blocked in this test provider."
+  @spec release(pid()) :: :ok
+  def release(writer) when is_pid(writer) do
+    send(writer, :proceed)
+    :ok
+  end
+
   @impl true
   def run_agent(prompt, _schema, _key, opts) do
     sink = Keyword.fetch!(opts, :sink)

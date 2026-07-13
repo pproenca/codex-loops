@@ -1,7 +1,7 @@
 defmodule Workflow.Web.Router do
   @moduledoc """
-  Routes the live read surface. `/runs/:run_id` mounts the scheduler-snapshot
-  LiveView for a run; `run_id` is the only routing input.
+  Routes the scheduler's HTTP surfaces: direct Streamable HTTP MCP at `/mcp`,
+  the JSON API under `/api`, and journal-backed run LiveViews.
   """
   use Phoenix.Router
 
@@ -20,6 +20,8 @@ defmodule Workflow.Web.Router do
     plug(:accepts, ["json"])
     plug(Workflow.Web.SchedulerJSONParser)
   end
+
+  match(:*, "/mcp", Workflow.Web.MCPController, :handle)
 
   scope "/api", Workflow.Web do
     pipe_through(:api)

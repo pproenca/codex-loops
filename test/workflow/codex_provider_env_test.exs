@@ -24,12 +24,14 @@ defmodule Workflow.CodexProviderEnvTest do
 
   setup do
     previous_codex_command = Application.get_env(:codex_loops, :codex_command)
+    previous_codex_binding_path = Application.get_env(:codex_loops, :codex_binding_path)
     previous_codex_model = Application.get_env(:codex_loops, :codex_model)
     previous_codex_execution = Application.get_env(:codex_loops, :codex_execution)
     AppServer.reset()
 
     on_exit(fn ->
       restore_config(:codex_command, previous_codex_command)
+      restore_config(:codex_binding_path, previous_codex_binding_path)
       restore_config(:codex_model, previous_codex_model)
       restore_config(:codex_execution, previous_codex_execution)
       AppServer.reset()
@@ -110,10 +112,79 @@ defmodule Workflow.CodexProviderEnvTest do
     assert Status.of(id).state == :failed
   end
 
-  defp executable_stub(name) do
+  test "a changed Codex binding fails before the app-server executable is opened" do
+    marker = temporary_path("opened")
+    binding_path = temporary_path("binding.json")
+
+    bin =
+      executable_stub(
+        "codex-binding-changed",
+        """
+        #!/bin/sh
+        case "$1" in
+          --version) printf 'codex-cli 2.0.0\n' ;;
+          app-server) touch #{inspect(marker)}; exit 99 ;;
+          *) exit 98 ;;
+        esac
+        """
+      )
+
+    File.write!(binding_path, Jason.encode!(%{"path" => bin, "version" => "codex-cli 1.0.0"}))
+    on_exit(fn -> File.rm(binding_path) end)
+
+    Application.put_env(:codex_loops, :codex_command, {bin, []})
+    Application.put_env(:codex_loops, :codex_binding_path, binding_path)
+
+    id = "codex_binding_changed_#{System.unique_integer([:positive])}"
+
+    assert {:error, {:provider_failure, [0], :unavailable, detail}} =
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: {Codex, []})
+
+    assert detail["message"] == "Codex binding verification failed"
+    assert detail["error"]["code"] == "codex_binding_changed"
+    refute File.exists?(marker)
+  end
+
+  test "an exact Codex binding is verified before the shared app-server opens" do
+    python = System.find_executable("python3")
+    stub = Path.expand("../support/codex_app_server_stub.py", __DIR__)
+    marker = temporary_path("opened")
+    binding_path = temporary_path("binding.json")
+
+    bin =
+      executable_stub(
+        "codex-binding-exact",
+        """
+        #!/bin/sh
+        case "$1" in
+          --version) printf 'codex-cli 1.0.0\n' ;;
+          app-server) touch #{inspect(marker)}; exec #{inspect(python)} #{inspect(stub)} echo ;;
+          *) exit 98 ;;
+        esac
+        """
+      )
+
+    File.write!(binding_path, Jason.encode!(%{"path" => bin, "version" => "codex-cli 1.0.0"}))
+
+    Application.put_env(:codex_loops, :codex_command, {bin, []})
+    Application.put_env(:codex_loops, :codex_binding_path, binding_path)
+
+    id = "codex_binding_exact_#{System.unique_integer([:positive])}"
+
+    assert {:ok, ^id} = Run.run(EchoWorkflow.tree(), run_id: id, provider: {Codex, []})
+    assert File.exists?(marker)
+  end
+
+  defp executable_stub(name, body \\ "#!/bin/sh\nexit 0\n") do
     path = Path.join(System.tmp_dir!(), "#{name}-#{System.unique_integer([:positive])}")
-    File.write!(path, "#!/bin/sh\nexit 0\n")
+    File.write!(path, body)
     File.chmod!(path, 0o755)
+    on_exit(fn -> File.rm(path) end)
+    path
+  end
+
+  defp temporary_path(name) do
+    path = Path.join(System.tmp_dir!(), "#{name}-#{System.unique_integer([:positive])}")
     on_exit(fn -> File.rm(path) end)
     path
   end

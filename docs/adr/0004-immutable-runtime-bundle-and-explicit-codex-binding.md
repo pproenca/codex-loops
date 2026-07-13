@@ -2,8 +2,8 @@
 
 ## Status
 
-Accepted. Supersedes the distribution and runtime-discovery parts of ADR 0003.
-The Rust/Elixir scheduler ownership split from ADR 0003 remains accepted.
+Superseded by ADR 0006. The immutable-bundle and exact-binding requirements were
+carried forward there; the Rust/Elixir ownership split was not.
 
 ## Context
 

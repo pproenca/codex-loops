@@ -463,6 +463,175 @@ defmodule Workflow.CodexProviderTest do
     assert File.read!(starts) == "started\n"
   end
 
+  test "released-thread retention recycles the Port at a hard boundary", ctx do
+    previous = Application.get_env(:codex_loops, :codex_app_server_max_released_threads)
+    starts = tmp("released_thread_recycles")
+    Application.put_env(:codex_loops, :codex_app_server_max_released_threads, 2)
+    AppServer.reset()
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_max_released_threads, previous)
+      File.rm(starts)
+      AppServer.reset()
+    end)
+
+    {Codex, opts} = codex(ctx, "server_count", [starts])
+
+    for iteration <- 1..3 do
+      prompt = "release-#{iteration}"
+      key = %Workflow.IdempotencyKey{run_id: prompt, node_path: [0], iteration: 0}
+      assert {:ok, ^prompt, %Usage{}, _activity} = Codex.run_agent(prompt, nil, key, opts)
+    end
+
+    wait_for_clean_app_server()
+    assert wait_for_file_lines(starts, 2) == ["started", "started"]
+    assert :sys.get_state(AppServer).released_threads == 1
+  end
+
+  test "completed and failed turns release their app-server thread subscriptions", ctx do
+    unsubscribes = tmp("thread_unsubscribes")
+    on_exit(fn -> File.rm(unsubscribes) end)
+    {Codex, opts} = codex(ctx, "unsubscribe_capture", [unsubscribes])
+
+    success_key = %Workflow.IdempotencyKey{run_id: "unsubscribe-success", node_path: [0], iteration: 0}
+    failure_key = %Workflow.IdempotencyKey{run_id: "unsubscribe-failure", node_path: [0], iteration: 0}
+
+    assert {:ok, "ok", %Usage{}, _activity} = Codex.run_agent("ok", nil, success_key, opts)
+
+    assert {:error, {:provider_failure, :backend, %{"message" => "codex backend exploded"}, nil, _activity}} =
+             Codex.run_agent("fail", nil, failure_key, opts)
+
+    assert wait_for_file_lines(unsubscribes, 2) == ["t1", "t2"]
+    wait_for_clean_app_server()
+  end
+
+  test "a request rejected after thread/start but before turn/start releases its subscription", ctx do
+    previous = Application.get_env(:codex_loops, :codex_app_server_max_turn_bytes)
+    unsubscribes = tmp("pre_turn_unsubscribes")
+    Application.put_env(:codex_loops, :codex_app_server_max_turn_bytes, 1)
+    AppServer.reset()
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_max_turn_bytes, previous)
+      File.rm(unsubscribes)
+      AppServer.reset()
+    end)
+
+    key = %Workflow.IdempotencyKey{run_id: "pre-turn-release", node_path: [0], iteration: 0}
+    {Codex, opts} = codex(ctx, "unsubscribe_capture", [unsubscribes])
+
+    assert {:error, {:provider_failure, :backend, detail, nil, []}} =
+             Codex.run_agent("turn/start must not be sent", nil, key, opts)
+
+    assert detail["message"] == "Codex app-server turn notification limit exceeded"
+    assert detail["maxBytes"] == 1
+    assert wait_for_file_lines(unsubscribes, 1) == ["t1"]
+    wait_for_clean_app_server()
+  end
+
+  test "an explicit cancellation after turn acceptance drains and unsubscribes", ctx do
+    unsubscribes = tmp("cancel_unsubscribes")
+    on_exit(fn -> File.rm(unsubscribes) end)
+
+    request = %TurnRequest{
+      prompt: "cancel me",
+      cwd: File.cwd!(),
+      thread_sandbox: "danger-full-access",
+      turn_sandbox: %{"type" => "dangerFullAccess"},
+      command: {ctx.python, [ctx.stub, "timeout_unsubscribe", unsubscribes, "app-server"]},
+      timeout: 1_000
+    }
+
+    assert {:ok, ref, owner} = AppServer.start_turn(request)
+    monitor = Process.monitor(owner)
+    wait_for_turn_acceptance(ref, monitor)
+    AppServer.cancel(ref)
+
+    assert wait_for_file_lines(unsubscribes, 1) == ["t1"]
+    wait_for_clean_app_server()
+    Process.demonitor(monitor, [:flush])
+  end
+
+  test "a turn timeout after thread/start drains and unsubscribes", ctx do
+    unsubscribes = tmp("timeout_unsubscribes")
+    on_exit(fn -> File.rm(unsubscribes) end)
+    key = %Workflow.IdempotencyKey{run_id: "timeout-unsubscribe", node_path: [0], iteration: 0}
+    opts = ctx |> codex("timeout_unsubscribe", [unsubscribes]) |> elem(1) |> Keyword.put(:timeout, 75)
+
+    assert {:error, {:provider_failure, :timeout, _detail, nil, _activity}} =
+             Codex.run_agent("time out", nil, key, opts)
+
+    assert wait_for_file_lines(unsubscribes, 1) == ["t1"]
+    wait_for_clean_app_server()
+  end
+
+  test "unsubscribe errors and timeouts retire only after unrelated live turns settle", ctx do
+    previous_active = Application.get_env(:codex_loops, :codex_app_server_max_active)
+    previous_unsubscribe = Application.get_env(:codex_loops, :codex_app_server_unsubscribe_timeout)
+    Application.put_env(:codex_loops, :codex_app_server_max_active, 2)
+    Application.put_env(:codex_loops, :codex_app_server_unsubscribe_timeout, 40)
+    AppServer.reset()
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_max_active, previous_active)
+      restore_env(:codex_app_server_unsubscribe_timeout, previous_unsubscribe)
+      AppServer.reset()
+    end)
+
+    for mode <- ["unsubscribe_error_concurrent", "unsubscribe_hang_concurrent"] do
+      AppServer.reset()
+      starts = tmp(mode)
+      on_exit(fn -> File.rm(starts) end)
+      {Codex, base_opts} = codex(ctx, mode, [starts])
+      opts = Keyword.put(base_opts, :timeout, 1_000)
+
+      slow_key = %Workflow.IdempotencyKey{run_id: "#{mode}-slow", node_path: [0], iteration: 0}
+      fast_key = %Workflow.IdempotencyKey{run_id: "#{mode}-fast", node_path: [0], iteration: 0}
+      after_key = %Workflow.IdempotencyKey{run_id: "#{mode}-after", node_path: [0], iteration: 0}
+
+      slow = Task.async(fn -> Codex.run_agent("slow", nil, slow_key, opts) end)
+      wait_for_active_codex_request()
+      fast = Task.async(fn -> Codex.run_agent("fast", nil, fast_key, opts) end)
+
+      assert {:ok, "fast", %Usage{}, _activity} = Task.await(fast, 1_000)
+      wait_for_retiring_app_server()
+      assert Enum.any?(:sys.get_state(AppServer).requests, fn {_ref, request} -> request.phase == :running end)
+      assert {:ok, "slow", %Usage{}, _activity} = Task.await(slow, 1_000)
+      wait_for_app_server_status(:stopped)
+
+      assert {:ok, "after", %Usage{}, _activity} = Codex.run_agent("after", nil, after_key, opts)
+      assert length(wait_for_file_lines(starts, 2)) >= 2
+      wait_for_app_server_status(:stopped)
+
+      state = :sys.get_state(AppServer)
+      assert state.requests == %{}
+      assert state.rpc == %{}
+      assert state.releasing == %{}
+      assert state.draining == MapSet.new()
+      assert :queue.len(state.waiting) == 0
+    end
+  end
+
+  test "thread release correlations stay bounded across repeated turns", ctx do
+    starts = tmp("bounded_release_starts")
+    on_exit(fn -> File.rm(starts) end)
+    {Codex, opts} = codex(ctx, "server_count", [starts])
+
+    for iteration <- 1..25 do
+      key = %Workflow.IdempotencyKey{run_id: "release-#{iteration}", node_path: [0], iteration: 0}
+      prompt = "turn-#{iteration}"
+      assert {:ok, ^prompt, %Usage{}, _activity} = Codex.run_agent(prompt, nil, key, opts)
+    end
+
+    wait_for_clean_app_server()
+    state = :sys.get_state(AppServer)
+    assert state.requests == %{}
+    assert state.rpc == %{}
+    assert state.releasing == %{}
+    assert state.draining == MapSet.new()
+    assert File.read!(starts) == "started\n"
+  end
+
   test "cwd, model, approval, sandbox, and schema are sent as per-turn protocol fields", ctx do
     capture = tmp("protocol_capture")
     on_exit(fn -> File.rm(capture) end)
@@ -485,7 +654,7 @@ defmodule Workflow.CodexProviderTest do
     assert thread["model"] == "gpt-test"
     assert thread["approvalPolicy"] == "never"
     assert thread["sandbox"] == "danger-full-access"
-    assert thread["ephemeral"] == false
+    assert thread["ephemeral"] == true
     assert turn["cwd"] == "/tmp/codex-loops-workspace"
     assert turn["model"] == "gpt-test"
     assert turn["approvalPolicy"] == "never"
@@ -566,6 +735,57 @@ defmodule Workflow.CodexProviderTest do
            }
 
     assert Enum.map(activity, & &1.label) == ["Thread started", "Turn started"]
+  end
+
+  test "a turn-start timeout delivers one terminal even if the transport then fails", ctx do
+    request = %TurnRequest{
+      prompt: "timeout while turn/start is pending",
+      cwd: File.cwd!(),
+      thread_sandbox: "danger-full-access",
+      turn_sandbox: %{"type" => "dangerFullAccess"},
+      command: {ctx.python, [ctx.stub, "turn_start_hang", "app-server"]},
+      timeout: 1_000
+    }
+
+    assert {:ok, ref, owner} = AppServer.start_turn(request)
+    monitor = Process.monitor(owner)
+    wait_for_request_phase(ref, :turn_starting)
+
+    assert {:error, :timeout, %{"message" => "codex turn timed out"}} =
+             wait_for_terminal(ref, monitor)
+
+    wait_for_request_phase(ref, :cancelling_start)
+    assert :ok = AppServer.reset()
+    assert :timeout = AppServer.next_event(ref, monitor, 100)
+    Process.demonitor(monitor, [:flush])
+  end
+
+  test "an interactive request before the turn-start response is drained and released once", ctx do
+    lifecycle = tmp("approval_before_turn_response")
+    on_exit(fn -> File.rm(lifecycle) end)
+
+    request = %TurnRequest{
+      prompt: "do not prompt",
+      cwd: File.cwd!(),
+      thread_sandbox: "danger-full-access",
+      turn_sandbox: %{"type" => "dangerFullAccess"},
+      command: {ctx.python, [ctx.stub, "approval_before_turn_response", lifecycle, "app-server"]},
+      timeout: 1_000
+    }
+
+    assert {:ok, ref, owner} = AppServer.start_turn(request)
+    monitor = Process.monitor(owner)
+
+    assert {:error, :backend,
+            %{
+              "message" => "Codex requested unsupported interactive input",
+              "method" => "item/commandExecution/requestApproval"
+            }} = wait_for_terminal(ref, monitor)
+
+    assert wait_for_file_lines(lifecycle, 2) == ["interrupt", "unsubscribe"]
+    wait_for_clean_app_server()
+    assert :timeout = AppServer.next_event(ref, monitor, 100)
+    Process.demonitor(monitor, [:flush])
   end
 
   test "a port crash after turn acceptance leaves the paid attempt outcome unknown", ctx do
@@ -698,12 +918,15 @@ defmodule Workflow.CodexProviderTest do
   test "configured admission and JSON line limits cannot exceed their hard bounds" do
     previous_pending = Application.get_env(:codex_loops, :codex_app_server_max_pending)
     previous_line = Application.get_env(:codex_loops, :codex_app_server_max_line_bytes)
+    previous_released = Application.get_env(:codex_loops, :codex_app_server_max_released_threads)
     Application.put_env(:codex_loops, :codex_app_server_max_pending, 1_000_000)
     Application.put_env(:codex_loops, :codex_app_server_max_line_bytes, 16_000_000)
+    Application.put_env(:codex_loops, :codex_app_server_max_released_threads, 1_000_000)
 
     on_exit(fn ->
       restore_env(:codex_app_server_max_pending, previous_pending)
       restore_env(:codex_app_server_max_line_bytes, previous_line)
+      restore_env(:codex_app_server_max_released_threads, previous_released)
       AppServer.reset()
     end)
 
@@ -712,6 +935,7 @@ defmodule Workflow.CodexProviderTest do
 
     assert state.max_pending == 64
     assert state.max_line_bytes == 1_048_576
+    assert state.max_released_threads == 64
   end
 
   test "an interrupt that never completes recycles the transport before admitting more work", ctx do
@@ -731,8 +955,8 @@ defmodule Workflow.CodexProviderTest do
     first_key = %Workflow.IdempotencyKey{run_id: "ignored-interrupt-1", node_path: [0], iteration: 0}
     second_key = %Workflow.IdempotencyKey{run_id: "ignored-interrupt-2", node_path: [0], iteration: 0}
 
-    first = Task.async(fn -> Codex.run_agent("first", nil, first_key, Keyword.put(base_opts, :timeout, 75)) end)
-    Process.sleep(30)
+    first = Task.async(fn -> Codex.run_agent("first", nil, first_key, Keyword.put(base_opts, :timeout, 300)) end)
+    wait_for_running_codex_request()
     second = Task.async(fn -> Codex.run_agent("second", nil, second_key, Keyword.put(base_opts, :timeout, 1_000)) end)
 
     assert {:error, {:provider_failure, :timeout, _detail, nil, _activity}} = Task.await(first, 1_000)
@@ -777,13 +1001,15 @@ defmodule Workflow.CodexProviderTest do
     assert {:error, {:provider_failure, :timeout, _detail, nil, _activity}} = Task.await(active, 1_000)
   end
 
-  test "explicit cancellation immediately admits the next queued turn", ctx do
+  test "cancellation during thread/start safely recycles before admitting queued work", ctx do
     previous_active = Application.get_env(:codex_loops, :codex_app_server_max_active)
     Application.put_env(:codex_loops, :codex_app_server_max_active, 1)
     AppServer.reset()
+    starts = tmp("thread_start_recycles")
 
     on_exit(fn ->
       restore_env(:codex_app_server_max_active, previous_active)
+      File.rm(starts)
       AppServer.reset()
     end)
 
@@ -792,7 +1018,7 @@ defmodule Workflow.CodexProviderTest do
       cwd: File.cwd!(),
       thread_sandbox: "danger-full-access",
       turn_sandbox: %{"type" => "dangerFullAccess"},
-      command: {ctx.python, [ctx.stub, "thread_hang", "app-server"]},
+      command: {ctx.python, [ctx.stub, "thread_hang", starts, "app-server"]},
       timeout: 1_000
     }
 
@@ -800,10 +1026,14 @@ defmodule Workflow.CodexProviderTest do
     assert {:ok, second_ref, _owner} = AppServer.start_turn(request)
     wait_for_request_phase(first_ref, :thread_start)
     wait_for_request_phase(second_ref, :queued)
+    first_port = :sys.get_state(AppServer).port
 
     AppServer.cancel(first_ref)
 
     wait_for_request_phase(second_ref, :thread_start)
+    second_port = :sys.get_state(AppServer).port
+    refute first_port == second_port
+    assert length(wait_for_file_lines(starts, 2)) >= 2
   end
 
   defp restore_env(key, nil), do: Application.delete_env(:codex_loops, key)
@@ -821,6 +1051,19 @@ defmodule Workflow.CodexProviderTest do
     else
       Process.sleep(5)
       wait_for_active_codex_request(attempts - 1)
+    end
+  end
+
+  defp wait_for_running_codex_request(attempts \\ 200)
+
+  defp wait_for_running_codex_request(0), do: flunk("Codex request never started running")
+
+  defp wait_for_running_codex_request(attempts) do
+    if Enum.any?(:sys.get_state(AppServer).requests, fn {_ref, request} -> request.phase == :running end) do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_running_codex_request(attempts - 1)
     end
   end
 
@@ -849,6 +1092,90 @@ defmodule Workflow.CodexProviderTest do
     else
       Process.sleep(5)
       wait_for_no_codex_requests(attempts - 1)
+    end
+  end
+
+  defp wait_for_turn_acceptance(ref, monitor, attempts \\ 100)
+
+  defp wait_for_turn_acceptance(_ref, _monitor, 0), do: flunk("Codex turn was never accepted")
+
+  defp wait_for_turn_acceptance(ref, monitor, attempts) do
+    case AppServer.next_event(ref, monitor, 100) do
+      :accepted -> :ok
+      {:owner_down, reason} -> flunk("Codex app-server owner exited: #{inspect(reason)}")
+      _event -> wait_for_turn_acceptance(ref, monitor, attempts - 1)
+    end
+  end
+
+  defp wait_for_terminal(ref, monitor, attempts \\ 100)
+
+  defp wait_for_terminal(_ref, _monitor, 0), do: flunk("Codex turn never delivered a terminal result")
+
+  defp wait_for_terminal(ref, monitor, attempts) do
+    case AppServer.next_event(ref, monitor, 100) do
+      {:terminal, terminal} -> terminal
+      {:owner_down, reason} -> flunk("Codex app-server owner exited: #{inspect(reason)}")
+      _event -> wait_for_terminal(ref, monitor, attempts - 1)
+    end
+  end
+
+  defp wait_for_file_lines(path, count, attempts \\ 200)
+
+  defp wait_for_file_lines(path, _count, 0), do: flunk("Timed out waiting for #{path}")
+
+  defp wait_for_file_lines(path, count, attempts) do
+    lines =
+      case File.read(path) do
+        {:ok, contents} -> String.split(contents, "\n", trim: true)
+        {:error, :enoent} -> []
+      end
+
+    if length(lines) >= count do
+      lines
+    else
+      Process.sleep(5)
+      wait_for_file_lines(path, count, attempts - 1)
+    end
+  end
+
+  defp wait_for_clean_app_server(attempts \\ 200)
+
+  defp wait_for_clean_app_server(0), do: flunk("Codex app-server retained completed request state")
+
+  defp wait_for_clean_app_server(attempts) do
+    state = :sys.get_state(AppServer)
+
+    if state.requests == %{} and state.rpc == %{} and state.releasing == %{} and state.draining == MapSet.new() do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_clean_app_server(attempts - 1)
+    end
+  end
+
+  defp wait_for_retiring_app_server(attempts \\ 200)
+
+  defp wait_for_retiring_app_server(0), do: flunk("Codex app-server never entered retirement")
+
+  defp wait_for_retiring_app_server(attempts) do
+    if :sys.get_state(AppServer).retiring do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_retiring_app_server(attempts - 1)
+    end
+  end
+
+  defp wait_for_app_server_status(status, attempts \\ 200)
+
+  defp wait_for_app_server_status(status, 0), do: flunk("Codex app-server never reached #{status}")
+
+  defp wait_for_app_server_status(status, attempts) do
+    if :sys.get_state(AppServer).port_status == status do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_app_server_status(status, attempts - 1)
     end
   end
 end

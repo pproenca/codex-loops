@@ -33,6 +33,11 @@ def response(request_id, result):
     emit({"id": request_id, "result": result})
 
 
+def append_line(path, value):
+    with open(path, "a", encoding="utf-8") as output_file:
+        output_file.write(f"{value}\n")
+
+
 def next_id(kind):
     global THREAD_NUMBER, TURN_NUMBER
     with COUNTER_LOCK:
@@ -145,7 +150,7 @@ def output_for(prompt, params):
 def run_turn(thread_id, turn_id, params):
     prompt = prompt_text(params)
 
-    if MODE in ("timeout", "ignore_interrupt"):
+    if MODE in ("timeout", "timeout_unsubscribe", "ignore_interrupt"):
         return
     if MODE == "crash_after_accept":
         time.sleep(0.02)
@@ -172,6 +177,9 @@ def run_turn(thread_id, turn_id, params):
         return
     if MODE == "concurrent":
         time.sleep(0.05)
+    if MODE in ("unsubscribe_error_concurrent", "unsubscribe_hang_concurrent"):
+        if prompt == "slow":
+            time.sleep(0.2)
 
     if MODE in ("error_nonretry", "error_retry"):
         emit(
@@ -253,7 +261,9 @@ def run_turn(thread_id, turn_id, params):
     else:
         assistant(thread_id, turn_id, output_for(prompt, params))
 
-    if MODE.startswith("turn_failed"):
+    if MODE.startswith("turn_failed") or (
+        MODE == "unsubscribe_capture" and prompt == "fail"
+    ):
         terminal(
             thread_id,
             turn_id,
@@ -282,9 +292,13 @@ def run_turn(thread_id, turn_id, params):
 
 
 def main():
-    if MODE == "server_count" and EXTRAS:
-        with open(EXTRAS[0], "a", encoding="utf-8") as count_file:
-            count_file.write("started\n")
+    if MODE in (
+        "server_count",
+        "thread_hang",
+        "unsubscribe_error_concurrent",
+        "unsubscribe_hang_concurrent",
+    ) and EXTRAS:
+        append_line(EXTRAS[0], "started")
 
     for line in sys.stdin:
         message = json.loads(line)
@@ -312,19 +326,58 @@ def main():
             if MODE == "turn_start_hang":
                 continue
             turn_id = next_id("turn")
+
+            if MODE == "approval_before_turn_response":
+                emit(
+                    {
+                        "id": 990_001,
+                        "method": "item/commandExecution/requestApproval",
+                        "params": {
+                            "threadId": params["threadId"],
+                            "itemId": "command-before-turn-response",
+                            "command": "echo must-be-cancelled",
+                        },
+                    }
+                )
+                time.sleep(0.05)
+
             response(
                 request_id,
                 {"turn": {"id": turn_id, "status": "inProgress", "error": None}},
             )
-            threading.Thread(
-                target=run_turn,
-                args=(params["threadId"], turn_id, params),
-                daemon=True,
-            ).start()
+
+            if MODE != "approval_before_turn_response":
+                threading.Thread(
+                    target=run_turn,
+                    args=(params["threadId"], turn_id, params),
+                    daemon=True,
+                ).start()
         elif method == "turn/interrupt" and request_id is not None:
             if MODE != "ignore_interrupt":
+                if MODE == "approval_before_turn_response" and EXTRAS:
+                    append_line(EXTRAS[0], "interrupt")
                 response(request_id, {})
                 terminal(params["threadId"], params["turnId"], "interrupted")
+        elif method == "thread/unsubscribe" and request_id is not None:
+            if MODE in ("unsubscribe_capture", "timeout_unsubscribe") and EXTRAS:
+                append_line(EXTRAS[0], params["threadId"])
+            if MODE == "approval_before_turn_response" and EXTRAS:
+                append_line(EXTRAS[0], "unsubscribe")
+
+            if MODE == "unsubscribe_error_concurrent":
+                emit(
+                    {
+                        "id": request_id,
+                        "error": {
+                            "code": -32603,
+                            "message": "unsubscribe failed",
+                        },
+                    }
+                )
+            elif MODE == "unsubscribe_hang_concurrent":
+                continue
+            else:
+                response(request_id, {"status": "unsubscribed"})
         elif request_id is not None and method is not None:
             emit(
                 {

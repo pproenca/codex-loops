@@ -17,20 +17,24 @@ if config_env() == :prod do
     end
 
   host = System.get_env("CODEX_LOOPS_HOST", "127.0.0.1")
+  normalized_host = String.downcase(host)
 
   ip =
     case :inet.parse_address(String.to_charlist(host)) do
-      {:ok, parsed_ip} ->
+      {:ok, {127, _b, _c, _d} = parsed_ip} ->
         parsed_ip
 
-      {:error, _reason} when host == "localhost" ->
+      {:ok, {0, 0, 0, 0, 0, 0, 0, 1} = parsed_ip} ->
+        parsed_ip
+
+      {:error, _reason} when normalized_host == "localhost" ->
         {127, 0, 0, 1}
 
-      {:error, _reason} ->
+      _non_loopback_or_invalid ->
         raise """
         invalid CODEX_LOOPS_HOST=#{inspect(host)}
 
-        Expected an IPv4/IPv6 address or localhost.
+        Expected localhost or a numeric IPv4/IPv6 loopback address.
         """
     end
 
@@ -43,14 +47,24 @@ if config_env() == :prod do
   if server? do
     codex_bin =
       System.get_env("CODEX_LOOPS_CODEX_BIN") ||
-        raise "CODEX_LOOPS_CODEX_BIN must be injected by the Codex Loops control plane"
+        raise "CODEX_LOOPS_CODEX_BIN must be injected by the Codex Loops managed service"
 
     with :absolute <- Path.type(codex_bin),
          {:ok, %File.Stat{type: :regular, mode: mode}} <- File.stat(codex_bin),
          true <- Bitwise.band(mode, 0o111) != 0 do
-      config :codex_loops, codex_command: {codex_bin, ["provider-exec"]}
+      config :codex_loops, codex_command: {codex_bin, []}
     else
       _ -> raise "CODEX_LOOPS_CODEX_BIN must name an absolute executable file"
+    end
+
+    binding_path =
+      System.get_env("CODEX_LOOPS_BINDING_PATH") ||
+        raise "CODEX_LOOPS_BINDING_PATH must be injected by the Codex Loops managed service"
+
+    if Path.type(binding_path) == :absolute do
+      config :codex_loops, codex_binding_path: binding_path
+    else
+      raise "CODEX_LOOPS_BINDING_PATH must name an absolute path"
     end
   end
 

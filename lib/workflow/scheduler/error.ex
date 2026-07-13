@@ -66,9 +66,10 @@ defmodule Workflow.Scheduler.Error do
 
   @spec invalid_run_id() :: t()
   def invalid_run_id do
-    new(400, "scheduler.run.invalid_run_id", "Run id must be a non-empty string.", %{
+    new(400, "scheduler.run.invalid_run_id", "Run id must be route-safe and at most 128 bytes.", %{
       field: "run_id",
-      expected: "route_safe_non_empty_string"
+      expected: "route_safe_string_max_128_bytes",
+      max_bytes: 128
     })
   end
 
@@ -89,6 +90,16 @@ defmodule Workflow.Scheduler.Error do
 
   @spec run_start_failed(term()) :: t()
   def run_start_failed(_reason), do: new(503, "scheduler.run.start_failed", "Workflow run could not be started.")
+
+  @spec run_capacity_exceeded(pos_integer()) :: t()
+  def run_capacity_exceeded(max_active_runs) do
+    new(
+      503,
+      "scheduler.run.capacity_exceeded",
+      "The scheduler is already running the maximum number of workflows.",
+      %{max_active_runs: max_active_runs}
+    )
+  end
 
   @spec missing_script_path() :: t()
   def missing_script_path do

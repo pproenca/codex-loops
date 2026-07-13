@@ -1,8 +1,9 @@
 import Config
 
-# The live read surface: a Phoenix endpoint whose only job is to serve the
-# journal-projecting LiveView. It carries no run state; PubSub is the post-commit
-# bus the LiveView subscribes to, and every render is a pure fold of the journal.
+# The shared Phoenix boundary serves Streamable HTTP MCP, the scheduler API,
+# static assets, and the journal-projecting LiveView. It carries no run state;
+# PubSub is the post-commit bus the LiveView subscribes to, and every render is
+# a pure fold of the journal.
 config :codex_loops, Workflow.Web.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,

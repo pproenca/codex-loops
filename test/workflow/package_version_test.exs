@@ -12,17 +12,12 @@ defmodule Workflow.PackageVersionTest do
       |> File.read!()
       |> Jason.decode!()
 
-    cargo_manifest = File.read!(Path.join(@repo_root, "native/codex-loops/Cargo.toml"))
-    cargo_lock = File.read!(Path.join(@repo_root, "native/codex-loops/Cargo.lock"))
-
     assert Mix.Project.config()[:version] == version
     assert Workflow.PackageVersion.version() == version
     assert manifest["version"] == version
-    assert cargo_manifest =~ ~s(version = "#{version}")
-    assert cargo_lock =~ ~s(name = "codex-loops"\nversion = "#{version}")
   end
 
-  test "version sync updates both Cargo manifest and lockfile package entries" do
+  test "version sync updates the plugin manifest" do
     root =
       Path.join(
         System.tmp_dir!(),
@@ -32,13 +27,10 @@ defmodule Workflow.PackageVersionTest do
     on_exit(fn -> File.rm_rf(root) end)
     File.mkdir_p!(Path.join(root, "scripts"))
     File.mkdir_p!(Path.join(root, "plugins/codex-loops/.codex-plugin"))
-    File.mkdir_p!(Path.join(root, "native/codex-loops"))
 
     for path <- [
           "scripts/sync-package-version.exs",
-          "plugins/codex-loops/.codex-plugin/plugin.json",
-          "native/codex-loops/Cargo.toml",
-          "native/codex-loops/Cargo.lock"
+          "plugins/codex-loops/.codex-plugin/plugin.json"
         ] do
       File.cp!(Path.join(@repo_root, path), Path.join(root, path))
     end
@@ -48,11 +40,13 @@ defmodule Workflow.PackageVersionTest do
     assert {"", 0} =
              System.cmd("elixir", ["scripts/sync-package-version.exs", "--write"], cd: root)
 
-    assert File.read!(Path.join(root, "native/codex-loops/Cargo.toml")) =~
-             ~s(version = "9.8.7")
+    manifest =
+      root
+      |> Path.join("plugins/codex-loops/.codex-plugin/plugin.json")
+      |> File.read!()
+      |> Jason.decode!()
 
-    assert File.read!(Path.join(root, "native/codex-loops/Cargo.lock")) =~
-             ~s(name = "codex-loops"\nversion = "9.8.7")
+    assert manifest["version"] == "9.8.7"
 
     assert {"", 0} =
              System.cmd("elixir", ["scripts/sync-package-version.exs", "--check"], cd: root)

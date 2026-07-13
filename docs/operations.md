@@ -11,198 +11,145 @@ MINISIGN_SECRET_KEY=/path/to/key make dist
 
 `make build` installs missing dependencies and compiles with warnings as
 errors. `make ci` executes every deterministic validation stage end-to-end.
-`make dev-bundle` assembles the native command, scheduler release, and skill
-under `_build/dev-bundle/`. `make dist` signs and packages that exact layout
-under `_build/dist/`; it deliberately fails without a minisign key. The archive's
-`install` command performs the versioned installation and atomic `current` link
-switch. `.tool-versions` pins the known-good local
-toolchain for `mise`/`asdf`.
+`make dev-bundle` assembles the release overlay, the complete OTP release, and
+the skill under `_build/dev-bundle/`. `make dist` signs and packages that exact
+layout under `_build/dist/`; it deliberately fails without a minisign key.
+`.tool-versions` pins the known-good Erlang, Elixir, and frontend toolchain for
+`mise`/`asdf`. Rust and Cargo are not part of the build.
 
-After `make ci`, maintainers can perform a separate authenticated dogfood run
-from a fresh Codex thread when a release changes the real-provider boundary.
+After `make ci`, maintainers may perform a separate authenticated dogfood run
+from a fresh Codex task when a release changes the real-provider boundary.
 
-## CI Gate
+## One-Action Installation
 
-```sh
-make ci
-```
-
-Run this before handing off any code change. It includes Styler formatting,
-dependency audits, warnings-as-errors compilation, Credo, Sobelow, spec lint,
-the complete scheduler/API/UI Elixir suite, Dialyzer, PhoenixTest Playwright
-browser E2E, plugin-package validation, packaged release/API/CLI proof, and
-packaged MCP transport plus explicit-scheduler workflow-conformance proof.
-
-The narrower internal targets remain available for diagnosing a failing stage,
-but contributors should not need to compose the validation graph themselves.
-
-Sobelow runs against the explicit Phoenix router at medium-or-higher confidence
-and intentionally ignores `Config.HTTPS` and `Config.CSP`. Codex Loops defaults
-the packaged scheduler to loopback (`CODEX_LOOPS_HOST=127.0.0.1`) as a local
-product surface, and it does not yet ship an asset pipeline CSP policy.
-Non-loopback binding is an explicit deployment choice and must be paired with
-the host's normal access controls, such as a trusted reverse proxy, tunnel,
-firewall, or private network boundary.
-
-Low-confidence Sobelow categories are intentionally kept out of `make ci` to
-avoid turning the ordinary handoff loop into a noisy
-static-analysis triage queue. Review them out-of-band when changing the Phoenix
-surface, security-sensitive runtime configuration, or dependency stack, and
-promote any concrete finding into code-level skips or a stricter gate. The
-journal's local term decoding uses `binary_to_term(..., [:safe])`; the two
-remaining Sobelow term-decoding reports are skipped at the function level with
-that rationale in code.
-
-## Static Analysis
-
-Dialyzer is part of `make ci`. Its checked-in ignore baseline remains explicit,
-and any new type warning fails the gate.
-
-## Browser E2E
-
-As part of `make ci`, the browser stage installs the Playwright Node package and
-Chromium under the local `assets` workspace, starts the test endpoint on a local
-port, and runs tests tagged `:browser_e2e`. These tests use mock providers and
-isolated test state; they do not spend live Codex provider turns.
-
-The browser stack is PhoenixTest plus PhoenixTest Playwright. Recode, Green,
-Wallaby, Hound, Selenium, Cypress, and non-Elixir browser frameworks are not
-part of the selected gate for this rollout.
-
-## Bundle Proof
-
-The bundle-proof stage of `make ci` builds the complete runtime and exercises the scheduler readiness path. The
-proof starts the packaged Phoenix scheduler release on `127.0.0.1:47125` by
-default with an isolated SQLite journal, then:
+GitHub release archives are the canonical artifacts. Verify the checksum and
+minisign signature, unpack the archive matching the host target, enter its root,
+and run:
 
 ```sh
-GET  /api/health
-POST /api/workflows/validate
-POST /api/runs
-GET  /api/runs/<id>
-GET  /api/runs/<id>/events
-GET  /runs/<id>
+./install
 ```
 
-The API checks are polling contracts: `/api/runs/<id>` is the run projection
-snapshot, and `/api/runs/<id>/events` is a durable journal-summary inspection
-surface. The `/runs/<id>` route is the LiveView surface used for realtime
-rendering. Provider activity is appended to SQLite before LiveView receives a
-post-commit refresh notification, so browser reconnects and polling reads see
-the same projection.
-
-## Live Provider Diagnostic
-
-The credential-free CI gate uses a schema-aware Codex subprocess fixture to
-prove streaming and provider protocol behavior deterministically. Maintainers
-may separately run the live-provider proof when changing the Codex boundary;
-it requires authentication and spends one real turn, so it is intentionally
-not part of normal CI.
-
-Provider subprocesses have a finite 30-minute default deadline and 16 MiB input
-and stdout limits. Workflow concurrency is capped system-wide at eight tasks and
-fanout width at 64, even when a script asks for more. Agent retries are capped at
-five and loop iterations at 1000. A limit breach is a typed provider or run
-failure, never an infinite wait or unbounded accumulation.
-
-## Manual CLI Run
-
-For a normal interactive run, assemble and bind the bundle once, then launch a
-workflow. No runtime-discovery environment variables or raw HTTP calls are
-required:
+PATH selects the Codex CLI by default. To preserve a particular shim or command
+path, select it explicitly:
 
 ```sh
-make dev-bundle
-_build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
-_build/dev-bundle/bin/codex-loops run .codex/workflows/codex_answer.exs --open
+./install --codex /absolute/path/to/codex
 ```
 
-The CLI defaults to `127.0.0.1:47125`, the standard user journal, a generated
-run ID, and the live `codex` provider. `run` validates before starting, prints
-the LiveView URL even without `--open`, and starts the managed scheduler when
-the local endpoint is not already healthy.
+That single action completes the installation:
+
+1. Copies the bundle to `~/.local/share/codex-loops/<version>` and atomically
+   activates `~/.local/share/codex-loops/current`.
+2. Exposes `~/.local/bin/codex-loops`.
+3. Probes and persists the selected Codex CLI's lexical absolute path and exact
+   version.
+4. Installs the bundled skill under the user skill root.
+5. Installs and starts the login service.
+6. Waits for the exact scheduler health contract.
+7. Registers `http://127.0.0.1:47125/mcp` through `codex mcp add`.
+
+The corresponding reconciliation command is:
 
 ```sh
-_build/dev-bundle/bin/codex-loops stop
+codex-loops install [--codex /absolute/path/to/codex] [--check|--dry-run] [--json]
 ```
 
-Use `_build/dev-bundle/bin/codex-loops serve` when you want to
-start or customize the scheduler separately. Configuration is progressively
-disclosed through `serve --host`, `--port`, `--journal`, and `--model`, or
-`run --provider`, `--run-id`, and `--server`.
-The native control plane is the single scheduler owner. It supervises the
-foreground OTP release from a per-user runtime directory under
-`~/.codex/workflows/runtime`; MCP sessions never own or stop that supervisor.
-Unexpected scheduler exits are restarted with bounded backoff while the native
-supervisor retains its owner lock. Startup is transactional: a scheduler is
-terminated if owner metadata cannot be committed. Stable supervisor metadata
-remains addressable while a child is in crash backoff, and a failed initial
-health deadline stops the supervisor so a corrected command can retry
-immediately. A healthy HTTP endpoint is only reported as managed-ready while
-that durable owner lock is still held; a scheduler that outlives its supervisor
-returns a typed ownership error instead of a successful start result.
+`codex-loops check` and `codex-loops dry-run` are aliases for the non-mutating
+modes. Installation is idempotent. A missing, moved, or version-changed Codex
+binding fails closed; rerun installation intentionally to accept the new
+binding.
 
-An explicit `--server URL` or `CODEX_LOOPS_SCHEDULER_URL` selects an externally
-managed scheduler. The client requires a compatible `scheduler.v1` health
-envelope but does not create local owner state, autostart it, or control its
-lifecycle and logs. Status, inspection, UI, and pathless resume use the HTTP
-seam directly. Validation, start, or resume with a workflow path additionally
-requires `CODEX_LOOPS_SHARED_FILESYSTEM=1` when the URL is remote; set that only
-when the client and scheduler resolve the same absolute paths.
+## User Service Lifecycle
 
-Power-user lifecycle controls use the same host/port identity and honor
-`CODEX_LOOPS_SCHEDULER_HOST` plus `CODEX_LOOPS_SCHEDULER_PORT`:
+The installed OTP release is one login service:
+
+- macOS: `~/Library/LaunchAgents/com.pproenca.codex-loops.plist`
+- Linux: `~/.config/systemd/user/codex-loops.service`
+
+Use the release-overlay command for normal operations:
 
 ```sh
-./native/codex-loops/target/release/codex-loops logs --lines 500
-./native/codex-loops/target/release/codex-loops restart --journal /tmp/isolated.sqlite
-./native/codex-loops/target/release/codex-loops serve --foreground
-./native/codex-loops/target/release/codex-loops stop --force
+codex-loops serve
+codex-loops stop
+codex-loops restart
+codex-loops status --json
+codex-loops doctor --json
 ```
 
-`--foreground` is intended for an external process manager and exits on
-SIGINT/SIGTERM. `--force` is a recovery tool for an orphaned scheduler: it
-requires valid owner metadata and verifies the recorded process belongs to the
-packaged release before signaling it. It does not kill arbitrary services on a
-configured port. Ordinary stop preserves verified orphan metadata and returns
-`scheduler_orphaned` with explicit force-stop guidance.
+`serve` enables and starts the service, then returns after the scheduler passes
+its exact health check. `stop` and `restart` operate through `launchd` or
+`systemd --user`. `status` reports both service-definition state and scheduler
+health. The service manager owns the release's foreground
+`libexec/scheduler/bin/agent_loops start` process; the release does not daemonize
+itself.
 
-`restart` inherits the active bind address, journal path, and model unless a
-replacement flag or environment value is supplied. This prevents a restart of
-a custom-journal scheduler from silently switching to the default database.
-Concurrent cold starts coordinate through an owner token: exactly one caller
-reports `started: true`, compatible callers join with `started: false`, and a
-caller requesting a different bind, journal, or model receives the typed
-`scheduler_configuration_conflict` error without changing the winner.
-Timeout cleanup is owner-token scoped, so a short-timeout joiner cannot stop a
-slower lock winner.
+Codex and other MCP clients are HTTP clients only. Connecting, disconnecting,
+or restarting Codex never starts or stops the service. Do not launch a second
+scheduler or app-server for a normal workflow run.
 
-Power-user reads use the same scheduler HTTP seam:
+For a deliberately isolated development proof, stop or avoid the installed
+service and start the packaged release directly with a distinct port and
+journal:
 
 ```sh
-_build/dev-bundle/bin/codex-loops status RUN_ID --json
-_build/dev-bundle/bin/codex-loops inspect RUN_ID --json
-_build/dev-bundle/bin/codex-loops resume RUN_ID --provider codex
-_build/dev-bundle/bin/codex-loops open RUN_ID
-_build/dev-bundle/bin/codex-loops doctor --json
+CODEX_LOOPS_SERVER=1 \
+CODEX_LOOPS_HOST=127.0.0.1 \
+CODEX_LOOPS_PORT=47126 \
+CODEX_LOOPS_JOURNAL_PATH=/tmp/codex-loops-proof.sqlite \
+CODEX_LOOPS_CODEX_BIN="$(command -v codex)" \
+CODEX_LOOPS_BINDING_PATH="$HOME/.codex/workflows/codex-binding.json" \
+_build/prod/rel/agent_loops/bin/agent_loops start
 ```
+
+This is a foreground process for the current shell, not a retained product
+mode. The direct release does not infer installation state: the Codex binary
+and installer-generated binding file must both be supplied as absolute paths.
+
+## Streamable HTTP MCP
+
+Installation registers:
+
+```sh
+codex mcp add codex-loops --url http://127.0.0.1:47125/mcp
+```
+
+The Phoenix endpoint serves MCP, the scheduler JSON API, and LiveView in the
+same OTP application. There is no stdio command, MCP client binary, or loopback
+HTTP adapter.
+
+Each `POST /mcp` body is bounded to 1 MiB. Protocol `2025-03-26` accepts a
+single JSON-RPC message or a non-empty batch; later protocols accept only one
+message. Batch output contains one response per request and omits notification
+and client-response entries. Notifications, client responses, and batches made
+only from those entries receive `202` with an empty body. `GET` and `DELETE`
+return `405`; the endpoint has no SSE stream and issues no `Mcp-Session-Id`.
+Across MCP, API, and LiveView, `Host` must be loopback. `Origin` may be absent
+for non-browser clients but must be loopback when present.
+
+Supported protocol versions are `2025-03-26`, `2025-06-18`, and
+`2025-11-25`. Calls after initialization validate `MCP-Protocol-Version`; a
+missing header uses the compatibility default `2025-03-26`. Supported methods
+are `initialize`, `ping`, `tools/list`, and `tools/call`.
+
+To inspect the registered transport:
+
+```sh
+codex mcp get codex-loops --json
+```
+
+It must report a `streamable_http` transport with the exact loopback `/mcp` URL
+and no bearer-token or header indirection.
 
 ## Manual MCP Smoke
 
-Build the scheduler and native control plane first:
-
-```sh
-make dev-bundle
-_build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
-_build/dev-bundle/bin/codex-loops serve
-```
-
-Then, from a restarted Codex task, run a non-mutating
-workflow through the MCP tools:
+The archive installer starts the service. If an operator stopped it, run
+`codex-loops serve`, then open a fresh Codex task and use an absolute workspace
+root with every relative workflow path:
 
 ```text
-workflow_validate script_path=.codex/workflows/example.exs
-workflow_start    script_path=.codex/workflows/example.exs run_id=run_example provider=mock
+workflow_validate script_path=.codex/workflows/example.exs workspace_root=/absolute/path/to/repo
+workflow_start    script_path=.codex/workflows/example.exs workspace_root=/absolute/path/to/repo run_id=run_example provider=mock
 workflow_status   run_id=run_example
 workflow_inspect  run_id=run_example
 workflow_open_ui  run_id=run_example
@@ -211,129 +158,87 @@ workflow_open_ui  run_id=run_example
 Only run the live smoke after the mock path is clean:
 
 ```text
-workflow_start  script_path=.codex/workflows/example.exs run_id=run_example_live provider=codex
-workflow_status run_id=run_example_live
+workflow_start   script_path=.codex/workflows/example.exs workspace_root=/absolute/path/to/repo run_id=run_example_live provider=codex
+workflow_status  run_id=run_example_live
 workflow_open_ui run_id=run_example_live
 workflow_inspect run_id=run_example_live
 ```
 
-Use `workflow_open_ui` to watch live provider activity. `workflow_status` polls
-the latest run projection, and `workflow_inspect` returns durable journal
-summaries plus raw refs; neither MCP tool is a realtime stream.
+`workflow_status` polls the current run projection. `workflow_inspect` returns
+durable journal summaries and ordered raw refs. `workflow_open_ui` returns the
+Phoenix LiveView URL for realtime watching.
 
-## Retained Sandbox Runs
+## Workspace Paths
 
-`sandbox-run` is the inspectable end-to-end MCP surface. It creates a detached
-worktree from the repository's current `HEAD`, so the workflow script must be
-committed. The run uses its own home, scheduler owner/runtime directory, journal,
-and reserved loopback port. The scheduler receives a config-isolated
-`CODEX_HOME` under the retained artifact; the MCP subprocess receives neither a
-Codex home nor provider authentication. With `provider=mock`, the isolated home
-stays empty and the source Codex home is not inspected. With `provider=codex` on
-Unix, a non-empty inherited `CODEX_ACCESS_TOKEN` takes precedence and is passed
-only to a live, token-authenticated sandbox scheduler. Mock and file-authenticated
-sandboxes remove any ambient token. Otherwise,
-when the source `CODEX_HOME/auth.json` is a regular file or a symlink to one, the
-isolated home exposes only that credential file through a symlink; it does not
-expose or copy user `config.toml`, plugins, or instruction files. This is a live
-read/write capability, not a credential copy: a Codex credential refresh through
-the isolated path can update the source `auth.json`, and deleting the retained
-artifact removes only the link, not the source credential. Codex namespaces
-keyring credentials by the canonical `CODEX_HOME`, so a keyring-only source
-credential is not visible from the isolated home; use file authentication or
-`CODEX_ACCESS_TOKEN` for a config-isolated sandbox.
-For `provider=codex`, the isolated scheduler's app-server uses an ephemeral
-thread, a workspace-write policy, and the detached worktree as its explicit
-working directory.
+Streamable HTTP has no client process working directory or implicit filesystem
+root. Therefore:
+
+- a relative MCP `script_path` requires an explicit `workspace_root`;
+- `workspace_root` must be an absolute existing directory;
+- the scheduler joins and canonicalizes both paths and rejects containment or
+  symlink escapes;
+- an absolute `script_path` may omit `workspace_root`; and
+- a supplied root is persisted in `run_started`, restored on resume, and used
+  as the Codex turn working directory.
+
+Clients must not assume MCP `roots` or the installed bundle directory supplies
+the workflow workspace.
+
+## CI Gate
 
 ```sh
-codex-loops sandbox-run .codex/workflows/smoke.exs --provider mock --json
-codex-loops sandbox-run .codex/workflows/smoke.exs --provider codex --open
+make ci
 ```
 
-The retained directory contains:
+Run this before handing off a code change. It includes formatting, dependency
+audits, warnings-as-errors compilation, Credo, Sobelow, spec lint, the complete
+scheduler/API/UI Elixir suite, Dialyzer, PhoenixTest Playwright browser E2E,
+plugin-package validation, packaged release/API/service proof, installer proof,
+and direct Streamable HTTP MCP conformance.
+
+Sobelow runs against the explicit Phoenix router at medium-or-higher confidence
+and intentionally ignores `Config.HTTPS` and `Config.CSP`. The scheduler binds
+only to loopback, and runtime configuration rejects wildcard or non-loopback
+addresses.
+
+Dialyzer is part of `make ci`; new type warnings fail the gate. Browser E2E uses
+mock providers and isolated test state and does not spend live Codex turns.
+
+## Bundle And Provider Proofs
+
+The bundle proof starts the packaged release with an isolated journal and
+checks:
 
 ```text
-manifest.json
-mcp-transcript.jsonl
-initialize.json
-tools.json
-validation.json
-start.json
-status.json
-inspect.json
-open-ui.json
-journal.sqlite
-runtime/scheduler.log
-git-status.txt
-git-diff.patch
-repo/
+GET  /api/health
+POST /api/workflows/validate
+POST /api/runs
+GET  /api/runs/<id>
+GET  /api/runs/<id>/events
+GET  /runs/<id>
+POST /mcp
 ```
 
-`sandbox-clean ARTIFACT_DIR` stops the isolated scheduler and removes the Git
-worktree plus artifacts. It returns `sandbox_worktree_dirty` if the worktree has
-changes; use `--force` only after inspecting or preserving them. An explicit
-`--output DIRECTORY` selects a different retained artifact location.
+The API status endpoint is a polling projection, the events endpoint is a
+durable journal-summary surface, and `/runs/<id>` is LiveView. Provider activity
+is appended to SQLite before PubSub sends a post-commit refresh signal, so
+polling, reconnecting LiveView clients, and MCP inspect observe the same facts.
 
-## Normal Workflow Run
+Credential-free CI uses a schema-aware Codex subprocess fixture. The live
+provider proof remains manual because it requires authentication and spends a
+real turn. The scheduler lazily starts one shared Codex app-server only when the
+first live attempt needs it; health checks and mock runs do not start Codex.
 
-Agents should use the registered Codex Loops MCP tools after starting the
-scheduler explicitly with `codex-loops serve`, `codex-loops run`, or an external
-process manager. The MCP adapter health-checks the configured endpoint and talks
-only to its HTTP API; it does not create owner state or manage processes. The
-Elixir/Phoenix scheduler owns the shared Codex app-server, workflow workers,
-PubSub/LiveView, and SQLite journal.
+## Resume And Unknown Outcomes
 
-Relative MCP script paths resolve against the client's workspace root, so the
-usual `.codex/workflows/<name>.exs` form works independently of the installed
-bundle directory. Clients without MCP roots may set
-`CODEX_LOOPS_WORKSPACE_ROOT` explicitly. Sending workflow paths to a non-local
-scheduler is rejected unless `CODEX_LOOPS_SHARED_FILESYSTEM=1` confirms that the
-same absolute paths exist on both sides.
+Provider effects are at-most-once. Immediately before a provider call, the run
+writer commits `agent_started`. A matching `agent_committed`,
+`agent_attempt_rejected`, or `agent_failed` settles it.
 
-```text
-workflow_validate script_path=.codex/workflows/example.exs
-workflow_start    script_path=.codex/workflows/example.exs run_id=run_example provider=mock
-workflow_status   run_id=run_example
-workflow_inspect  run_id=run_example
-```
-
-Run live only after the mock gate is clean:
-
-```text
-workflow_start  script_path=.codex/workflows/example.exs run_id=run_example_live provider=codex
-workflow_status run_id=run_example_live
-workflow_open_ui run_id=run_example_live
-```
-
-## Status, Inspect, Open UI, Resume
-
-```text
-workflow_status  run_id=<id>
-workflow_inspect run_id=<id>
-workflow_open_ui run_id=<id>
-workflow_resume  run_id=<id> provider=codex
-```
-
-`workflow_status` is a polling snapshot of the current run projection.
-`workflow_inspect` is a durable inspection view with `journalEvents` summaries
-and ordered `rawRefs`; it does not expose raw Codex JSONL by default.
-`workflow_open_ui` returns the Phoenix LiveView URL. LiveView refolds the
-journal after the post-commit PubSub signal `{:journal_committed, run_id, seq}`;
-the signal carries no event snapshot, and LiveView does not maintain a separate
-transient progress state.
-
-Resume reuses committed turns and continues after settled rejected attempts.
-It never redelivers an attempt whose durable `agent_started` marker has no
-matching settlement. Such a run terminates with `outcome_unknown`, because the
-provider may already have completed or charged and Codex Loops cannot infer the
-result. Inspect the attempt and start a new run only as an explicit operator
-decision.
-
-## Failure Parsing
-
-MCP tools return scheduler success envelopes as structured content. Scheduler
-typed errors remain typed and are returned as MCP errors.
+Resume reuses settled work. It never redelivers an attempt whose durable start
+has no settlement, because the provider may already have completed or charged.
+Such a run terminates with `outcome_unknown`; inspect it and start a new run
+only as an explicit operator decision.
 
 ## Runtime Artifacts
 
@@ -342,4 +247,7 @@ Treat these as generated runtime artifacts:
 - `~/.codex/workflows/runs_1.sqlite`
 - `~/.codex/workflows/runs_1.sqlite-wal`
 - `~/.codex/workflows/runs_1.sqlite-shm`
+- `~/.codex/workflows/codex-binding.json`
+- `~/.local/share/codex-loops/`
+- the user LaunchAgent or `systemd --user` unit
 - `_build/prod/rel/agent_loops/`

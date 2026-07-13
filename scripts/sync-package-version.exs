@@ -2,11 +2,7 @@ defmodule SyncPackageVersion do
   @moduledoc false
 
   @manifest_path "plugins/codex-loops/.codex-plugin/plugin.json"
-  @cargo_manifest_path "native/codex-loops/Cargo.toml"
-  @cargo_lock_path "native/codex-loops/Cargo.lock"
   @version_pattern ~r/"version"\s*:\s*"[^"]+"/
-  @cargo_version_pattern ~r/^version\s*=\s*"[^"]+"/m
-  @cargo_lock_version_pattern ~r/(\[\[package\]\]\nname = "codex-loops"\nversion = ")[^"]+("\n)/
 
   def run(["--check"]) do
     case stale_files() do
@@ -52,20 +48,6 @@ defmodule SyncPackageVersion do
          @version_pattern,
          ~s("version": "#{version}"),
          "top-level version field"
-       )},
-      {@cargo_manifest_path,
-       replace_version!(
-         @cargo_manifest_path,
-         @cargo_version_pattern,
-         ~s(version = "#{version}"),
-         "package version field"
-       )},
-      {@cargo_lock_path,
-       replace_version!(
-         @cargo_lock_path,
-         @cargo_lock_version_pattern,
-         fn _match, prefix, suffix -> prefix <> version <> suffix end,
-         "codex-loops package version"
        )}
     ]
   end

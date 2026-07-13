@@ -1,12 +1,9 @@
 # Third-Party Notices
 
-The skill-only plugin contains no executable runtime or third-party code. The
-separately distributed native control plane includes this direct MCP dependency:
+The skill-only plugin contains no executable runtime or third-party code.
 
-| Package | Version | License | Source |
-| --- | --- | --- | --- |
-| `rmcp` | `2.2.0` | `Apache-2.0` | <https://github.com/modelcontextprotocol/rust-sdk> |
-
-The packaged Elixir release contains the workflow scheduler; the `rmcp`-based
-Rust binary contains only CLI, MCP transport, HTTP adapter, and local lifecycle
-coordination behavior.
+The separately distributed Codex Loops artifact is one Elixir/OTP release. Its
+Streamable HTTP MCP endpoint is implemented inside the scheduler and has no
+Rust SDK or separately distributed MCP client dependency. Runtime dependency
+licenses and source locations are governed by the canonical release's dependency
+manifests and upstream license terms.

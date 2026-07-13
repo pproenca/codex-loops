@@ -20,7 +20,7 @@ defmodule Workflow.Web.SchedulerBoundaryTest do
       })
 
     conn =
-      build_conn()
+      loopback_conn()
       |> put_req_header("accept", "application/json")
       |> put_req_header("content-type", "text/plain")
       |> post("/api/runs?#{query}", "")
@@ -41,7 +41,7 @@ defmodule Workflow.Web.SchedulerBoundaryTest do
 
   test "mutation requests without a content type are rejected before routing" do
     conn =
-      build_conn()
+      loopback_conn()
       |> put_req_header("accept", "application/json")
       |> post("/api/runs/unknown/resume", nil)
 
@@ -65,7 +65,7 @@ defmodule Workflow.Web.SchedulerBoundaryTest do
       })
 
     conn =
-      build_conn()
+      loopback_conn()
       |> put_req_header("accept", "application/json")
       |> put_req_header("content-type", "application/json")
       |> post(
@@ -84,7 +84,7 @@ defmodule Workflow.Web.SchedulerBoundaryTest do
     body = Jason.encode!(%{"padding" => String.duplicate("x", @max_body_bytes)})
 
     conn =
-      build_conn()
+      loopback_conn()
       |> put_req_header("accept", "application/json")
       |> put_req_header("content-type", "application/json")
       |> post("/api/runs", body)
@@ -116,4 +116,8 @@ defmodule Workflow.Web.SchedulerBoundaryTest do
   end
 
   defp unique_id(prefix), do: "#{prefix}_#{System.unique_integer([:positive])}"
+
+  defp loopback_conn do
+    %{build_conn() | host: "localhost", port: 47_125}
+  end
 end

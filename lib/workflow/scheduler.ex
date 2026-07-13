@@ -27,6 +27,7 @@ defmodule Workflow.Scheduler do
   alias Workflow.Status
 
   @app :codex_loops
+  @max_run_id_bytes 128
   @supported_providers ["mock", "codex"]
 
   @spec health() :: {:ok, Health.t()} | {:error, Error.t()}
@@ -68,6 +69,9 @@ defmodule Workflow.Scheduler do
         {:error, {:already_running, _pid}} ->
           {:error, Error.run_already_running(run_id)}
 
+        {:error, {:capacity_exceeded, max_active_runs}} ->
+          {:error, Error.run_capacity_exceeded(max_active_runs)}
+
         {:error, reason} ->
           {:error, Error.run_start_failed(reason)}
       end
@@ -105,6 +109,9 @@ defmodule Workflow.Scheduler do
         {:error, {:already_running, _pid}} ->
           {:error, Error.run_already_running(run_id)}
 
+        {:error, {:capacity_exceeded, max_active_runs}} ->
+          {:error, Error.run_capacity_exceeded(max_active_runs)}
+
         {:error, reason} ->
           {:error, Error.run_start_failed(reason)}
       end
@@ -117,15 +124,15 @@ defmodule Workflow.Scheduler do
   def resume_run(_run_id, _params), do: {:error, Error.invalid_run_id()}
 
   @spec get_run(String.t()) :: {:ok, RunProjection.t()} | {:error, Error.t()}
-  def get_run(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
-    if Journal.run_exists?(run_id) do
-      {:ok, run_projection(run_id)}
-    else
-      {:error, Error.run_not_found(run_id)}
+  def get_run(run_id) do
+    with {:ok, run_id} <- route_safe_run_id(run_id) do
+      if Journal.run_exists?(run_id) do
+        {:ok, run_projection(run_id)}
+      else
+        {:error, Error.run_not_found(run_id)}
+      end
     end
   end
-
-  def get_run(_run_id), do: {:error, Error.invalid_run_id()}
 
   @doc """
   Returns the complete scheduler-owned read model for one render.
@@ -134,33 +141,39 @@ defmodule Workflow.Scheduler do
   projection are derived from those events plus the current runtime lease fact.
   """
   @spec get_run_snapshot(String.t()) :: {:ok, Snapshot.t()} | {:error, Error.t()}
-  def get_run_snapshot(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
-    if Journal.run_exists?(run_id) do
-      {:ok, run_snapshot(run_id)}
-    else
-      {:error, Error.run_not_found(run_id)}
+  def get_run_snapshot(run_id) do
+    with {:ok, run_id} <- route_safe_run_id(run_id) do
+      if Journal.run_exists?(run_id) do
+        {:ok, run_snapshot(run_id)}
+      else
+        {:error, Error.run_not_found(run_id)}
+      end
     end
   end
-
-  def get_run_snapshot(_run_id), do: {:error, Error.invalid_run_id()}
 
   @spec get_run_events(String.t()) :: {:ok, RunEventsProjection.t()} | {:error, Error.t()}
-  def get_run_events(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
-    if Journal.run_exists?(run_id) do
-      {:ok, RunEventsProjection.from_events(run_id, Journal.fold(run_id))}
-    else
-      {:error, Error.run_not_found(run_id)}
+  def get_run_events(run_id) do
+    with {:ok, run_id} <- route_safe_run_id(run_id) do
+      if Journal.run_exists?(run_id) do
+        {:ok, RunEventsProjection.from_events(run_id, Journal.fold(run_id))}
+      else
+        {:error, Error.run_not_found(run_id)}
+      end
     end
   end
 
-  def get_run_events(_run_id), do: {:error, Error.invalid_run_id()}
-
   @spec validate_workflow(map()) :: {:ok, Validation.t()} | {:error, Error.t()}
-  def validate_workflow(%{"script_path" => path}) when is_binary(path), do: validate_workflow_path(path)
-
-  def validate_workflow(%{script_path: path}) when is_binary(path), do: validate_workflow_path(path)
-
-  def validate_workflow(%{"script" => path}) when is_binary(path), do: validate_workflow_path(path)
+  def validate_workflow(params) when is_map(params) do
+    with {:ok, path} <- run_script_path(params),
+         {:ok, requested_workspace_root} <- run_workspace_root(params),
+         {:ok, workspace} <- Workspace.resolve(path, requested_workspace_root),
+         {:ok, tree} <- Script.load_tree(workspace.script_path) do
+      {:ok, Validation.from_tree(tree, workspace.script_path)}
+    else
+      {:error, %Workflow.Script.Error{} = error} -> {:error, Error.workflow_validation(error)}
+      {:error, %Error{} = error} -> {:error, error}
+    end
+  end
 
   def validate_workflow(_params), do: {:error, Error.missing_script_path()}
 
@@ -251,18 +264,20 @@ defmodule Workflow.Scheduler do
   defp run_id(params) do
     case fetch_param(params, :run_id, "run_id") do
       :missing -> {:ok, RunOptions.generate_run_id()}
-      {:ok, id} when is_binary(id) and byte_size(id) > 0 -> route_safe_run_id(id)
-      {:ok, _invalid} -> {:error, Error.invalid_run_id()}
+      {:ok, id} -> route_safe_run_id(id)
     end
   end
 
-  defp route_safe_run_id(id) do
-    if Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, id) do
+  defp route_safe_run_id(id) when is_binary(id) do
+    if byte_size(id) in 1..@max_run_id_bytes and String.valid?(id) and
+         Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, id) do
       {:ok, :binary.copy(id)}
     else
       {:error, Error.invalid_run_id()}
     end
   end
+
+  defp route_safe_run_id(_id), do: {:error, Error.invalid_run_id()}
 
   defp ensure_run_exists(run_id) do
     if Journal.run_exists?(run_id) do
@@ -330,13 +345,6 @@ defmodule Workflow.Scheduler do
       Map.has_key?(params, string_key) -> {:ok, Map.fetch!(params, string_key)}
       Map.has_key?(params, atom_key) -> {:ok, Map.fetch!(params, atom_key)}
       true -> :missing
-    end
-  end
-
-  defp validate_workflow_path(path) do
-    case Script.load_tree(path) do
-      {:ok, tree} -> {:ok, Validation.from_tree(tree, path)}
-      {:error, error} -> {:error, Error.workflow_validation(error)}
     end
   end
 

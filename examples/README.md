@@ -36,23 +36,21 @@ decision without changing its scope and review contract.
 From an installed or development bundle, validate through MCP before execution:
 
 ```text
-workflow_validate script_path=examples/change_risk_report.exs
+workflow_validate script_path=examples/change_risk_report.exs workspace_root=/absolute/path/to/repo
 ```
 
 For a normal live run against the current workspace:
 
-```sh
-_build/dev-bundle/bin/codex-loops run \
-  examples/change_risk_report.exs \
-  --provider codex --open
+```text
+workflow_start   script_path=examples/change_risk_report.exs workspace_root=/absolute/path/to/repo run_id=change-risk provider=codex
+workflow_open_ui run_id=change-risk
 ```
 
 `change_risk_report.exs` and `current_diff_refine.exs` intentionally consume
-staged, unstaged, and untracked work. `sandbox-run` starts from a clean detached
-worktree, so using it for either workflow would erase the input they are meant to
-inspect. Run them in the reviewed working tree. `sandbox-run` is appropriate for
-ADR repair or incident triage only when their required briefs and evidence are
-already present in the sandbox's committed `HEAD`.
+staged, unstaged, and untracked work, so pass the reviewed working tree as their
+explicit absolute `workspace_root`. When isolation is required, create and
+prepare a separate worktree explicitly, then pass that worktree as the root;
+Codex Loops continues to use the one installed scheduler service.
 
 The ADR workflow requires `docs/adr/PROPOSED.md`. Incident triage requires one
 repository-root `INCIDENT.md` that points to local captured evidence. The

@@ -158,6 +158,8 @@ defmodule Workflow.JournalPersistenceTest do
       Workflow.Run.Registry,
       Workflow.PubSub,
       Workflow.TaskSupervisor,
+      Workflow.RuntimeSupervisor,
+      Workflow.Provider.Codex.AppServer,
       Workflow.Run.Supervisor,
       Workflow.Web.Endpoint
     ]

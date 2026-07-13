@@ -97,9 +97,9 @@ emit ~P"Reviews: <%= @reviews %>"
 `path_count(:binding, "/json/pointer", max: m)`. It also supports optional
 `bind:`, `max_concurrency:`, and `on_zero: :complete | :fail`. A `bind:` name
 produces the ordered lane result list for later top-level templates and
-predicates. Requested concurrency is still subject to the runtime-wide cap of
-eight tasks, and resolved fanout width is capped at 64. Inside a generic loop,
-a previous `fanout bind:` can be used by a
+predicates. Requested concurrency is still subject to the per-run cap of eight
+tasks, the scheduler admits at most eight active runs, and resolved fanout width
+is capped at 64. Inside a generic loop, a previous `fanout bind:` can be used by a
 later body-local `until`:
 
 ```elixir
@@ -225,16 +225,22 @@ forms remain unavailable.
 ## Testing Gate
 
 ```text
-workflow_validate script_path=.codex/workflows/<name>.exs
-workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo
+workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock
 workflow_status   run_id=<id>
 workflow_inspect  run_id=<id>
 ```
 
+Relative MCP script paths require an explicit absolute existing
+`workspace_root`. An absolute `script_path` may omit it.
+
+Explicit run ids use the route-safe ASCII vocabulary
+`[A-Za-z0-9][A-Za-z0-9_.:-]*` and are limited to 128 bytes.
+
 Only run the live provider after validation and mock testing:
 
 ```text
-workflow_start  script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
+workflow_start  script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id-live> provider=codex
 workflow_status run_id=<id-live>
 workflow_open_ui run_id=<id-live>
 ```

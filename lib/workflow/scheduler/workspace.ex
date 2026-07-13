@@ -23,7 +23,8 @@ defmodule Workflow.Scheduler.Workspace do
   @spec resolve(String.t(), String.t() | nil) ::
           {:ok, t()} | {:error, Error.t() | ScriptError.t()}
   def resolve(script_path, requested_root) when is_binary(script_path) do
-    with {:ok, canonical_script} <- canonical_file(script_path),
+    with {:ok, {script_path, requested_root}} <- locate_script(script_path, requested_root),
+         {:ok, canonical_script} <- canonical_file(script_path),
          {:ok, canonical_root} <- workspace_root(requested_root, canonical_script),
          :ok <- require_containment(canonical_script, canonical_root) do
       {:ok,
@@ -35,6 +36,31 @@ defmodule Workflow.Scheduler.Workspace do
   end
 
   def resolve(script_path, _requested_root), do: {:error, Error.invalid_workspace_script(script_path, :invalid_path)}
+
+  defp locate_script(path, requested_root) do
+    case Path.type(path) do
+      :absolute ->
+        {:ok, {path, requested_root}}
+
+      :relative ->
+        locate_relative_script(path, requested_root)
+
+      :volumerelative ->
+        {:error, Error.invalid_workspace_script(path, :volume_relative)}
+    end
+  end
+
+  defp locate_relative_script(path, root) when is_binary(root) and root != "" do
+    if Path.type(root) == :absolute do
+      {:ok, {Path.expand(path, root), root}}
+    else
+      {:error, Error.invalid_workspace_root(root, :not_absolute)}
+    end
+  end
+
+  defp locate_relative_script(_path, root) do
+    {:error, Error.invalid_workspace_root(root, :required_for_relative_script)}
+  end
 
   defp workspace_root(nil, canonical_script) do
     canonical_script

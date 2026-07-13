@@ -63,9 +63,10 @@ defmodule Workflow.Provider.Codex do
   end
 
   @doc """
-  The production app-server command. The native composition root configures an
-  absolute executable plus a trusted prefix (currently `provider-exec`); the
-  provider appends only `app-server` and sends per-turn settings over JSON-RPC.
+  The production app-server command. Installation configures the scheduler with
+  the exact bound Codex executable; the provider appends only `app-server` and
+  sends per-turn settings over JSON-RPC. The shared app-server owner revalidates
+  the persisted path and version immediately before opening the process.
   """
   @spec default_command() :: {String.t(), [String.t()]}
   def default_command do

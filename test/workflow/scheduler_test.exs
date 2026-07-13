@@ -15,6 +15,7 @@ defmodule Workflow.SchedulerTest do
   defp write_script(source, prefix \\ "wf") do
     dir = Path.join(System.tmp_dir!(), "agent_loops_scheduler_test")
     File.mkdir_p!(dir)
+    dir = File.cd!(dir, &File.cwd!/0)
     path = Path.join(dir, "#{prefix}_#{System.unique_integer([:positive])}.exs")
     File.write!(path, source)
     path
@@ -118,6 +119,7 @@ defmodule Workflow.SchedulerTest do
   defp syntax_error_workflow do
     dir = Path.join(System.tmp_dir!(), "agent_loops_scheduler_test")
     File.mkdir_p!(dir)
+    dir = File.cd!(dir, &File.cwd!/0)
     path = Path.join(dir, "wf_syntax_#{System.unique_integer([:positive])}.exs")
 
     File.write!(path, """
@@ -607,8 +609,36 @@ defmodule Workflow.SchedulerTest do
 
     assert error.status == 400
     assert error.code == "scheduler.run.invalid_run_id"
-    assert error.details == %{field: "run_id", expected: "route_safe_non_empty_string"}
+
+    assert error.details == %{
+             field: "run_id",
+             expected: "route_safe_string_max_128_bytes",
+             max_bytes: 128
+           }
+
     refute "foo/bar" in Journal.run_ids()
+  end
+
+  test "every scheduler run-id boundary rejects values over 128 bytes" do
+    path = demo_workflow()
+    overlong = String.duplicate("r", 129)
+
+    results = [
+      Scheduler.start_run(%{"script_path" => path, "provider" => "mock", "run_id" => overlong}),
+      Scheduler.resume_run(overlong),
+      Scheduler.get_run(overlong),
+      Scheduler.get_run_snapshot(overlong),
+      Scheduler.get_run_events(overlong)
+    ]
+
+    for result <- results do
+      assert {:error, %Scheduler.Error{} = error} = result
+      assert error.status == 400
+      assert error.code == "scheduler.run.invalid_run_id"
+      assert error.details.max_bytes == 128
+    end
+
+    refute overlong in Journal.run_ids()
   end
 
   test "get_run returns a typed error for unknown run ids" do

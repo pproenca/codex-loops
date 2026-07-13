@@ -16,6 +16,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   defp write_script(source, prefix \\ "wf") do
     dir = Path.join(System.tmp_dir!(), "agent_loops_scheduler_api_test")
     File.mkdir_p!(dir)
+    dir = File.cd!(dir, &File.cwd!/0)
     path = Path.join(dir, "#{prefix}_#{System.unique_integer([:positive])}.exs")
     File.write!(path, source)
     path
@@ -79,6 +80,7 @@ defmodule Workflow.Web.SchedulerAPITest do
   defp syntax_error_workflow do
     dir = Path.join(System.tmp_dir!(), "agent_loops_scheduler_api_test")
     File.mkdir_p!(dir)
+    dir = File.cd!(dir, &File.cwd!/0)
     path = Path.join(dir, "wf_syntax_#{System.unique_integer([:positive])}.exs")
 
     File.write!(path, """
@@ -123,7 +125,9 @@ defmodule Workflow.Web.SchedulerAPITest do
   end
 
   defp json_conn do
-    put_req_header(build_conn(), "accept", "application/json")
+    build_conn()
+    |> then(&%{&1 | host: "localhost", port: 47_125})
+    |> put_req_header("accept", "application/json")
   end
 
   defp post_json(conn, path, body) do
@@ -685,10 +689,11 @@ defmodule Workflow.Web.SchedulerAPITest do
              "api_version" => "scheduler.v1",
              "error" => %{
                "code" => "scheduler.run.invalid_run_id",
-               "message" => "Run id must be a non-empty string.",
+               "message" => "Run id must be route-safe and at most 128 bytes.",
                "details" => %{
                  "field" => "run_id",
-                 "expected" => "route_safe_non_empty_string"
+                 "expected" => "route_safe_string_max_128_bytes",
+                 "max_bytes" => 128
                }
              }
            } = json_response(conn, 400)
@@ -855,15 +860,50 @@ defmodule Workflow.Web.SchedulerAPITest do
              "api_version" => "scheduler.v1",
              "error" => %{
                "code" => "scheduler.run.invalid_run_id",
-               "message" => "Run id must be a non-empty string.",
+               "message" => "Run id must be route-safe and at most 128 bytes.",
                "details" => %{
                  "field" => "run_id",
-                 "expected" => "route_safe_non_empty_string"
+                 "expected" => "route_safe_string_max_128_bytes",
+                 "max_bytes" => 128
                }
              }
            } = json_response(conn, 400)
 
     refute "foo/bar" in Journal.run_ids()
+  end
+
+  test "API create and read routes reject run ids over 128 bytes" do
+    path = demo_workflow()
+    overlong = String.duplicate("r", 129)
+
+    create =
+      post_json(json_conn(), "/api/runs", %{
+        script_path: path,
+        run_id: overlong,
+        provider: "mock"
+      })
+
+    assert %{
+             "error" => %{
+               "code" => "scheduler.run.invalid_run_id",
+               "details" => %{"max_bytes" => 128}
+             }
+           } = json_response(create, 400)
+
+    for path <- [
+          "/api/runs/#{overlong}",
+          "/api/runs/#{overlong}/events"
+        ] do
+      assert %{"error" => %{"code" => "scheduler.run.invalid_run_id"}} =
+               path
+               |> then(&get(json_conn(), &1))
+               |> json_response(400)
+    end
+
+    assert %{"error" => %{"code" => "scheduler.run.invalid_run_id"}} =
+             json_conn()
+             |> post_json("/api/runs/#{overlong}/resume", %{})
+             |> json_response(400)
   end
 
   test "POST /api/workflows/validate validates a workflow script" do

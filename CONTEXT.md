@@ -36,8 +36,8 @@ _Avoid_: exactly-once result, backend idempotency guarantee
 
 **Bounded orchestration**:
 The closed runtime limits retries to 5, loop iterations to 1000, resolved fanout
-width to 64, and concurrent workflow tasks to 8. Compatibility loop/fan-out
-syntax lowers to the generic bounded core.
+width to 64, active runs to 8, and concurrent workflow tasks to 8 per run.
+Compatibility loop/fan-out syntax lowers to the generic bounded core.
 _Avoid_: unbounded retry, unlimited fanout, runtime-specific legacy semantics
 
 **Codex event**:
@@ -55,7 +55,8 @@ _Avoid_: raw event, raw payload
 
 **Install command**:
 A user-invoked reconciliation operation that persists the exact Codex binding,
-installs the user skill, and directly registers the runtime's MCP command.
+installs the user skill, provisions and starts the login service, verifies
+health, and directly registers the scheduler's Streamable HTTP MCP URL.
 _Avoid_: plugin postinstall hook, automatic dependency install
 
 **Plugin lifecycle**:
@@ -64,11 +65,27 @@ skill-only presentation plugin; it never owns or discovers the runtime.
 _Avoid_: runtime installation, MCP registration, bundled executable
 
 **Runtime bundle**:
-A target-specific, immutable Codex Loops directory containing the native
-control plane, OTP scheduler release, and user skill at fixed relative paths.
+A target-specific, immutable Codex Loops directory containing one OTP release,
+its release-overlay command, and the user skill at fixed relative paths.
 _Avoid_: runtime root search, Homebrew runtime, source runtime
 
 **Codex binding**:
 The persisted lexical absolute path and exact probed version of the Codex CLI
 selected during `codex-loops install`; scheduler turns never rediscover it.
 _Avoid_: Codex discovery, inherited Codex path, PATH fallback
+
+**User service**:
+The installer-owned `launchd` LaunchAgent or `systemd --user` unit that runs the
+single OTP release independently of any Codex client connection.
+_Avoid_: MCP-owned scheduler, native supervisor, background stdio server
+
+**Scheduler MCP endpoint**:
+The stateless Streamable HTTP endpoint at `/mcp` served by the same Phoenix
+endpoint as the scheduler API and LiveView. Codex connects to it directly.
+_Avoid_: MCP adapter, stdio bridge, MCP client binary
+
+**Workspace root**:
+The explicit absolute existing directory against which a relative MCP
+`script_path` is resolved, canonicalized, containment-checked, journaled, and
+used as the Codex turn working directory.
+_Avoid_: client current directory, runtime directory, implicit MCP root

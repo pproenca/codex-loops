@@ -11,13 +11,13 @@ workflows, fanout/multi-agent orchestration, ultracode-style work, workflow
 lifecycle inspection, an executable workflow script, or a reusable Codex skill
 that captures a workflow-shaped operating procedure.
 
-The product surface is an immutable runtime bundle whose native Rust control
-plane is registered directly as MCP, plus the local Elixir/Phoenix scheduler.
-The optional plugin contains only this skill. The native control plane manages OS-process lifecycle
-and calls the scheduler HTTP interface. Elixir owns OTP supervision, workflow
-workers, Phoenix PubSub/LiveView, and the SQLite journal. Run data is stored at
-`~/.codex/workflows/runs_1.sqlite` by default, or at `CODEX_LOOPS_JOURNAL_PATH`
-when set.
+The product surface is one immutable Elixir/Phoenix OTP release. The optional
+plugin contains only this skill. The installed user service owns process
+lifecycle; the release owns the direct Streamable HTTP MCP endpoint at `/mcp`,
+workflow workers, one lazy shared Codex app-server, Phoenix PubSub/LiveView, and
+the SQLite journal. There is no Rust runtime or stdio MCP bridge. Run data is
+stored at `~/.codex/workflows/runs_1.sqlite` by default, or at
+`CODEX_LOOPS_JOURNAL_PATH` when set.
 
 ## MCP Surface
 
@@ -28,11 +28,11 @@ when set.
 - `workflow_status`: poll the public §7.5 journal-backed status projection.
 - `workflow_inspect`: read the public §7.5 inspect/status projection with
   `journalEvents` summaries and ordered `rawRefs.journal`.
-- `workflow_resume`: resume an existing run through the scheduler API.
+- `workflow_resume`: resume an existing run through the scheduler.
 - `workflow_open_ui`: return the Phoenix LiveView run URL. Use this URL for
   realtime watching.
 
-If working from a repo clone, the packaged binary is built with:
+If working from a repo clone, assemble and verify the packaged release with:
 
 ```bash
 make build
@@ -40,17 +40,19 @@ make ci
 make dev-bundle
 ```
 
-For a user-driven manual run from the shell, prefer the progressive CLI over
-environment variables or raw HTTP calls:
+The archive's `./install` action installs and starts the service before
+registering MCP. For explicit service operations:
 
 ```bash
-./native/codex-loops/target/release/codex-loops run .codex/workflows/<name>.exs --open
-./native/codex-loops/target/release/codex-loops stop
+codex-loops status --json
+codex-loops serve
+codex-loops restart
+codex-loops stop
 ```
 
-The defaults are the local scheduler, standard journal, generated run ID, and
-live Codex provider; `run` starts the managed scheduler when needed. Use CLI
-flags only when the user asks to customize them.
+The normal workflow surface is MCP, not a shell `run` command. Relative MCP
+`script_path` values require an explicit absolute existing `workspace_root`;
+an absolute `script_path` may omit it.
 
 ## Artifact Selection
 
@@ -167,8 +169,8 @@ helper calls, or nested template prompts in `parallel`, `pipeline`, `fanout`,
 Before live Codex execution:
 
 ```bash
-workflow_validate script_path=.codex/workflows/<name>.exs
-workflow_start script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo
+workflow_start script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock
 workflow_status run_id=<id>
 ```
 
@@ -181,7 +183,7 @@ verification commands, or caller approval are unclear.
 Run live workflows only after the testing gate is satisfied:
 
 ```bash
-workflow_start script_path=.codex/workflows/<name>.exs run_id=<id-live> provider=codex
+workflow_start script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id-live> provider=codex
 workflow_status run_id=<id-live>
 workflow_open_ui run_id=<id-live>
 ```
@@ -217,7 +219,8 @@ make dev-bundle
 MINISIGN_SECRET_KEY=/path/to/key make dist
 ```
 
-`make ci` proves the skill-only plugin package, directly registered MCP runtime, scheduler lifecycle,
-validation, mock execution, all documented workflow variants, polling status,
-journal inspection, resume, typed errors, realtime UI, and open-ui through the
-packaged runtime. It is credential-free and does not spend a real Codex turn.
+`make ci` proves the skill-only plugin package, one-action installer,
+user-service lifecycle, direct Streamable HTTP MCP runtime, validation, mock
+execution, all documented workflow variants, polling status, journal
+inspection, resume, typed errors, realtime UI, and open-ui through the packaged
+release. It is credential-free and does not spend a real Codex turn.

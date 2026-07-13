@@ -45,6 +45,49 @@ defmodule Workflow.SchedulerWorkspaceTest do
            } = Enum.find(Journal.fold(run_id), &(&1.type == :run_started))
   end
 
+  test "a relative source resolves only against an explicit absolute root", %{base: root} do
+    script = write_workflow(root, "relative")
+    relative_script = Path.relative_to(script, root)
+    run_id = run_id("relative")
+
+    assert {:ok, %{run_id: ^run_id}} =
+             Scheduler.start_run(%{
+               "script_path" => relative_script,
+               "workspace_root" => root,
+               "run_id" => run_id,
+               "provider" => "mock"
+             })
+
+    assert %{workspace_root: canonical_root} = wait_for_projection(run_id)
+    assert canonical_root == canonical_directory(root)
+
+    assert {:ok, validation} =
+             Scheduler.validate_workflow(%{
+               "script_path" => relative_script,
+               "workspace_root" => root
+             })
+
+    assert validation.script.path == canonical_file(script)
+  end
+
+  test "a relative source without a root is rejected instead of using scheduler cwd", %{base: root} do
+    script = write_workflow(root, "missing_relative_root")
+    relative_script = Path.relative_to(script, root)
+
+    for result <- [
+          Scheduler.start_run(%{
+            "script_path" => relative_script,
+            "run_id" => run_id("missing_relative_root"),
+            "provider" => "mock"
+          }),
+          Scheduler.validate_workflow(%{"script_path" => relative_script})
+        ] do
+      assert {:error, %Error{} = error} = result
+      assert error.code == "scheduler.run.invalid_workspace_root"
+      assert error.details.reason =~ "required_for_relative_script"
+    end
+  end
+
   test "an explicit symlinked root and source are stored by canonical path", %{base: base} do
     actual_root = Path.join(base, "actual")
     script = write_workflow(actual_root, "canonical")

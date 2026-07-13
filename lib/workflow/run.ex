@@ -14,6 +14,11 @@ defmodule Workflow.Run do
   alias Workflow.Run.Writer
   alias Workflow.Tree
 
+  @max_active_runs 8
+
+  @spec max_active_runs() :: pos_integer()
+  def max_active_runs, do: @max_active_runs
+
   @spec start(Tree.t(), [Options.option()] | Options.t()) ::
           {:ok, String.t(), pid()} | {:error, term()}
   def start(%Tree{} = tree, options) when is_list(options) do
@@ -40,14 +45,22 @@ defmodule Workflow.Run do
 
   # Claim the write lease and return the idle writer's pid without starting work.
   defp spawn_writer(%Tree{} = tree, %Options{} = options, parent) do
-    # Index the run at its creation point so read commands can enumerate it and
-    # select the latest. Idempotent, so a resume of an existing run is a no-op.
-    :ok = Journal.register_run(options.run_id)
-
     case DynamicSupervisor.start_child(Workflow.Run.Supervisor, {Writer, {tree, options, parent}}) do
-      {:ok, pid} -> {:ok, options.run_id, pid}
-      {:error, {:already_started, pid}} -> {:error, {:already_running, pid}}
-      {:error, reason} -> {:error, reason}
+      {:ok, pid} ->
+        # Index only after capacity and lease arbitration succeed, but before the
+        # caller releases the idle writer to execute. A rejected start must not
+        # leave a durable ghost run. Registration is idempotent for resume.
+        :ok = Journal.register_run(options.run_id)
+        {:ok, options.run_id, pid}
+
+      {:error, {:already_started, pid}} ->
+        {:error, {:already_running, pid}}
+
+      {:error, :max_children} ->
+        {:error, {:capacity_exceeded, @max_active_runs}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 end

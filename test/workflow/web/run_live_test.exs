@@ -263,7 +263,11 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
-  defp conn, do: Phoenix.ConnTest.build_conn()
+
+  defp conn do
+    conn = Phoenix.ConnTest.build_conn()
+    %{conn | host: "localhost", port: 47_125}
+  end
 
   defp write_script(source, prefix \\ "wf") do
     dir = Path.join(System.tmp_dir!(), "agent_loops_run_live_test")
@@ -1287,7 +1291,10 @@ defmodule Workflow.Web.RunLiveTest do
              "api_version" => "scheduler.v1",
              "error" => %{
                "code" => "scheduler.run.invalid_run_id",
-               "details" => %{"expected" => "route_safe_non_empty_string"}
+               "details" => %{
+                 "expected" => "route_safe_string_max_128_bytes",
+                 "max_bytes" => 128
+               }
              }
            } = json_response(conn, 400)
 

@@ -1,7 +1,7 @@
 defmodule Workflow.Application do
   @moduledoc """
-  Supervision tree. Child order is the recovery plan: later children depend on
-  earlier children and restart with them under `:rest_for_one`.
+  Supervision tree. Root child order is the dependency recovery plan: later
+  children restart with earlier dependencies under `:rest_for_one`.
 
     * `Workflow.Journal` — owner of the append-only SQLite event log and the first
       dependency in the restart chain.
@@ -11,12 +11,12 @@ defmodule Workflow.Application do
     * `Workflow.PubSub` — post-commit refresh notifications for live read surfaces;
       the journal, not PubSub, remains authoritative.
     * `Workflow.TaskSupervisor` — supervised, unlinked worker tasks for
-      failure-isolated concurrent regions such as `refine` reviewer panels.
-    * `Workflow.Provider.Codex.AppServer` — the fixed owner of the scheduler's
-      single lazy, long-lived Codex app-server process and JSON-RPC correlations.
-    * `Workflow.Run.Supervisor` — dynamic supervisor for per-run writer processes.
-    * `Workflow.Web.Endpoint` — the Phoenix endpoint serving the scheduler-snapshot
-      LiveView. It starts after its dependencies and holds no run state of its own.
+      failure-isolated concurrent regions such as `refine` reviewer panels. It
+      remains upstream because writers and app-server binding verification use it.
+    * `Workflow.RuntimeSupervisor` — a `:one_for_one` isolation boundary around
+      the Codex app-server owner, per-run writer supervisor, and Phoenix endpoint.
+      A sibling crash stays local, while replacement of any root dependency
+      terminates and rebuilds the complete downstream runtime.
   """
   use Application
 
@@ -27,9 +27,7 @@ defmodule Workflow.Application do
       {Registry, keys: :unique, name: Workflow.Run.Registry},
       {Phoenix.PubSub, name: Workflow.PubSub},
       {Task.Supervisor, name: Workflow.TaskSupervisor},
-      Workflow.Provider.Codex.AppServer,
-      {DynamicSupervisor, name: Workflow.Run.Supervisor, strategy: :one_for_one},
-      Workflow.Web.Endpoint
+      Workflow.RuntimeSupervisor
     ]
 
     Supervisor.start_link(children, strategy: :rest_for_one, name: Workflow.Supervisor)

@@ -37,7 +37,7 @@ defmodule CodexLoops.MixProject do
     [
       {:phoenix_pubsub, "~> 2.1"},
       {:phoenix, "~> 1.7"},
-      {:phoenix_live_view, "~> 1.0"},
+      {:phoenix_live_view, ">= 1.2.7 and < 2.0.0"},
       {:jason, "~> 1.4"},
       {:exqlite, "~> 0.38.0"},
       {:bandit, "~> 1.5"},

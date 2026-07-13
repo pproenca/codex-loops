@@ -353,8 +353,8 @@ ConcurrencyOpt : `,` `[` `max_concurrency:` IntegerLiteral `]`
 
 `BranchList` MUST be a non-empty literal list in which **every element is an `agent(…)`
 call**. The only option is `max_concurrency: <positive integer>` (default: all branches
-eligible at once). The runtime-wide cap of eight tasks still applies; a node option can
-only reduce that bound.
+eligible at once). The per-run cap of eight tasks still applies; a node option can only
+reduce that bound.
 
 ### 3.4 Pipeline (per-item fan-out, no barrier)
 
@@ -3324,8 +3324,9 @@ Normative requirements a conforming implementation MUST satisfy:
   `max:`) or by the pinned budget width algorithm; an implementation MUST honor the declared
   exhaustion behavior (`:stop`, `:fail`, `:accept_current`, zero-width completion/failure)
   and MUST NOT rely on body progress to terminate.
-  The reference additionally caps fanout width at 64 and in-flight workflow tasks at 8;
-  external turns and branch joins MUST have finite deadlines and bounded input/output.
+  The reference additionally caps active run writers at 8, fanout width at 64, and
+  in-flight workflow tasks at 8 per run; external turns and branch joins MUST have finite
+  deadlines and bounded input/output.
 - **C8 (located errors).** Every validation failure MUST be reported as a typed load error
   located at the offending declaration in the author's source.
 - **C9 (closed typed predicates).** Every condition MUST be one of the predicate forms in

@@ -2,16 +2,16 @@
 
 ## Purpose
 
-Specify the optional skill-only plugin and the native runtime's directly
-registered MCP adapter for authoring, validating, testing, executing, and
-inspecting local Elixir workflow scripts.
+Specify the optional skill-only plugin and the scheduler-owned Streamable HTTP
+MCP surface for authoring, validating, testing, executing, and inspecting local
+Elixir workflow scripts.
 
 The plugin is deliberately skill-only. The Elixir runtime owns runner behavior; the
 skill teaches when to use it, how to write compatible `.exs` workflow scripts,
 how to run validation and mock-test gates, and how to relay journal-backed
-lifecycle state. The MCP adapter is the Codex-facing surface: it reaches the
-scheduler only through the published HTTP API and never reads SQLite or calls
-internal scheduler modules directly.
+lifecycle state. Codex connects directly to the release's `/mcp` route. The MCP
+transport is stateless and dispatches tools into the same scheduler context as
+the JSON API; there is no Rust runtime, stdio bridge, or loopback HTTP adapter.
 
 ## Public Surface
 
@@ -30,58 +30,68 @@ MCP tools:
 
 User CLI:
 
-- `codex-loops serve` starts or discovers the managed local scheduler at
-  `127.0.0.1:47125` by default
-- `codex-loops run WORKFLOW.exs` starts a missing managed local scheduler,
-  validates the workflow, and starts a generated-ID live Codex run; `--open`
-  launches the LiveView run page
-- `codex-loops stop` stops the managed local scheduler
-- host, port, journal, model, provider, run ID, and scheduler URL customization
-  are optional flags rather than required environment setup
+- archive `./install [--codex /absolute/path/to/codex]` completes the immutable
+  bundle, skill, exact Codex binding, login service, health gate, and MCP URL
+  registration in one action
+- `codex-loops install [--codex PATH] [--check|--dry-run] [--json]` is the
+  idempotent reconciliation command; `check` and `dry-run` are aliases
+- `codex-loops serve`, `stop`, and `restart` operate the installed user service
+- `codex-loops status [--json]` reports service definition plus scheduler health
+- `codex-loops doctor [--json]` diagnoses the installed runtime
 
 MCP behavior:
 
-- `rmcp` MCP server over stdio with newline-delimited JSON-RPC messages
-- `initialize`, `tools/list`, `tools/call`, and notifications
-- `workflow_validate` input schema requires `script_path`
+- Codex registers `http://127.0.0.1:47125/mcp` as `streamable_http`
+- each `POST /mcp` body is bounded to 1 MiB; `2025-03-26` accepts one message or
+  a non-empty batch, while later versions accept one message only; batch output
+  includes request responses and omits notification/client-response entries
+- notifications, client responses, and batches containing only those entries
+  return `202` with no body
+- `GET` and `DELETE` return `405`; there is no SSE stream or
+  `Mcp-Session-Id`
+- MCP, API, and LiveView require a loopback Host; absent Origin is accepted for
+  non-browser clients and a present Origin must be loopback
+- `initialize`, `ping`, `tools/list`, `tools/call`, and notifications
+- supported protocol versions are `2025-03-26`, `2025-06-18`, and
+  `2025-11-25`; subsequent calls validate `MCP-Protocol-Version`, defaulting a
+  missing header to `2025-03-26`
+- `workflow_validate` input schema requires `script_path` and accepts optional
+  absolute `workspace_root`
 - `workflow_start` input schema requires `script_path` and accepts optional
-  `run_id`, optional `provider` (`mock` or `codex`), and optional
-  non-negative integer `budget`. The scheduler API defaults to `mock`;
-  selecting `codex` spends a real Codex provider turn.
+  absolute `workspace_root`, optional `run_id`, optional `provider` (`mock` or
+  `codex`), and optional non-negative integer `budget`. The scheduler defaults
+  to `mock`; selecting `codex` spends a real Codex provider turn.
 - `workflow_status` input schema requires `run_id`
 - `workflow_inspect` input schema requires `run_id`
 - `workflow_resume` input schema requires `run_id` and accepts optional
-  `script_path`, optional scheduler-supported `script` alias, and optional
-  `provider` (`mock` or `codex`)
+  `script_path`, optional scheduler-supported `script` alias, optional absolute
+  `workspace_root`, and optional `provider` (`mock` or `codex`)
 - `workflow_open_ui` input schema requires `run_id`
-- every `tools/call` health-checks `GET /api/health` and verifies the published
-  scheduler API version before its scheduler operation
-- when health or compatibility checks fail, the MCP server returns an actionable
-  `scheduler_unavailable` or version-mismatch error directing the operator to
-  `codex-loops serve`; it does not discover, start, stop, lock, or supervise a
-  scheduler
-- `workflow_start` calls `POST /api/runs` and returns the scheduler success or
-  error envelope exactly as MCP `structuredContent`
-- `workflow_status` calls `GET /api/runs/:id` and returns the §7.5 conforming
-  status projection as MCP `structuredContent`; scheduler-only lifecycle/UI
+- every explicit `run_id` is route-safe ASCII and at most 128 bytes
+- relative `script_path` values require an explicit absolute existing
+  `workspace_root`; absolute script paths may omit it. The scheduler
+  canonicalizes both and rejects paths outside the root, including symlink
+  escapes
+- `workflow_start` invokes the scheduler context and returns the scheduler
+  success or error envelope as MCP `structuredContent`
+- `workflow_status` returns the §7.5 conforming status projection as MCP
+  `structuredContent`; scheduler-only lifecycle/UI
   fields are omitted from this public status surface. This is a polling
   snapshot, not a realtime stream
-- `workflow_inspect` calls `GET /api/runs/:id/events` and returns the §7.5
-  conforming inspect/status projection as MCP `structuredContent`, including
+- `workflow_inspect` returns the §7.5 conforming inspect/status projection as
+  MCP `structuredContent`, including
   `journalEvents` summaries and ordered `rawRefs.journal` instead of the
   lower-level legacy `events` rows
-- `workflow_resume` calls `POST /api/runs/:id/resume` and returns the scheduler
-  success or error envelope exactly as MCP `structuredContent`
-- `workflow_open_ui` calls `GET /api/runs/:id` and returns an MCP envelope with
-  the scheduler projection plus absolute `open_url` based on the scheduler base
-  URL. The returned Phoenix LiveView URL is the realtime watching surface
+- `workflow_resume` invokes resume in the scheduler context and returns the
+  scheduler success or error envelope exactly as MCP `structuredContent`
+- `workflow_open_ui` reads the scheduler projection and returns an MCP envelope
+  with the projection plus absolute `open_url` based on the scheduler base URL.
+  The returned Phoenix LiveView URL is the realtime watching surface
 - scheduler success envelopes are returned as MCP `structuredContent`
 - scheduler typed errors remain typed and are returned as MCP `isError: true`
-- scheduler lifecycle failures use MCP-friendly `scheduler_unavailable` or
-  version-mismatch envelopes with actionable details
-- the MCP adapter reaches the scheduler only through HTTP API calls; it does not
-  read SQLite or call `Workflow.Scheduler`, `Workflow.Journal`, or runtime
-  internals directly, and it does not create native owner-state files
+- the MCP transport owns no run, provider, journal, or service state; tool
+  dispatch enters `Workflow.Scheduler`, whose public projections and errors stay
+  authoritative
 - the packaging stage of `make ci` assembles one fixed runtime under
   `_build/dev-bundle`; the plugin contains no generated release artifacts or
   MCP launcher
@@ -155,9 +165,9 @@ width equal to the lane count. A repeated lane's `width:` is an integer,
 `path_count(:binding, "/json/pointer", max: m)`. It supports optional `bind:`,
 `max_concurrency:`, and `on_zero: :complete | :fail`. A `fanout bind:` produces
 the ordered lane result list for later templates and predicates; it does not
-inject per-lane data into lane prompts. The scheduler caps concurrent tasks at
-eight and resolved fanout width at 64; script-level limits may only reduce those
-system bounds.
+inject per-lane data into lane prompts. The scheduler admits at most eight
+active runs, caps concurrent tasks within each run at eight, and caps resolved
+fanout width at 64; script-level limits may only reduce those system bounds.
 
 Closed predicate examples. For `agree` over a fanout binding, each lane result
 must be a structured map, usually from a schema-backed agent:
@@ -221,27 +231,31 @@ Immediately before every provider call, the writer appends `agent_started`.
 attempt. If a crash leaves a start without settlement, resume does not
 redeliver the possibly-paid effect; it terminates with `outcome_unknown`.
 Provider turns have finite time, bounded protocol lines, and global admission.
+Threads are ephemeral and explicitly unsubscribed. The owner recycles its one
+Port after 64 successful releases, after unrelated live turns settle, to bound
+Codex's grace-period retention of idle threads.
 
 ## Packaging
 
-The production package is one immutable directory containing a Mix scheduler
-release, native Rust control-plane binary, and the skill:
+The production package is one immutable directory containing one Mix/OTP
+release, its release-overlay command, and the skill:
 
 ```bash
 make dev-bundle
 make dist
 ```
 
-The single `codex-loops` command selects stdio mode with the `mcp` subcommand.
-`codex-loops install` registers that exact command directly in Codex shared
-configuration and installs the skill under the user skill root. It calls the
-scheduler only through HTTP and does not boot a second ERTS payload.
+The archive's `./install` copies and activates the immutable bundle, then calls
+the release overlay's reconciliation command. Installation persists the exact
+Codex binding, installs the skill, provisions and starts the macOS LaunchAgent
+or Linux `systemd --user` unit, waits for scheduler health, and registers the
+direct `/mcp` URL. There is no post-install command left for the user.
 
-Explicit native CLI lifecycle subcommands start or discover the generated
-`agent_loops` release through a durable per-user supervisor. The MCP subcommand
-never calls that lifecycle layer, owns no supervisor, and cannot stop one when
-disconnected; scheduler shutdown is always explicit. The supervisor restarts
-unexpected scheduler exits with bounded backoff.
+The service manager owns the foreground `agent_loops start` process. MCP
+connections own no supervisor and cannot stop the release when disconnected.
+The shared Codex app-server is a lazy supervised child of that one release;
+mock execution and health checks do not start it. No supported command launches
+an isolated second scheduler or app-server.
 
 Public development commands:
 
@@ -252,18 +266,19 @@ make dev-bundle
 make dist
 ```
 
-`make ci` builds and tests the external runtime, copied source-only plugin,
-scheduler lifecycle, validation, mock execution, all workflow variants, status,
-inspection, resume, typed errors, streaming activity, browser UI, and open-ui.
-It is deterministic, credential-free, and does not spend a real Codex turn.
+`make ci` builds and tests the OTP release, copied source-only plugin,
+one-action installation, user-service lifecycle, direct Streamable HTTP MCP,
+validation, mock execution, all workflow variants, status, inspection, resume,
+typed errors, streaming activity, browser UI, and open-ui. It is deterministic,
+credential-free, and does not spend a real Codex turn.
 
 ## Safety And Testing
 
 Every executable workflow must pass:
 
 ```text
-workflow_validate script_path=.codex/workflows/<name>.exs
-workflow_start    script_path=.codex/workflows/<name>.exs run_id=<id> provider=mock
+workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo
+workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock
 workflow_status   run_id=<id>
 workflow_inspect  run_id=<id>
 ```

@@ -1,6 +1,9 @@
 # ADR 0005: Elixir-Owned Codex App Server and HTTP-Only MCP
 
-Status: Accepted
+## Status
+
+Superseded by ADR 0006. The Elixir-owned lazy app-server decision was carried
+forward there; the native HTTP-only MCP adapter was not.
 
 ## Context
 

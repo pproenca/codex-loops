@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-repo_root="$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+repo_root="$(CDPATH='' cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 step() {
@@ -26,10 +26,22 @@ step "Binding this Codex CLI and registering the runtime"
 "$repo_root/_build/dev-bundle/bin/codex-loops" install --codex "$(command -v codex)"
 
 step "Verifying direct MCP registration"
-codex mcp get codex-loops --json | grep -q '"command"' || {
-  printf 'direct codex-loops MCP registration was not found\n' >&2
+registration="$(codex mcp get codex-loops --json)"
+if ! CODEX_LOOPS_MCP_REGISTRATION="$registration" mix run --no-start -e '
+  valid? =
+    with {:ok, payload} <- Jason.decode(System.fetch_env!("CODEX_LOOPS_MCP_REGISTRATION")),
+         %{"name" => "codex-loops", "transport" => transport} <- payload,
+         %{"type" => "streamable_http", "url" => "http://127.0.0.1:47125/mcp"} <- transport do
+      not Map.has_key?(transport, "command") and not Map.has_key?(transport, "args")
+    else
+      _ -> false
+    end
+
+  unless valid?, do: System.halt(1)
+'; then
+  printf 'codex-loops is not registered as direct Streamable HTTP at http://127.0.0.1:47125/mcp\n' >&2
   exit 1
-}
+fi
 
 cat <<'PROMPT'
 

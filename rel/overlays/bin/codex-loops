@@ -1,0 +1,64 @@
+#!/bin/sh
+set -eu
+
+resolve_self() {
+  source_path=$1
+  symlink_hops=0
+
+  case "$source_path" in
+    */*) ;;
+    *) source_path=$(command -v -- "$source_path") ;;
+  esac
+
+  while [ -L "$source_path" ]; do
+    symlink_hops=$((symlink_hops + 1))
+
+    if [ "$symlink_hops" -gt 40 ]; then
+      echo "codex-loops: command symlink traversal exceeded 40 links" >&2
+      return 3
+    fi
+
+    source_dir=$(CDPATH= cd -P -- "$(dirname -- "$source_path")" && pwd)
+    source_target=$(readlink "$source_path")
+
+    case "$source_target" in
+      /*) source_path=$source_target ;;
+      *) source_path=$source_dir/$source_target ;;
+    esac
+  done
+
+  source_dir=$(CDPATH= cd -P -- "$(dirname -- "$source_path")" && pwd)
+  printf '%s/%s\n' "$source_dir" "$(basename -- "$source_path")"
+}
+
+script_path=$(resolve_self "$0")
+script_dir=$(dirname -- "$script_path")
+
+if [ -x "$script_dir/agent_loops" ]; then
+  release_bin="$script_dir/agent_loops"
+  server_bin="$script_dir/codex-loops-server"
+  release_root=$(CDPATH= cd -P -- "$script_dir/.." && pwd)
+  bundle_root=$(CDPATH= cd -P -- "$release_root/../.." && pwd)
+elif [ -x "$script_dir/../libexec/scheduler/bin/agent_loops" ]; then
+  bundle_root=$(CDPATH= cd -P -- "$script_dir/.." && pwd)
+  release_root="$bundle_root/libexec/scheduler"
+  release_bin="$release_root/bin/agent_loops"
+  server_bin="$release_root/bin/codex-loops-server"
+else
+  echo "codex-loops: packaged scheduler release not found" >&2
+  exit 3
+fi
+
+bundle_skill="$bundle_root/share/skills/codex-loops"
+
+if [ ! -f "$bundle_skill/SKILL.md" ]; then
+  echo "codex-loops: packaged skill not found" >&2
+  exit 3
+fi
+
+CODEX_LOOPS_RELEASE_COMMAND=$server_bin
+CODEX_LOOPS_SKILL_SOURCE=$bundle_skill
+RELEASE_DISTRIBUTION=none
+export CODEX_LOOPS_RELEASE_COMMAND CODEX_LOOPS_SKILL_SOURCE RELEASE_DISTRIBUTION
+
+exec "$release_bin" eval 'Workflow.CLI.main(System.argv())' "$@"

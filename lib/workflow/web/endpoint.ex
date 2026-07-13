@@ -1,12 +1,15 @@
 defmodule Workflow.Web.Endpoint do
   @moduledoc """
-  The HTTP/WebSocket endpoint for the live read surface. It exists only to serve the
-  scheduler-snapshot `Workflow.Web.RunLive`; it owns no run state. Its `pubsub_server`
-  is `Workflow.PubSub` — the same post-commit bus the run writer broadcasts on — so a
-  connected LiveView refreshes from committed events plus scheduler-owned lifecycle
-  lease facts.
+  The scheduler's supervised HTTP/WebSocket boundary. It serves the stateless
+  Streamable HTTP MCP route, the JSON API, and the journal-backed
+  `Workflow.Web.RunLive`; it owns no run state. Its `pubsub_server` is
+  `Workflow.PubSub` — the same post-commit bus the run writer broadcasts on —
+  so a connected LiveView refreshes from committed events plus scheduler-owned
+  lifecycle lease facts.
   """
   use Phoenix.Endpoint, otp_app: :codex_loops
+
+  alias Workflow.Web.LoopbackGuard
 
   @session_options [
     store: :cookie,
@@ -15,7 +18,12 @@ defmodule Workflow.Web.Endpoint do
     same_site: "Lax"
   ]
 
-  socket("/live", Phoenix.LiveView.Socket, websocket: [connect_info: [session: @session_options]])
+  socket("/live", Phoenix.LiveView.Socket,
+    websocket: [
+      connect_info: [session: @session_options],
+      check_origin: {LoopbackGuard, :origin_allowed?, []}
+    ]
+  )
 
   plug(Plug.Static,
     at: "/assets/phoenix",
@@ -35,6 +43,7 @@ defmodule Workflow.Web.Endpoint do
     only: ~w(run.css)
   )
 
+  plug(LoopbackGuard)
   plug(Plug.Session, @session_options)
   plug(Workflow.Web.Router)
 end

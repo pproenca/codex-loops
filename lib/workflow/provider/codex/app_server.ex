@@ -11,8 +11,21 @@ defmodule Workflow.Provider.Codex.AppServer do
   provider deliberately crashes that caller so the writer leaves its durable
   `agent_started` marker unsettled; resume then records `outcome_unknown` instead of
   redelivering a possibly-paid turn.
+
+  Every terminal or aborted thread is explicitly unsubscribed. A failed or
+  timed-out unsubscribe retires the connection only after unrelated active
+  turns settle, so long-lived reuse cannot accumulate subscriptions or turn a
+  cleanup failure into cross-run cancellation.
+
+  Because Codex retains successfully unsubscribed threads for an idle grace
+  period, the owner also recycles the Port after a bounded number of releases.
+  Retirement still waits for unrelated active turns, and only one Port exists
+  at a time.
   """
   use GenServer
+
+  alias Workflow.Install.CodexBinding
+  alias Workflow.Install.Error, as: InstallError
 
   @name __MODULE__
   @default_max_active 8
@@ -25,10 +38,13 @@ defmodule Workflow.Provider.Codex.AppServer do
   @hard_max_turn_bytes 16 * 1_024 * 1_024
   @default_max_turn_events 10_000
   @hard_max_turn_events 10_000
+  @default_max_released_threads 64
+  @hard_max_released_threads 64
   @max_prompt_bytes 16 * 1_024 * 1_024
   @default_admission_timeout 5_000
   @default_initialize_timeout 10_000
   @default_interrupt_timeout 5_000
+  @default_unsubscribe_timeout 5_000
   @cancel_start_grace 5_000
 
   defmodule TurnRequest do
@@ -110,14 +126,20 @@ defmodule Workflow.Provider.Codex.AppServer do
               by_thread: %{},
               by_turn: %{},
               draining: MapSet.new(),
+              releasing: %{},
+              retiring: nil,
+              verification_task: nil,
               initialize_timer: nil,
               initialize_timeout: 10_000,
               interrupt_timeout: 5_000,
+              unsubscribe_timeout: 5_000,
               max_active: 8,
               max_pending: 64,
               max_line_bytes: 1_048_576,
               max_turn_bytes: 16 * 1_024 * 1_024,
-              max_turn_events: 10_000
+              max_turn_events: 10_000,
+              released_threads: 0,
+              max_released_threads: 64
   end
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -242,6 +264,7 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   def handle_call(:reset, _from, state) do
     cancel_initialize_timer(state.initialize_timer)
+    cancel_verification(state.verification_task)
     state = fail_transport(state, %{"message" => "Codex app-server was reset"}, :unavailable)
     close_port(state.port)
     {:reply, :ok, fresh_state()}
@@ -253,32 +276,42 @@ defmodule Workflow.Provider.Codex.AppServer do
   end
 
   @impl true
-  def handle_info(:start_port, %State{port_status: :starting, command: {path, args}} = state) do
-    port_options = [
-      :binary,
-      :exit_status,
-      :use_stdio,
-      {:args, Enum.map(args, &String.to_charlist/1)},
-      {:line, state.max_line_bytes}
-    ]
+  def handle_info(:start_port, %State{port_status: :starting, requests: requests} = state) when map_size(requests) == 0 do
+    {:noreply, stopped_state(state)}
+  end
 
-    try do
-      port = Port.open({:spawn_executable, String.to_charlist(path)}, port_options)
-      timer = Process.send_after(self(), {:initialize_timeout, port}, state.initialize_timeout)
-      state = %{state | port: port, port_status: :initializing, initialize_timer: timer}
-
-      case send_request(state, "initialize", initialize_params(), :initialize) do
-        {:ok, state} -> {:noreply, state}
-        {:error, state} -> {:noreply, transport_write_failed(state)}
-      end
-    rescue
-      exception ->
-        detail = %{"message" => "Codex app-server failed to start: #{Exception.message(exception)}"}
-        {:noreply, state |> fail_transport(detail, :unavailable) |> stopped_state()}
+  def handle_info(:start_port, %State{port_status: :starting} = state) do
+    case configured_binding_path() do
+      :disabled -> {:noreply, open_app_server(state)}
+      {:ok, binding_path} -> {:noreply, begin_verification(state, binding_path)}
+      {:error, detail} -> {:noreply, state |> fail_transport(detail, :unavailable) |> stopped_state()}
     end
   end
 
   def handle_info(:start_port, state), do: {:noreply, state}
+
+  def handle_info({reference, result}, %State{port_status: :verifying, verification_task: %Task{ref: reference}} = state) do
+    Process.demonitor(reference, [:flush])
+    state = %{state | verification_task: nil}
+
+    case {result, map_size(state.requests)} do
+      {:ok, 0} -> {:noreply, stopped_state(state)}
+      {:ok, _pending} -> {:noreply, open_app_server(state)}
+      {{:error, %InstallError{} = error}, _pending} -> {:noreply, binding_failed(state, error)}
+    end
+  end
+
+  def handle_info(
+        {:DOWN, reference, :process, _pid, reason},
+        %State{port_status: :verifying, verification_task: %Task{ref: reference}} = state
+      ) do
+    detail = %{
+      "message" => "Codex binding verification crashed",
+      "reason" => inspect(reason)
+    }
+
+    {:noreply, state |> Map.put(:verification_task, nil) |> fail_transport(detail, :unavailable) |> stopped_state()}
+  end
 
   def handle_info({:initialize_timeout, port}, %State{port: port, port_status: :initializing} = state) do
     detail = %{"message" => "Codex app-server initialize timed out"}
@@ -302,13 +335,13 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   def handle_info({port, {:exit_status, status}}, %State{port: port} = state) do
     detail = %{"message" => "Codex app-server exited with status #{status}"}
-    kind = if state.port_status in [:starting, :initializing], do: :unavailable, else: :backend
+    kind = transport_failure_kind(state)
     {:noreply, state |> fail_transport(detail, kind) |> stopped_state()}
   end
 
   def handle_info({:EXIT, port, reason}, %State{port: port} = state) do
     detail = %{"message" => "Codex app-server port closed", "reason" => inspect(reason)}
-    {:noreply, state |> fail_transport(detail, :backend) |> stopped_state()}
+    {:noreply, state |> fail_transport(detail, transport_failure_kind(state)) |> stopped_state()}
   end
 
   def handle_info({:request_timeout, ref}, state) do
@@ -342,6 +375,19 @@ defmodule Workflow.Provider.Codex.AppServer do
       detail = %{"message" => "Codex app-server did not complete an interrupted turn"}
       close_port(state.port)
       {:noreply, state |> fail_transport(detail, :backend) |> stopped_state()}
+    else
+      {:noreply, state}
+    end
+  end
+
+  def handle_info({:unsubscribe_timeout, key}, state) do
+    if Map.has_key?(state.releasing, key) do
+      detail = %{
+        "message" => "Codex app-server did not acknowledge thread/unsubscribe",
+        "threadId" => unsubscribe_thread_id(key)
+      }
+
+      {:noreply, state |> finish_unsubscribe(key) |> retire_transport(detail) |> dispatch_waiting()}
     else
       {:noreply, state}
     end
@@ -381,6 +427,11 @@ defmodule Workflow.Provider.Codex.AppServer do
         :codex_loops
         |> Application.get_env(:codex_app_server_interrupt_timeout, @default_interrupt_timeout)
         |> positive_integer(@default_interrupt_timeout),
+      unsubscribe_timeout:
+        :codex_loops
+        |> Application.get_env(:codex_app_server_unsubscribe_timeout, @default_unsubscribe_timeout)
+        |> positive_integer(@default_unsubscribe_timeout)
+        |> min(@default_unsubscribe_timeout),
       max_turn_bytes:
         :codex_loops
         |> Application.get_env(:codex_app_server_max_turn_bytes, @default_max_turn_bytes)
@@ -390,7 +441,12 @@ defmodule Workflow.Provider.Codex.AppServer do
         :codex_loops
         |> Application.get_env(:codex_app_server_max_turn_events, @default_max_turn_events)
         |> positive_integer(@default_max_turn_events)
-        |> min(@hard_max_turn_events)
+        |> min(@hard_max_turn_events),
+      max_released_threads:
+        :codex_loops
+        |> Application.get_env(:codex_app_server_max_released_threads, @default_max_released_threads)
+        |> positive_integer(@default_max_released_threads)
+        |> min(@hard_max_released_threads)
     }
   end
 
@@ -452,6 +508,85 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   defp ensure_port(state), do: state
 
+  defp open_app_server(%State{command: {path, args}} = state) do
+    port_options = [
+      :binary,
+      :exit_status,
+      :use_stdio,
+      {:args, Enum.map(args, &String.to_charlist/1)},
+      {:line, state.max_line_bytes}
+    ]
+
+    try do
+      port = Port.open({:spawn_executable, String.to_charlist(path)}, port_options)
+      timer = Process.send_after(self(), {:initialize_timeout, port}, state.initialize_timeout)
+      state = %{state | port: port, port_status: :initializing, initialize_timer: timer}
+
+      case send_request(state, "initialize", initialize_params(), :initialize) do
+        {:ok, state} -> state
+        {:error, state} -> transport_write_failed(state)
+      end
+    rescue
+      exception ->
+        detail = %{"message" => "Codex app-server failed to start: #{Exception.message(exception)}"}
+        state |> fail_transport(detail, :unavailable) |> stopped_state()
+    end
+  end
+
+  defp configured_binding_path do
+    case Application.get_env(:codex_loops, :codex_binding_path) do
+      nil ->
+        :disabled
+
+      path when is_binary(path) and path != "" ->
+        if Path.type(path) == :absolute do
+          {:ok, path}
+        else
+          {:error, %{"message" => "Codex binding path must be absolute", "path" => path}}
+        end
+
+      value ->
+        {:error, %{"message" => "Codex binding path is invalid", "value" => inspect(value)}}
+    end
+  end
+
+  defp begin_verification(%State{command: {expected_path, expected_args}} = state, binding_path) do
+    task =
+      Task.Supervisor.async_nolink(Workflow.TaskSupervisor, fn ->
+        with {:ok, {bound_path, []}} <- CodexBinding.command(binding_path: binding_path),
+             true <- bound_path == expected_path and expected_args == ["app-server"] do
+          :ok
+        else
+          false ->
+            {:error,
+             InstallError.new(
+               3,
+               "codex_binding_mismatch",
+               "The configured app-server command does not match the persisted Codex binding.",
+               details: %{"binding_path" => binding_path, "command_path" => expected_path}
+             )}
+
+          {:error, %InstallError{} = error} ->
+            {:error, error}
+        end
+      end)
+
+    %{state | port_status: :verifying, verification_task: task}
+  rescue
+    exception ->
+      detail = %{"message" => "Codex binding verification could not start", "reason" => Exception.message(exception)}
+      state |> fail_transport(detail, :unavailable) |> stopped_state()
+  end
+
+  defp binding_failed(state, error) do
+    detail = %{
+      "message" => "Codex binding verification failed",
+      "error" => InstallError.to_map(error)
+    }
+
+    state |> fail_transport(detail, :unavailable) |> stopped_state()
+  end
+
   defp initialize_params do
     %{
       "clientInfo" => %{
@@ -490,6 +625,7 @@ defmodule Workflow.Provider.Codex.AppServer do
           {:thread_start, ref} -> handle_thread_start_response(state, ref, response)
           {:turn_start, ref} -> handle_turn_start_response(state, ref, response)
           {:interrupt, _key} -> state
+          {:unsubscribe, key} -> handle_unsubscribe_response(state, key, response)
         end
     end
   end
@@ -514,6 +650,9 @@ defmodule Workflow.Provider.Codex.AppServer do
 
     case Map.get(state.requests, ref) do
       %Request{phase: :thread_start} = request ->
+        # Retirement stops new dispatch, but work whose thread/start was already
+        # written is active work. Let it settle before recycling the Port so a
+        # concurrent unsubscribe response cannot reject an admitted paid turn.
         request = %{request | thread_id: thread_id, phase: :turn_starting}
 
         state = %{
@@ -584,8 +723,7 @@ defmodule Workflow.Provider.Codex.AppServer do
       request ->
         detail = %{"message" => label, "error" => response_error(response)}
         send_terminal(request, {:error, :backend, detail})
-        {_request, state} = remove_request(state, ref)
-        dispatch_waiting(state)
+        state |> remove_and_unsubscribe(request) |> dispatch_waiting()
     end
   end
 
@@ -604,8 +742,7 @@ defmodule Workflow.Provider.Codex.AppServer do
               {:ok, state, request} ->
                 terminal = terminal_status(params)
                 send_terminal(request, terminal)
-                {_request, state} = remove_request(state, ref)
-                dispatch_waiting(state)
+                state |> remove_and_unsubscribe(request) |> dispatch_waiting()
 
               {:error, state} ->
                 state
@@ -668,6 +805,9 @@ defmodule Workflow.Provider.Codex.AppServer do
           nil ->
             state
 
+          %Request{phase: :cancelling_start} ->
+            state
+
           request ->
             detail = %{
               "message" => "Codex requested unsupported interactive input",
@@ -675,8 +815,7 @@ defmodule Workflow.Provider.Codex.AppServer do
             }
 
             send_terminal(request, {:error, :backend, detail})
-            {_request, state} = remove_request(state, ref)
-            state |> interrupt_and_drain(request) |> dispatch_waiting()
+            state |> abort_request(request) |> dispatch_waiting()
         end
     end
   end
@@ -710,8 +849,14 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   defp correlated_ref(_state, _params), do: nil
 
-  defp dispatch_waiting(%State{port_status: :ready} = state) do
-    if active_count(state) < state.max_active do
+  defp dispatch_waiting(state) do
+    state
+    |> maybe_recycle_retiring()
+    |> do_dispatch_waiting()
+  end
+
+  defp do_dispatch_waiting(%State{port_status: :ready, retiring: nil} = state) do
+    if active_count(state) < state.max_active and not release_limit_pending?(state) do
       case pop_waiting(state) do
         {:empty, state} -> state
         {{:value, ref}, state} -> state |> start_thread(ref) |> dispatch_waiting()
@@ -721,7 +866,15 @@ defmodule Workflow.Provider.Codex.AppServer do
     end
   end
 
-  defp dispatch_waiting(state), do: state
+  defp do_dispatch_waiting(state), do: state
+
+  # An unsubscribe response can arrive after its caller has already received
+  # the terminal turn event. Reserve that pending release against the recycle
+  # limit so a subsequent caller queues instead of slipping onto a connection
+  # that is already committed to retirement.
+  defp release_limit_pending?(state) do
+    state.released_threads + map_size(state.releasing) >= state.max_released_threads
+  end
 
   defp pop_waiting(state) do
     case :queue.out(state.waiting) do
@@ -749,7 +902,7 @@ defmodule Workflow.Provider.Codex.AppServer do
           "cwd" => request.cwd,
           "approvalPolicy" => "never",
           "sandbox" => request.thread_sandbox,
-          "ephemeral" => request.thread_sandbox == "workspace-write"
+          "ephemeral" => true
         },
         "model",
         request.model
@@ -779,7 +932,7 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   defp active_count(state) do
     active = Enum.count(state.requests, fn {_ref, request} -> request.phase != :queued end)
-    active + MapSet.size(state.draining)
+    active + MapSet.size(state.draining) + map_size(state.releasing)
   end
 
   defp cancel_request(state, ref, _reason) do
@@ -807,6 +960,14 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   defp begin_cancel(state, %Request{phase: :cancelling_start}), do: state
 
+  defp begin_cancel(state, %Request{phase: :thread_start} = request) do
+    {_request, state} = remove_request(state, request.ref)
+
+    retire_transport(state, %{
+      "message" => "Codex app-server thread/start was abandoned before its response"
+    })
+  end
+
   defp begin_cancel(state, request) do
     {_request, state} = remove_request(state, request.ref)
     interrupt_and_drain(state, request)
@@ -814,7 +975,7 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   defp interrupt_and_drain(state, %Request{thread_id: thread_id, turn_id: turn_id})
        when is_binary(thread_id) and is_binary(turn_id) do
-    key = {thread_id, turn_id}
+    key = {state.port, thread_id, turn_id}
     params = %{"threadId" => thread_id, "turnId" => turn_id}
 
     case send_request(state, "turn/interrupt", params, {:interrupt, key}) do
@@ -830,18 +991,24 @@ defmodule Workflow.Provider.Codex.AppServer do
   defp interrupt_and_drain(state, _request), do: state
 
   defp finish_draining(state, key) do
-    rpc = Map.reject(state.rpc, fn {_id, tag} -> tag == {:interrupt, key} end)
+    if MapSet.member?(state.draining, key) do
+      rpc = Map.reject(state.rpc, fn {_id, tag} -> tag == {:interrupt, key} end)
+      thread_id = draining_thread_id(key)
 
-    state
-    |> Map.put(:rpc, rpc)
-    |> Map.update!(:draining, &MapSet.delete(&1, key))
-    |> dispatch_waiting()
+      state
+      |> Map.put(:rpc, rpc)
+      |> Map.update!(:draining, &MapSet.delete(&1, key))
+      |> begin_unsubscribe(thread_id)
+      |> dispatch_waiting()
+    else
+      state
+    end
   end
 
   defp finish_draining_from_params(state, params) do
     case {Map.get(params, "threadId"), get_in(params, ["turn", "id"])} do
       {thread_id, turn_id} when is_binary(thread_id) and is_binary(turn_id) ->
-        finish_draining(state, {thread_id, turn_id})
+        finish_draining(state, {state.port, thread_id, turn_id})
 
       _other ->
         state
@@ -878,6 +1045,29 @@ defmodule Workflow.Provider.Codex.AppServer do
     end
   end
 
+  defp remove_and_unsubscribe(state, request) do
+    {_request, state} = remove_request(state, request.ref)
+    begin_unsubscribe(state, request.thread_id)
+  end
+
+  defp abort_request(state, %Request{turn_id: turn_id} = request) when is_binary(turn_id) do
+    {_request, state} = remove_request(state, request.ref)
+    interrupt_and_drain(state, request)
+  end
+
+  defp abort_request(state, %Request{phase: :turn_starting, ref: ref} = request) do
+    turn_start_sent? = Enum.any?(state.rpc, fn {_id, tag} -> tag == {:turn_start, ref} end)
+
+    if turn_start_sent? do
+      begin_cancel(state, request)
+    else
+      remove_and_unsubscribe(state, request)
+    end
+  end
+
+  defp abort_request(state, %Request{phase: :cancelling_start}), do: state
+  defp abort_request(state, request), do: remove_and_unsubscribe(state, request)
+
   defp delete_if_value(map, key, value) do
     if Map.get(map, key) == value, do: Map.delete(map, key), else: map
   end
@@ -912,13 +1102,93 @@ defmodule Workflow.Provider.Codex.AppServer do
   end
 
   defp write_message(port, message) when is_port(port) do
-    Port.command(port, [JSON.encode!(message), "\n"])
+    true = Port.command(port, [JSON.encode!(message), "\n"])
     :ok
   rescue
-    ArgumentError -> :error
+    _exception in [ArgumentError, ErlangError] -> :error
   end
 
   defp write_message(_port, _message), do: :error
+
+  defp begin_unsubscribe(state, thread_id) when not is_binary(thread_id), do: state
+  defp begin_unsubscribe(%State{retiring: retiring} = state, _thread_id) when not is_nil(retiring), do: state
+
+  defp begin_unsubscribe(%State{port: port} = state, thread_id) when is_port(port) do
+    if release_pending?(state.releasing, port, thread_id) do
+      state
+    else
+      key = {port, thread_id, make_ref()}
+
+      case send_request(state, "thread/unsubscribe", %{"threadId" => thread_id}, {:unsubscribe, key}) do
+        {:ok, state} ->
+          timer = Process.send_after(self(), {:unsubscribe_timeout, key}, state.unsubscribe_timeout)
+          %{state | releasing: Map.put(state.releasing, key, timer)}
+
+        {:error, state} ->
+          transport_write_failed(state)
+      end
+    end
+  end
+
+  defp begin_unsubscribe(state, _thread_id), do: state
+
+  defp handle_unsubscribe_response(state, key, %{"result" => %{"status" => status}})
+       when status in ["unsubscribed", "notSubscribed", "notLoaded"] do
+    state = finish_unsubscribe(state, key)
+    state = if status == "notLoaded", do: state, else: count_released_thread(state)
+    dispatch_waiting(state)
+  end
+
+  defp handle_unsubscribe_response(state, key, response) do
+    detail = %{
+      "message" => "Codex app-server thread/unsubscribe failed",
+      "threadId" => unsubscribe_thread_id(key),
+      "error" => response_error(response)
+    }
+
+    state |> finish_unsubscribe(key) |> retire_transport(detail) |> dispatch_waiting()
+  end
+
+  defp finish_unsubscribe(state, key) do
+    case Map.pop(state.releasing, key) do
+      {nil, _releasing} ->
+        state
+
+      {timer, releasing} ->
+        Process.cancel_timer(timer, async: true, info: false)
+        %{state | releasing: releasing}
+    end
+  end
+
+  defp release_pending?(releasing, port, thread_id) do
+    Enum.any?(releasing, fn
+      {{^port, ^thread_id, _release_ref}, _timer} -> true
+      {_key, _timer} -> false
+    end)
+  end
+
+  # Codex intentionally keeps an unsubscribed thread loaded for an idle grace
+  # period. Recycle the shared connection after a bounded number of releases so
+  # a high-throughput scheduler cannot accumulate an input-sized set of idle
+  # conversations. Retirement waits for unrelated live turns before closing.
+  defp count_released_thread(state) do
+    released_threads = state.released_threads + 1
+    state = %{state | released_threads: released_threads}
+
+    if released_threads >= state.max_released_threads do
+      retire_transport(state, %{
+        "message" => "Codex app-server reached its released-thread recycle limit",
+        "maxReleasedThreads" => state.max_released_threads
+      })
+    else
+      state
+    end
+  end
+
+  defp unsubscribe_thread_id({_port, thread_id, _release_ref}), do: thread_id
+  defp draining_thread_id({_port, thread_id, _turn_id}), do: thread_id
+
+  defp forward_event(state, %Request{phase: :cancelling_start} = request, _event), do: {:ok, state, request}
 
   defp forward_event(state, request, event) do
     event_bytes = byte_size(JSON.encode!(event))
@@ -937,10 +1207,11 @@ defmodule Workflow.Provider.Codex.AppServer do
       }
 
       send_terminal(request, {:error, :backend, detail})
-      {_request, state} = remove_request(state, request.ref)
-      {:error, state |> interrupt_and_drain(request) |> dispatch_waiting()}
+      {:error, state |> abort_request(request) |> dispatch_waiting()}
     end
   end
+
+  defp send_terminal(%Request{phase: :cancelling_start}, _terminal), do: :ok
 
   defp send_terminal(request, terminal) do
     send(request.caller, {:codex_app_server, request.ref, {:terminal, terminal}})
@@ -955,12 +1226,19 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   defp transport_write_failed(state) do
     detail = %{"message" => "Codex app-server transport closed while writing"}
-    kind = if state.port_status in [:starting, :initializing], do: :unavailable, else: :backend
+    kind = transport_failure_kind(state)
     close_port(state.port)
     state |> fail_transport(detail, kind) |> stopped_state()
   end
 
+  defp transport_failure_kind(%State{port_status: status}) when status in [:starting, :verifying, :initializing],
+    do: :unavailable
+
+  defp transport_failure_kind(%State{}), do: :backend
+
   defp fail_transport(state, detail, kind) do
+    cancel_unsubscribe_timers(state.releasing)
+
     Enum.each(state.requests, fn {_ref, request} ->
       if request.phase in [:turn_starting, :running] do
         send(request.caller, {:codex_app_server, request.ref, {:transport_lost, detail}})
@@ -980,19 +1258,72 @@ defmodule Workflow.Provider.Codex.AppServer do
         by_monitor: %{},
         by_thread: %{},
         by_turn: %{},
-        draining: MapSet.new()
+        draining: MapSet.new(),
+        releasing: %{},
+        retiring: nil
     }
+  end
+
+  defp retire_transport(state, detail) do
+    cancel_unsubscribe_timers(state.releasing)
+
+    rpc =
+      Map.reject(state.rpc, fn
+        {_id, {:unsubscribe, _key}} -> true
+        {_id, _tag} -> false
+      end)
+
+    state
+    |> Map.put(:rpc, rpc)
+    |> Map.put(:releasing, %{})
+    |> Map.update!(:retiring, &(&1 || detail))
+    |> maybe_recycle_retiring()
+  end
+
+  defp maybe_recycle_retiring(%State{retiring: nil} = state), do: state
+
+  defp maybe_recycle_retiring(state) do
+    live_request? = Enum.any?(state.requests, fn {_ref, request} -> request.phase != :queued end)
+
+    if live_request? or MapSet.size(state.draining) > 0 do
+      state
+    else
+      close_port(state.port)
+      state = stopped_state(state)
+
+      if map_size(state.requests) > 0 do
+        ensure_port(state)
+      else
+        state
+      end
+    end
   end
 
   defp stopped_state(state) do
     cancel_initialize_timer(state.initialize_timer)
+    cancel_verification(state.verification_task)
+    cancel_unsubscribe_timers(state.releasing)
+
+    command =
+      case Enum.find(state.requests, fn {_ref, request} -> request.phase == :queued end) do
+        {_ref, request} -> request.command
+        nil -> nil
+      end
 
     %{
       state
       | port: nil,
         port_status: :stopped,
-        command: nil,
+        command: command,
         next_id: 1,
+        rpc: %{},
+        by_thread: %{},
+        by_turn: %{},
+        draining: MapSet.new(),
+        releasing: %{},
+        retiring: nil,
+        released_threads: 0,
+        verification_task: nil,
         initialize_timer: nil
     }
   end
@@ -1015,6 +1346,23 @@ defmodule Workflow.Provider.Codex.AppServer do
 
   defp cancel_initialize_timer(timer) do
     Process.cancel_timer(timer, async: true, info: false)
+    :ok
+  end
+
+  defp cancel_verification(nil), do: :ok
+
+  defp cancel_verification(%Task{pid: pid, ref: reference}) do
+    Process.demonitor(reference, [:flush])
+    Task.Supervisor.terminate_child(Workflow.TaskSupervisor, pid)
+  catch
+    :exit, _reason -> :ok
+  end
+
+  defp cancel_unsubscribe_timers(releasing) do
+    Enum.each(releasing, fn {_key, timer} ->
+      Process.cancel_timer(timer, async: true, info: false)
+    end)
+
     :ok
   end
 end

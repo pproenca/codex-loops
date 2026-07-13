@@ -19,9 +19,9 @@ before spending a live Codex turn.
 | `budgeted_codebase_onboarding.exs` | Uses the available token budget to sample several independent codebase maps, then creates an onboarding guide. | `budget_slices`, `on_zero`, bounded concurrency, bound fanout | Read-only; requires a finite run budget |
 | `flaky_test_hunt.exs` | Repeats targeted flake discovery until the search is dry, broad enough, or near its budget reserve. | Generic `loop`, `any`, `dry`, `count`, `budget_remaining`, `collect` | Runs tests but forbids tracked-file edits |
 | `adr_consensus_repair.exs` | Reviews a proposed ADR through three lenses and repairs it until all reviewers approve. | Loop-local explicit fanout, `agree`, body-local `until`, conditional repair | Edits only `docs/adr/PROPOSED.md` |
-| `current_diff_refine.exs` | Adversarially reviews and repairs the current change set, with fail-closed convergence and cold-read gates. | Bound `refine`, reviewer adapters, gates, `emit_result` | May edit the current change plus the smallest necessary tests/docs |
+| `current_diff_refine.exs` | Adversarially reviews and repairs the current change set through primary and fresh cold-read panels. | Chained bound `refine`, reviewer adapters, `emit_result` | May edit the current change plus the smallest necessary tests/docs |
 | `incident_triage_workbench.exs` | Runs independent incident investigators, joins their evidence, and produces a response brief. | `parallel` barrier, disjoint filesystem dossiers, top-level dataflow | Writes `.codex/workflow-artifacts/incident-triage/` |
-| `reproduction_confidence_pipeline.exs` | Runs repeated, read-only reproduction and confounder audits for a reported defect. | Honest replica `pipeline`, schemas, concurrency cap | Runs diagnostic commands but forbids tracked-file edits |
+| `reproduction_confidence_pipeline.exs` | Runs repeated, read-only reproduction and confounder audits for one reported defect. | Honest replica `pipeline`, schemas, serial concurrency cap | Runs diagnostic commands but forbids tracked-file edits |
 | `storage_architecture_decision.exs` | Creates an architecture decision packet for choosing a storage direction. | `verify`, `judge`, bindable `synthesize`, red-team dataflow | Read-only |
 
 Three workflows write to the workspace: ADR repair is limited to

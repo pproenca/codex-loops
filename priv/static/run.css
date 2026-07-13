@@ -769,6 +769,13 @@
     color: var(--color-slate-600);
     overflow-wrap: anywhere;
   }
+  [data-testid="latest-activity"] .detail-text {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
   [data-testid="final-outcome"] .detail-text {
     font-size: var(--text-sm);
     line-height: var(--tw-leading, var(--text-sm--line-height));

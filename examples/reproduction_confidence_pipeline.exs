@@ -2,7 +2,7 @@ workflow "reproduction-confidence-pipeline" do
   phase("independent reproduction")
 
   log(
-    "running three read-only replicas of the same two-stage reproduction protocol; replica names are journal labels only"
+    "running three sequential read-only replicas of the same two-stage reproduction protocol; replica names are journal labels only"
   )
 
   # Pipeline items are journal labels only. The strings below are not injected into either
@@ -130,7 +130,9 @@ workflow "reproduction-confidence-pipeline" do
         retries: 1
       )
     ],
-    max_concurrency: 3
+    # Replicas share one workspace. Serial admission prevents concurrent commands from contending
+    # on ports, caches, databases, or temporary paths and manufacturing a false reproduction.
+    max_concurrency: 1
   )
 
   return(

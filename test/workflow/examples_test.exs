@@ -13,9 +13,6 @@ defmodule Workflow.ExamplesTest do
   alias Workflow.Node.PathCount, as: FanoutPathCount
   alias Workflow.Node.Pipeline
   alias Workflow.Node.Refine
-  alias Workflow.Node.Refine.ColdReadGate
-  alias Workflow.Node.Refine.Gates
-  alias Workflow.Node.Refine.HaltGate
   alias Workflow.Node.Return
   alias Workflow.Node.Synthesize
   alias Workflow.Node.Until
@@ -185,20 +182,29 @@ defmodule Workflow.ExamplesTest do
            } = Enum.find(onboarding_nodes, &match?(%GenericFanout{}, &1))
   end
 
-  test "the current-diff refinement fails closed on convergence and cold-read findings" do
-    tree = load_example!("current_diff_refine.exs")
+  test "the current-diff refinement cold-reads and repairs through a second fail-closed panel" do
+    %Tree{nodes: nodes} = load_example!("current_diff_refine.exs")
+    assert [first_panel, cold_read_panel] = Enum.filter(nodes, &match?(%Refine{}, &1))
 
-    assert %Refine{on_non_convergence: :fail} =
-             refine =
-             Enum.find(structs(tree), &match?(%Refine{}, &1))
+    assert %Refine{
+             address: first_address,
+             input: {:binding, :draft, {:node, _draft_address}},
+             on_non_convergence: :fail,
+             max_rounds: 3
+           } = first_panel
 
-    assert %Gates{
-             cold_read: %ColdReadGate{predicate: {:path_non_empty, "/artifact"}},
-             repair: nil,
-             halt: %HaltGate{
-               predicate: {:path_non_empty, "/coldRead/openFindings"}
-             }
-           } = refine.gates
+    assert %Refine{
+             address: cold_read_address,
+             input: {:binding, :final, {:refine, ^first_address}},
+             on_non_convergence: :fail,
+             max_rounds: 2,
+             reviewers: cold_read_reviewers
+           } = cold_read_panel
+
+    assert Enum.map(cold_read_reviewers, & &1.name) == [:invariants, :spec]
+
+    assert %EmitResult{binding: :improved, ref: {:refine, ^cold_read_address}} =
+             List.last(nodes)
   end
 
   test "the reproduction pipeline is an honest set of identical, unbound replicas" do
@@ -218,13 +224,15 @@ defmodule Workflow.ExamplesTest do
       assert stage_agents |> Enum.map(& &1.prompt) |> Enum.uniq() |> length() == 1
       assert stage_agents |> Enum.map(& &1.label) |> Enum.uniq() |> length() == 1
       assert Enum.all?(stage_agents, &(&1.bindings == %{}))
+      assert Enum.all?(stage_agents, &String.contains?(&1.prompt, "`REPRODUCTION.md`"))
+      assert Enum.all?(stage_agents, &String.contains?(&1.prompt, "sole target contract"))
 
       for %Agent{prompt: prompt} <- stage_agents, item <- items do
         refute String.contains?(prompt, item)
       end
     end
 
-    assert pipeline.max_concurrency == 3
+    assert pipeline.max_concurrency == 1
     assert [%Return{value: terminal_value}] = Enum.drop(nodes, pipeline_index + 1)
     assert is_binary(terminal_value)
   end

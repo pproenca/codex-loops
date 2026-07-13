@@ -319,6 +319,14 @@
     overflow-wrap: anywhere;
   }
 
+  [data-testid="latest-activity"] .detail-text {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
   [data-testid="final-outcome"] .detail-text {
     @apply text-sm font-medium leading-6 text-slate-800;
   }

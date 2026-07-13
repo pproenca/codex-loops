@@ -112,29 +112,59 @@ workflow "current-diff-refine" do
         until: :unanimous,
         max_rounds: 3,
         on_non_convergence: :fail,
-        max_concurrency: 4,
-        gates: [
-          cold_read: [
-            reviewer:
-              reviewer(
-                :invariants,
-                """
-                Perform a final cold read with no reliance on earlier reviewer conclusions. Inspect repository guidance, current
-                status, the complete diff, changed call paths, and the reported verification evidence. Remain read-only. Look for
-                one class of defect that consensus reviews often miss: a violated invariant, stale assumption, unhandled recovery
-                path, accidental scope expansion, or claim not supported by an executed check. Return blocking findings only for
-                concrete release-relevant defects, each with exact evidence and a bounded fix. Approve when a fresh maintainer
-                could safely understand, verify, and ship the current change. This is a fail-closed final gate: do not edit the
-                workspace. Any blocking finding must halt this run so a new run reviews the eventual repair from the beginning.
-                """,
-                adapter: :findings_v1
-              ),
-            when: path_non_empty("/artifact")
-          ],
-          halt_when: path_non_empty("/coldRead/openFindings")
-        ]
+        max_concurrency: 4
       )
   )
 
-  emit_result(:final)
+  phase("Cold-read the converged change")
+
+  let(
+    :improved =
+      refine(
+        :final,
+        reviewers: [
+          reviewer(
+            :invariants,
+            """
+            Perform a fresh cold read with no reliance on the first panel's conclusions. Inspect repository guidance, current
+            status, the complete diff, changed call paths, and the reported verification evidence. Remain read-only. Look for a
+            violated invariant, stale assumption, unhandled recovery path, accidental scope expansion, or success claim not
+            supported by an executed check. Return blocking findings only for concrete release-relevant defects, each with exact
+            evidence and a bounded fix. Approve only when a fresh maintainer could safely understand, verify, and ship the change.
+            """,
+            adapter: :findings_v1
+          ),
+          reviewer(
+            :spec,
+            """
+            Independently verify that the converged workspace still matches the requested change and repository contract. Read
+            the original task evidence, guidance, public interfaces, tests, and complete diff without relying on prior review
+            summaries. Remain read-only. Block on missing acceptance criteria, behavior outside the intended scope, a contract
+            contradicted by implementation, or verification that cannot establish the claimed result. Every blocking finding
+            must cite exact evidence and the smallest scope-preserving repair.
+            """,
+            adapter: :findings_v1
+          )
+        ],
+        revise_with:
+          agent("""
+          Resolve every blocking cold-read finding against the live current diff. Re-establish scope from repository guidance,
+          status, and the complete staged and unstaged diff before editing. Use source evidence to reconcile reviewer requests.
+
+          Mutate only files already in the current change plus the smallest directly necessary tests or documentation. Preserve
+          unrelated user work byte-for-byte. Never reset, checkout, restore, clean, stage, commit, amend, rebase, or delete
+          unexplained files. If a safe repair needs broader authority, leave that area unchanged and report the blocker.
+
+          Run the narrowest relevant verification, re-read the resulting diff, and return an updated artifact with exact changes,
+          commands and outcomes, remaining risks, and unresolved blockers. The same cold-read panel will review every repair in
+          the next bounded round; do not claim success without changing and proving the workspace itself.
+          """),
+        until: :unanimous,
+        max_rounds: 2,
+        on_non_convergence: :fail,
+        max_concurrency: 2
+      )
+  )
+
+  emit_result(:improved)
 end

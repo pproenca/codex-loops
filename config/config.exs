@@ -6,8 +6,8 @@ import Config
 config :codex_loops, Workflow.Web.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
-  secret_key_base: "SUQJX2RiOvART1xflhyvyLScoDYg0XZCMWWKgRM9sbPN9VQELWObZMhBIELo3Q/6",
-  live_view: [signing_salt: "TQN5SXrkEUE="],
+  check_origin: :conn,
+  live_view: [signing_salt: "codex-loops-live-view"],
   pubsub_server: Workflow.PubSub,
   render_errors: [formats: [html: Workflow.Web.ErrorHTML], layout: false],
   server: false

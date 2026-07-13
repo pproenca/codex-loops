@@ -41,7 +41,7 @@ defmodule CheckPackageVersion do
 
     case mismatches do
       [] ->
-        check_generated_manifest!(manifest_path, version)
+        :ok
 
       _ ->
         Mix.raise("""
@@ -50,20 +50,6 @@ defmodule CheckPackageVersion do
         Expected: #{version}
         Mismatched: #{Enum.join(mismatches, ", ")}
         """)
-    end
-  end
-
-  defp check_generated_manifest!(manifest_path, version) do
-    content = File.read!(manifest_path)
-    expected = Regex.replace(~r/"version"\s*:\s*"[^"]+"/, content, ~s("version": "#{version}"), global: false)
-
-    if content != expected do
-      Mix.raise("""
-      Codex Loops plugin manifest is not generated from VERSION.
-
-      Run:
-        mix run --no-start scripts/sync-package-version.exs --write
-      """)
     end
   end
 end

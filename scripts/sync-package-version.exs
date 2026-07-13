@@ -46,41 +46,37 @@ defmodule SyncPackageVersion do
     version = "VERSION" |> File.read!() |> String.trim()
 
     [
-      {@manifest_path, generated_manifest(version)},
-      {@cargo_manifest_path, generated_cargo_manifest(version)},
-      {@cargo_lock_path, generated_cargo_lock(version)}
+      {@manifest_path,
+       replace_version!(
+         @manifest_path,
+         @version_pattern,
+         ~s("version": "#{version}"),
+         "top-level version field"
+       )},
+      {@cargo_manifest_path,
+       replace_version!(
+         @cargo_manifest_path,
+         @cargo_version_pattern,
+         ~s(version = "#{version}"),
+         "package version field"
+       )},
+      {@cargo_lock_path,
+       replace_version!(
+         @cargo_lock_path,
+         @cargo_lock_version_pattern,
+         fn _match, prefix, suffix -> prefix <> version <> suffix end,
+         "codex-loops package version"
+       )}
     ]
   end
 
-  defp generated_manifest(version) do
-    content = File.read!(@manifest_path)
+  defp replace_version!(path, pattern, replacement, field) do
+    content = File.read!(path)
 
-    if Regex.match?(@version_pattern, content) do
-      Regex.replace(@version_pattern, content, ~s("version": "#{version}"), global: false)
+    if Regex.match?(pattern, content) do
+      Regex.replace(pattern, content, replacement, global: false)
     else
-      Mix.raise("#{@manifest_path} does not contain a top-level version field")
-    end
-  end
-
-  defp generated_cargo_manifest(version) do
-    content = File.read!(@cargo_manifest_path)
-
-    if Regex.match?(@cargo_version_pattern, content) do
-      Regex.replace(@cargo_version_pattern, content, ~s(version = "#{version}"), global: false)
-    else
-      Mix.raise("#{@cargo_manifest_path} does not contain a package version field")
-    end
-  end
-
-  defp generated_cargo_lock(version) do
-    content = File.read!(@cargo_lock_path)
-
-    if Regex.match?(@cargo_lock_version_pattern, content) do
-      Regex.replace(@cargo_lock_version_pattern, content, fn _match, prefix, suffix ->
-        prefix <> version <> suffix
-      end)
-    else
-      Mix.raise("#{@cargo_lock_path} does not contain the codex-loops package version")
+      Mix.raise("#{path} does not contain the #{field}")
     end
   end
 end

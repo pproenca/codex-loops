@@ -1,9 +1,20 @@
 import Config
 
 if config_env() == :prod do
-  server? = System.get_env("CODEX_LOOPS_SERVER") in ["1", "true"]
+  server? =
+    case System.get_env("CODEX_LOOPS_SERVER", "false") do
+      value when value in ["0", "false"] -> false
+      value when value in ["1", "true"] -> true
+      value -> raise "invalid CODEX_LOOPS_SERVER=#{inspect(value)}; expected 0, 1, false, or true"
+    end
 
-  port = String.to_integer(System.get_env("CODEX_LOOPS_PORT") || System.get_env("PORT", "4000"))
+  raw_port = System.get_env("CODEX_LOOPS_PORT") || System.get_env("PORT", "4000")
+
+  port =
+    case Integer.parse(raw_port) do
+      {port, ""} when port in 1..65_535 -> port
+      _ -> raise "invalid scheduler port #{inspect(raw_port)}; expected an integer from 1 to 65535"
+    end
 
   host = System.get_env("CODEX_LOOPS_HOST", "127.0.0.1")
 
@@ -25,6 +36,7 @@ if config_env() == :prod do
 
   config :codex_loops, Workflow.Web.Endpoint,
     http: [ip: ip, port: port],
+    secret_key_base: Base.encode64(:crypto.strong_rand_bytes(48)),
     url: [host: host, port: port],
     server: server?
 
@@ -33,17 +45,26 @@ if config_env() == :prod do
       System.get_env("CODEX_LOOPS_CODEX_BIN") ||
         raise "CODEX_LOOPS_CODEX_BIN must be injected by the Codex Loops control plane"
 
-    stat = File.stat!(codex_bin)
-
-    if !(Path.type(codex_bin) == :absolute and stat.type == :regular and
-           Bitwise.band(stat.mode, 0o111) != 0) do
-      raise "CODEX_LOOPS_CODEX_BIN must name an absolute executable file"
+    with :absolute <- Path.type(codex_bin),
+         {:ok, %File.Stat{type: :regular, mode: mode}} <- File.stat(codex_bin),
+         true <- Bitwise.band(mode, 0o111) != 0 do
+      config :codex_loops, codex_command: {codex_bin, ["provider-exec"]}
+    else
+      _ -> raise "CODEX_LOOPS_CODEX_BIN must name an absolute executable file"
     end
-
-    config :codex_loops, codex_command: {codex_bin, ["provider-exec"]}
   end
 
-  if codex_model = System.get_env("CODEX_LOOPS_CODEX_MODEL") do
-    config :codex_loops, codex_model: codex_model
+  case System.get_env("CODEX_LOOPS_CODEX_MODEL") do
+    nil ->
+      :ok
+
+    model ->
+      model = String.trim(model)
+
+      if model == "" do
+        raise "CODEX_LOOPS_CODEX_MODEL must not be blank"
+      end
+
+      config :codex_loops, codex_model: model
   end
 end

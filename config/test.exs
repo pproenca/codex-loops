@@ -14,6 +14,7 @@ config :codex_loops, Workflow.Journal,
 # E2E tests opt into a bound port because Playwright drives a real browser.
 config :codex_loops, Workflow.Web.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: browser_e2e_port],
+  secret_key_base: String.duplicate("test-secret-key-base-", 4),
   server: browser_e2e?
 
 config :logger, level: :warning

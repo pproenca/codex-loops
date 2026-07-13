@@ -7,8 +7,8 @@ defmodule Workflow.Web.SchedulerWorkflowController do
   alias Workflow.Scheduler.Validation
   alias Workflow.Web.SchedulerAPI
 
-  def validate(conn, params) do
-    case Scheduler.validate_workflow(params) do
+  def validate(%{body_params: body_params} = conn, _params) do
+    case Scheduler.validate_workflow(body_params) do
       {:ok, validation} -> SchedulerAPI.ok(conn, Validation.to_map(validation))
       {:error, error} -> SchedulerAPI.error(conn, error)
     end

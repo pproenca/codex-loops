@@ -7,7 +7,4 @@ defmodule Workflow.PackageVersion do
 
   @spec version() :: String.t()
   def version, do: @version
-
-  @spec source_path() :: String.t()
-  def source_path, do: @version_source
 end

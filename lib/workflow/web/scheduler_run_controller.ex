@@ -9,15 +9,15 @@ defmodule Workflow.Web.SchedulerRunController do
   alias Workflow.Scheduler.RunStart
   alias Workflow.Web.SchedulerAPI
 
-  def create(conn, params) do
-    case Scheduler.start_run(params) do
+  def create(%{body_params: body_params} = conn, _params) do
+    case Scheduler.start_run(body_params) do
       {:ok, start} -> SchedulerAPI.ok(conn, RunStart.to_map(start))
       {:error, error} -> SchedulerAPI.error(conn, error)
     end
   end
 
-  def resume(conn, %{"id" => id} = params) do
-    case Scheduler.resume_run(id, Map.delete(params, "id")) do
+  def resume(%{body_params: body_params, path_params: %{"id" => id}} = conn, _params) do
+    case Scheduler.resume_run(id, body_params) do
       {:ok, start} -> SchedulerAPI.ok(conn, RunStart.to_map(start))
       {:error, error} -> SchedulerAPI.error(conn, error)
     end

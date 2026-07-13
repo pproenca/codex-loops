@@ -15,7 +15,6 @@ defmodule Workflow.PackageVersionTest do
     cargo_manifest = File.read!(Path.join(@repo_root, "native/codex-loops/Cargo.toml"))
     cargo_lock = File.read!(Path.join(@repo_root, "native/codex-loops/Cargo.lock"))
 
-    assert Workflow.PackageVersion.source_path() == Path.join(@repo_root, "VERSION")
     assert Mix.Project.config()[:version] == version
     assert Workflow.PackageVersion.version() == version
     assert manifest["version"] == version

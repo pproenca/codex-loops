@@ -11,7 +11,7 @@ defmodule Workflow.Web.Endpoint do
   @session_options [
     store: :cookie,
     key: "_codex_loops_key",
-    signing_salt: "TQN5SXrkEUE=",
+    signing_salt: "codex-loops-session",
     same_site: "Lax"
   ]
 

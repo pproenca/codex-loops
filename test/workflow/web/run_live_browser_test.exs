@@ -18,12 +18,16 @@ defmodule Workflow.Web.RunLiveBrowserTest do
     @moduledoc false
 
     def tree do
-      Workflow.Test.tree!("browser-complete", quote do
-      phase("browser")
-      log("browser smoke started")
-      agent("render the completed browser smoke")
-      return(:ok)
-      end, __ENV__)
+      Workflow.Test.tree!(
+        "browser-complete",
+        quote do
+          phase("browser")
+          log("browser smoke started")
+          agent("render the completed browser smoke")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -31,20 +35,24 @@ defmodule Workflow.Web.RunLiveBrowserTest do
     @moduledoc false
 
     def tree do
-      Workflow.Test.tree!("browser-failure", quote do
-      phase("browser")
+      Workflow.Test.tree!(
+        "browser-failure",
+        quote do
+          phase("browser")
 
-      agent("return malformed output",
-        schema: %{
-          "type" => "object",
-          "properties" => %{"label" => %{"type" => "string"}},
-          "required" => ["label"]
-        },
-        retries: 0
+          agent("return malformed output",
+            schema: %{
+              "type" => "object",
+              "properties" => %{"label" => %{"type" => "string"}},
+              "required" => ["label"]
+            },
+            retries: 0
+          )
+
+          return(:ok)
+        end,
+        __ENV__
       )
-
-      return(:ok)
-      end, __ENV__)
     end
   end
 

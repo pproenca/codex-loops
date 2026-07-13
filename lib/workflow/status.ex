@@ -10,6 +10,7 @@ defmodule Workflow.Status do
   alias Workflow.Journal
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.ColdRead
   alias Workflow.Refine.OpenFinding
   alias Workflow.Refine.ReviewerDecision
   alias Workflow.Refine.RoleFailure
@@ -423,7 +424,7 @@ defmodule Workflow.Status do
   defp update_refines(%__MODULE__{} = status, %Event{type: :refine_round_decision, payload: p} = event) do
     upsert_refine(status, p.address, fn refine ->
       refine
-      |> apply_refine_payload(p, :running, :replace)
+      |> apply_refine_payload(p, :running)
       |> put_refine_ref(:decisions, raw_ref(status, event))
     end)
   end
@@ -465,7 +466,7 @@ defmodule Workflow.Status do
   defp update_refines(%__MODULE__{} = status, %Event{type: :refine_completed, payload: p} = event) do
     upsert_refine(status, p.address, fn refine ->
       refine
-      |> apply_refine_payload(p, :completed, :replace)
+      |> apply_refine_payload(p, :completed)
       |> put_refine_ref(:terminal, raw_ref(status, event))
     end)
   end
@@ -473,7 +474,7 @@ defmodule Workflow.Status do
   defp update_refines(%__MODULE__{} = status, %Event{type: :refine_non_converged, payload: p} = event) do
     upsert_refine(status, p.address, fn refine ->
       refine
-      |> apply_refine_payload(Map.put_new(p, :converged, false), :failed, :replace)
+      |> apply_refine_payload(Map.put_new(p, :converged, false), :failed)
       |> put_refine_ref(:terminal, raw_ref(status, event))
     end)
   end
@@ -530,22 +531,16 @@ defmodule Workflow.Status do
     }
   end
 
-  defp apply_refine_payload(refine, payload, state, role_failure_mode) do
+  defp apply_refine_payload(refine, payload, state) do
     payload_role_failures =
       payload
       |> Map.get(:role_failures, [])
       |> Enum.map(&RoleFailure.from_payload/1)
 
     role_failures =
-      case role_failure_mode do
-        :replace ->
-          if Map.has_key?(payload, :role_failures),
-            do: payload_role_failures,
-            else: refine.role_failures
-
-        :merge ->
-          merge_role_failures(refine.role_failures, payload_role_failures)
-      end
+      if Map.has_key?(payload, :role_failures),
+        do: payload_role_failures,
+        else: refine.role_failures
 
     open_findings =
       payload
@@ -676,16 +671,7 @@ defmodule Workflow.Status do
   end
 
   defp normalize_cold_read(nil), do: nil
-
-  defp normalize_cold_read(%{state: :completed} = cold_read) do
-    cold_read
-    |> Map.update(:open_findings, [], &Enum.map(&1, fn finding -> OpenFinding.from_payload(finding) end))
-    |> Map.update!(:reviewer_decision, &ReviewerDecision.from_payload/1)
-  end
-
-  defp normalize_cold_read(%{state: :failed} = cold_read) do
-    Map.update!(cold_read, :role_failure, &RoleFailure.from_payload/1)
-  end
+  defp normalize_cold_read(cold_read), do: ColdRead.from_payload(cold_read)
 
   defp artifact_preview(artifact) when is_binary(artifact) do
     artifact
@@ -897,16 +883,26 @@ defmodule Workflow.Status do
   defp add_failed_usage(%Usage{} = aggregate, _failed_usage), do: aggregate
 
   defp merge_activity(left, right) do
-    left = List.wrap(left)
+    Enum.reduce(List.wrap(right), List.wrap(left), &merge_activity_entry/2)
+  end
 
-    additions =
-      right
-      |> List.wrap()
-      |> Enum.reject(fn entry ->
-        activity_index(entry) != nil and Enum.any?(left, &same_activity?(&1, entry))
-      end)
+  defp merge_activity_entry(entry, entries) do
+    index = activity_index(entry)
 
-    left ++ additions
+    case Enum.find(entries, &(activity_index(&1) == index)) do
+      nil ->
+        entries ++ [entry]
+
+      _existing when is_nil(index) ->
+        entries ++ [entry]
+
+      existing ->
+        if same_activity?(existing, entry) do
+          entries
+        else
+          raise ArgumentError, "conflicting activity entries share index #{index}"
+        end
+    end
   end
 
   defp sort_agents(agents), do: Enum.sort_by(agents, &{&1.address, &1.iteration, agent_attempt(&1) || 0})

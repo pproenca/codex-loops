@@ -1,5 +1,9 @@
 # Homebrew-first migration slices
 
+> **Status: superseded by ADR 0004.** The migration completed through a different
+> end state: a self-locating immutable bundle, direct MCP registration, and an
+> optional skill-only plugin. The slice plan below is historical.
+
 Date: 2026-07-09
 
 Wayfinder ticket: [Plan migration slices for the Homebrew-first installer](https://github.com/pproenca/codex-loops/issues/118)

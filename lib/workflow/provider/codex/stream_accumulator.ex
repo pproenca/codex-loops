@@ -1,6 +1,7 @@
 defmodule Workflow.Provider.Codex.StreamAccumulator do
   @moduledoc false
 
+  alias Workflow.JSONValue
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
 
@@ -77,7 +78,7 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
   end
 
   defp update_failure(acc, %{"type" => "turn.failed", "error" => error}) do
-    put_failure(acc, :backend, %{"message" => "codex turn failed", "error" => json_value(error)})
+    put_failure(acc, :backend, %{"message" => "codex turn failed", "error" => JSONValue.public(error)})
   end
 
   defp update_failure(acc, %{"type" => "error", "message" => message}) do
@@ -215,13 +216,6 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
     type
     |> String.replace("_", " ")
     |> String.capitalize()
-  end
-
-  defp json_value(term) do
-    case Jason.encode(term) do
-      {:ok, _json} -> term
-      {:error, _reason} -> inspect(term)
-    end
   end
 
   defp activity(%__MODULE__{activity_rev: activity_rev}), do: Enum.reverse(activity_rev)

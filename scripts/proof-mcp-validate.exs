@@ -126,7 +126,7 @@ defmodule ProofMCPValidate do
             call_tool!(client, 5, "workflow_start", %{
               "script_path" => running_workflow_path,
               "run_id" => running_run_id,
-              "provider" => "mock",
+              "provider" => "codex",
               "budget" => 0
             })
 
@@ -533,14 +533,9 @@ defmodule ProofMCPValidate do
   end
 
   defp running_workflow_source do
-    agents =
-      Enum.map_join(1..750, "\n", fn index ->
-        ~s|        agent "keep lease #{index}"|
-      end)
-
     """
     workflow "mcp-running-proof" do
-      #{agents}
+      agent "CODEX_LOOPS_CONFORMANCE_HOLD_LEASE"
       return :ok
     end
     """
@@ -748,7 +743,7 @@ defmodule ProofMCPValidate do
     assert!(data["phase"] == "proof", "phase should be projected")
     assert!(data["logs"] == ["mcp lifecycle proof"], "logs should be projected")
     assert!(data["agentCount"] == 1, "agentCount should be projected")
-    assert!(data["eventCount"] == 5, "eventCount should be projected")
+    assert!(data["eventCount"] == 6, "eventCount should be projected")
     assert!(data["result"] == "ok", "result should be projected")
     assert!(data["failure"] == nil, "failure should be nil for successful run")
 
@@ -772,17 +767,18 @@ defmodule ProofMCPValidate do
     data = payload["data"]
 
     assert!(data["runId"] == run_id, "workflow_inspect should preserve run id")
-    assert!(data["eventCount"] == 5, "workflow_inspect should project event count")
+    assert!(data["eventCount"] == 6, "workflow_inspect should project event count")
     assert!(not Map.has_key?(data, "events"), "workflow_inspect should expose §7.5 data")
 
     raw_refs = get_in(data, ["rawRefs", "journal"])
-    assert!(Enum.map(raw_refs, & &1["seq"]) == [0, 1, 2, 3, 4], "raw refs should be ordered")
+    assert!(Enum.map(raw_refs, & &1["seq"]) == [0, 1, 2, 3, 4, 5], "raw refs should be ordered")
 
     assert!(
       Enum.map(raw_refs, & &1["type"]) == [
         "run_started",
         "phase_entered",
         "log_emitted",
+        "agent_started",
         "agent_committed",
         "run_completed"
       ],
@@ -838,7 +834,7 @@ defmodule ProofMCPValidate do
 
     assert!(
       payload["error"]["code"] == "scheduler.validation.workflow_dsl",
-      "invalid resume script should preserve typed scheduler validation error"
+      "invalid resume script should preserve typed scheduler validation error: #{inspect(payload)}"
     )
 
     assert!(

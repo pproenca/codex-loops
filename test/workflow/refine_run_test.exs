@@ -7,6 +7,8 @@ defmodule Workflow.RefineRunTest do
   alias Workflow.Provider.Usage
   alias Workflow.Refine.OpenFinding
   alias Workflow.Refine.ReviewerDecision
+  alias Workflow.Refine.RoundDecision
+  alias Workflow.Refine.TerminalProjection
   alias Workflow.Run
   alias Workflow.Status
   alias Workflow.Test.ExplodingProvider
@@ -14,6 +16,7 @@ defmodule Workflow.RefineRunTest do
   alias Workflow.Test.ScriptedProvider
 
   @moduletag :capture_log
+  @receive_timeout 1_000
 
   defp activity_fields(%Activity{} = activity) do
     activity
@@ -27,7 +30,7 @@ defmodule Workflow.RefineRunTest do
     attrs
     |> Map.put_new(:adapter, :findings_v1)
     |> Map.put_new(:status, :completed)
-    |> then(&struct!(ReviewerDecision, &1))
+    |> ReviewerDecision.from_payload()
   end
 
   defmodule ReplayStartedProvider do
@@ -237,7 +240,7 @@ defmodule Workflow.RefineRunTest do
           [0, 3] ->
             case Keyword.fetch!(opts, :failure) do
               :timeout ->
-                Process.sleep(100)
+                Process.sleep(1_000)
                 %{"approved" => true, "findings" => []}
 
               :killed ->
@@ -817,7 +820,7 @@ defmodule Workflow.RefineRunTest do
   defp append_events(id, journal_events) do
     _next_seq =
       Enum.reduce(journal_events, 0, fn event, seq ->
-        assert :ok = Journal.append(id, seq, event)
+        assert {:ok, %{seq: ^seq}} = Journal.append_next(id, event)
         seq + 1
       end)
 
@@ -834,7 +837,7 @@ defmodule Workflow.RefineRunTest do
   end
 
   defp assert_next_reviewer(address, iteration) do
-    assert_receive {:reviewer_entered, prompt, key, pid}
+    assert_receive {:reviewer_entered, prompt, key, pid}, @receive_timeout
     assert key.node_path == address
     assert key.iteration == iteration
     refute_receive {:reviewer_entered, _, _, _}, 50
@@ -929,18 +932,14 @@ defmodule Workflow.RefineRunTest do
                %{
                  reviewer: :spec,
                  reviewer_index: 0,
-                 approved: true,
-                 clear: true,
                  adapter: :findings_v1,
-                 status: :completed
+                 outcome: :clear
                },
                %{
                  reviewer: :runtime,
                  reviewer_index: 1,
-                 approved: true,
-                 clear: true,
                  adapter: :findings_v1,
-                 status: :completed
+                 outcome: :clear
                }
              ],
              role_failures: [],
@@ -1058,12 +1057,12 @@ defmodule Workflow.RefineRunTest do
 
     decision = Enum.find(events(id), &(&1.type == :refine_round_decision)).payload
 
-    assert Enum.map(decision.reviewer_decisions, &{&1.reviewer, &1.adapter, &1.status, &1.clear}) ==
+    assert Enum.map(decision.reviewer_decisions, &{&1.reviewer, &1.adapter, &1.outcome}) ==
              [
-               {:findings, :findings_v1, :completed, true},
-               {:defects, :defects_v1, :completed, true},
-               {:violations, :violations_v1, :completed, true},
-               {:concerns, :concerns_v1, :completed, true}
+               {:findings, :findings_v1, :clear},
+               {:defects, :defects_v1, :clear},
+               {:violations, :violations_v1, :clear},
+               {:concerns, :concerns_v1, :clear}
              ]
 
     assert decision.report_snippets == [
@@ -1290,25 +1289,29 @@ defmodule Workflow.RefineRunTest do
         %{"approved" => true, "findings" => []},
         %Usage{}
       ),
-      Workflow.Event.refine_round_decision(node, 0, %{
-        consensus: false,
-        approval_count: 1,
-        total: 2,
-        reviewer_decisions: [
-          reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: false, clear: false}),
-          reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
-        ],
-        artifact: "draft-v1",
-        open_findings: [
-          open_finding!(%{
-            reviewer: :spec,
-            reviewer_index: 0,
-            id: "spec-gap",
-            issue: "Spec is ambiguous.",
-            fix: "Pin the behavior."
-          })
-        ]
-      }),
+      Workflow.Event.refine_round_decision(
+        node,
+        0,
+        RoundDecision.from_payload(%{
+          consensus: false,
+          approval_count: 1,
+          total: 2,
+          reviewer_decisions: [
+            reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: false, clear: false}),
+            reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
+          ],
+          artifact: "draft-v1",
+          open_findings: [
+            open_finding!(%{
+              reviewer: :spec,
+              reviewer_index: 0,
+              id: "spec-gap",
+              issue: "Spec is ambiguous.",
+              fix: "Pin the behavior."
+            })
+          ]
+        })
+      ),
       Workflow.Event.agent_committed(
         %Workflow.Node.Agent{address: [0, 2], prompt: "Fix."},
         0,
@@ -1319,7 +1322,7 @@ defmodule Workflow.RefineRunTest do
     ]
 
     Enum.reduce(prior_events, 0, fn event, seq ->
-      assert :ok = Journal.append(id, seq, event)
+      assert {:ok, %{seq: ^seq}} = Journal.append_next(id, event)
       seq + 1
     end)
 
@@ -1379,7 +1382,7 @@ defmodule Workflow.RefineRunTest do
     ]
 
     Enum.reduce(prior_events, 0, fn event, seq ->
-      assert :ok = Journal.append(id, seq, event)
+      assert {:ok, %{seq: ^seq}} = Journal.append_next(id, event)
       seq + 1
     end)
 
@@ -1389,8 +1392,8 @@ defmodule Workflow.RefineRunTest do
                provider: {ReplayStartedProvider, sink: self()}
              )
 
-    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 0}}
-    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 1}}
+    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 0}}, @receive_timeout
+    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 1}}, @receive_timeout
 
     round0_spec_prompt = assert_next_reviewer([0, 1, 0], 0)
     assert round0_spec_prompt =~ "Check the spec."
@@ -1400,8 +1403,11 @@ defmodule Workflow.RefineRunTest do
     assert round0_runtime_prompt =~ "Check the runtime."
     assert round0_runtime_prompt =~ "artifact:\ndraft-v1"
 
-    assert_receive {:agent_called, reviser_prompt, %{node_path: [0, 2], attempt: 0}}
-    assert_receive {:agent_called, ^reviser_prompt, %{node_path: [0, 2], attempt: 1}}
+    assert_receive {:agent_called, reviser_prompt, %{node_path: [0, 2], attempt: 0}}, @receive_timeout
+
+    assert_receive {:agent_called, ^reviser_prompt, %{node_path: [0, 2], attempt: 1}},
+                   @receive_timeout
+
     assert reviser_prompt =~ "Fix."
     assert reviser_prompt =~ "current-artifact:\ndraft-v1"
     assert reviser_prompt =~ "id:\nspec-gap"
@@ -1453,7 +1459,7 @@ defmodule Workflow.RefineRunTest do
     assert Status.of(id).state == :completed
   end
 
-  test "refine reviewer activity is streamed and also included in ordered final role events" do
+  test "refine reviewer activity is durably streamed without terminal-event duplication" do
     id = run_id()
 
     assert {:ok, ^id} =
@@ -1502,10 +1508,7 @@ defmodule Workflow.RefineRunTest do
       |> events()
       |> Enum.filter(&(&1.type == :agent_committed and match?([0, 1, _], &1.payload.address)))
 
-    assert [
-             %{payload: %{activity: [%Activity{activity_index: 0, kind: "note", summary: "reviewing"}]}},
-             %{payload: %{activity: [%Activity{activity_index: 0, kind: "note", summary: "reviewing"}]}}
-           ] = reviewer_events
+    assert Enum.all?(reviewer_events, &(&1.payload.activity == []))
   end
 
   test "refine reviewer activity persists before reviewer settlement" do
@@ -1857,13 +1860,14 @@ defmodule Workflow.RefineRunTest do
       "fix" => "Pin the behavior."
     }
 
-    open_finding = open_finding!(%{
-      reviewer: :spec,
-      reviewer_index: 0,
-      id: "spec-gap",
-      issue: "Spec is ambiguous.",
-      fix: "Pin the behavior."
-    })
+    open_finding =
+      open_finding!(%{
+        reviewer: :spec,
+        reviewer_index: 0,
+        id: "spec-gap",
+        issue: "Spec is ambiguous.",
+        fix: "Pin the behavior."
+      })
 
     rejected =
       for attempt <- 0..2 do
@@ -1906,17 +1910,21 @@ defmodule Workflow.RefineRunTest do
           %{"approved" => true, "findings" => []},
           %Usage{}
         ),
-        Workflow.Event.refine_round_decision(node, 0, %{
-          consensus: false,
-          approval_count: 1,
-          total: 2,
-          reviewer_decisions: [
-            reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: false, clear: false}),
-            reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
-          ],
-          artifact: "draft-v1",
-          open_findings: [open_finding]
-        })
+        Workflow.Event.refine_round_decision(
+          node,
+          0,
+          RoundDecision.from_payload(%{
+            consensus: false,
+            approval_count: 1,
+            total: 2,
+            reviewer_decisions: [
+              reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: false, clear: false}),
+              reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
+            ],
+            artifact: "draft-v1",
+            open_findings: [open_finding]
+          })
+        )
         | rejected
       ]
     )
@@ -2030,18 +2038,14 @@ defmodule Workflow.RefineRunTest do
              %{
                reviewer: :spec,
                reviewer_index: 0,
-               approved: false,
-               clear: false,
                adapter: :findings_v1,
-               status: :failed
+               outcome: :failed
              },
              %{
                reviewer: :runtime,
                reviewer_index: 1,
-               approved: true,
-               clear: true,
                adapter: :findings_v1,
-               status: :completed
+               outcome: :clear
              }
            ]
 
@@ -2230,7 +2234,7 @@ defmodule Workflow.RefineRunTest do
     completed = Enum.find(events(id), &(&1.type == :refine_completed)).payload
     assert completed.artifact == "repaired-v1"
     assert completed.cold_read.state == :completed
-    assert completed.cold_read.repaired == true
+    assert completed.cold_read.repair == :completed
 
     assert completed.cold_read.open_findings == [
              %{
@@ -2261,7 +2265,7 @@ defmodule Workflow.RefineRunTest do
 
   test "cold-read timeout and hard crash become role failures without killing the writer" do
     previous_timeout = Application.get_env(:codex_loops, :refine_reviewer_timeout)
-    Application.put_env(:codex_loops, :refine_reviewer_timeout, 10)
+    Application.put_env(:codex_loops, :refine_reviewer_timeout, 200)
 
     try do
       timeout_id = run_id()
@@ -2275,12 +2279,12 @@ defmodule Workflow.RefineRunTest do
       timeout_failure =
         timeout_id
         |> events()
-        |> Enum.find(&(&1.type == :refine_role_failed))
+        |> Enum.find(&(&1.type == :refine_role_failed and &1.payload.role == :cold_read))
         |> then(& &1.payload)
 
       assert timeout_failure.role == :cold_read
       assert timeout_failure.role_address == [0, 3]
-      assert timeout_failure.reason == {:cold_read_timeout, 10}
+      assert timeout_failure.reason == {:cold_read_timeout, 200}
       assert Status.of(timeout_id).state == :completed
 
       killed_id = run_id()
@@ -2294,7 +2298,7 @@ defmodule Workflow.RefineRunTest do
       killed_failure =
         killed_id
         |> events()
-        |> Enum.find(&(&1.type == :refine_role_failed))
+        |> Enum.find(&(&1.type == :refine_role_failed and &1.payload.role == :cold_read))
         |> then(& &1.payload)
 
       assert killed_failure.role == :cold_read
@@ -2338,34 +2342,38 @@ defmodule Workflow.RefineRunTest do
         %Usage{}
       ),
       Workflow.Event.refine_round_started(node, 0, "draft-v1"),
-      Workflow.Event.refine_round_decision(node, 0, %{
-        consensus: false,
-        approval_count: 1,
-        total: 2,
-        reviewer_decisions: [
-          reviewer_decision!(%{
-            reviewer: :spec,
-            reviewer_index: 0,
-            approved: false,
-            clear: false,
-            adapter: :findings_v1,
-            status: :completed
-          }),
-          reviewer_decision!(%{
-            reviewer: :runtime,
-            reviewer_index: 1,
-            approved: true,
-            clear: true,
-            adapter: :findings_v1,
-            status: :completed
-          })
-        ],
-        artifact: "draft-v1",
-        open_findings: open_findings,
-        role_failures: [],
-        failed_reviewers: [],
-        report_snippets: []
-      }),
+      Workflow.Event.refine_round_decision(
+        node,
+        0,
+        RoundDecision.from_payload(%{
+          consensus: false,
+          approval_count: 1,
+          total: 2,
+          reviewer_decisions: [
+            reviewer_decision!(%{
+              reviewer: :spec,
+              reviewer_index: 0,
+              approved: false,
+              clear: false,
+              adapter: :findings_v1,
+              status: :completed
+            }),
+            reviewer_decision!(%{
+              reviewer: :runtime,
+              reviewer_index: 1,
+              approved: true,
+              clear: true,
+              adapter: :findings_v1,
+              status: :completed
+            })
+          ],
+          artifact: "draft-v1",
+          open_findings: open_findings,
+          role_failures: [],
+          failed_reviewers: [],
+          report_snippets: []
+        })
+      ),
       Workflow.Event.refine_gate_evaluated(node, :repair, {:path_non_empty, "/openFindings"},
         result: true,
         input_round: 0,
@@ -2492,34 +2500,38 @@ defmodule Workflow.RefineRunTest do
         %{"approved" => true, "findings" => []},
         %Usage{}
       ),
-      Workflow.Event.refine_round_decision(node, 0, %{
-        consensus: false,
-        approval_count: 1,
-        total: 2,
-        reviewer_decisions: [
-          reviewer_decision!(%{
-            reviewer: :spec,
-            reviewer_index: 0,
-            approved: false,
-            clear: false,
-            adapter: :findings_v1,
-            status: :completed
-          }),
-          reviewer_decision!(%{
-            reviewer: :runtime,
-            reviewer_index: 1,
-            approved: true,
-            clear: true,
-            adapter: :findings_v1,
-            status: :completed
-          })
-        ],
-        artifact: "draft-v1",
-        open_findings: open_findings,
-        role_failures: [],
-        failed_reviewers: [],
-        report_snippets: []
-      }),
+      Workflow.Event.refine_round_decision(
+        node,
+        0,
+        RoundDecision.from_payload(%{
+          consensus: false,
+          approval_count: 1,
+          total: 2,
+          reviewer_decisions: [
+            reviewer_decision!(%{
+              reviewer: :spec,
+              reviewer_index: 0,
+              approved: false,
+              clear: false,
+              adapter: :findings_v1,
+              status: :completed
+            }),
+            reviewer_decision!(%{
+              reviewer: :runtime,
+              reviewer_index: 1,
+              approved: true,
+              clear: true,
+              adapter: :findings_v1,
+              status: :completed
+            })
+          ],
+          artifact: "draft-v1",
+          open_findings: open_findings,
+          role_failures: [],
+          failed_reviewers: [],
+          report_snippets: []
+        })
+      ),
       Workflow.Event.refine_gate_evaluated(node, :cold_read, {:path_non_empty, "/openFindings"},
         result: true,
         input_round: 0,
@@ -2528,7 +2540,7 @@ defmodule Workflow.RefineRunTest do
     ]
 
     Enum.reduce(seeded, 0, fn event, seq ->
-      assert :ok = Journal.append(id, seq, event)
+      assert {:ok, %{seq: ^seq}} = Journal.append_next(id, event)
       seq + 1
     end)
 
@@ -2716,28 +2728,35 @@ defmodule Workflow.RefineRunTest do
         %{"approved" => true, "findings" => []},
         %Usage{}
       ),
-      Workflow.Event.refine_round_decision(hd(InlineConverges.tree().nodes), 0, %{
-        consensus: true,
-        approval_count: 2,
-        total: 2,
-        reviewer_decisions: [
-          reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: true, clear: true}),
-          reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
-        ],
-        artifact: "draft-v1",
-        open_findings: []
-      }),
-      Workflow.Event.refine_completed(hd(InlineConverges.tree().nodes), %{
-        converged: true,
-        final_round: 0,
-        rounds: 1,
-        artifact: "draft-v1",
-        open_findings: []
-      })
+      Workflow.Event.refine_round_decision(
+        hd(InlineConverges.tree().nodes),
+        0,
+        RoundDecision.from_payload(%{
+          consensus: true,
+          approval_count: 2,
+          total: 2,
+          reviewer_decisions: [
+            reviewer_decision!(%{reviewer: :spec, reviewer_index: 0, approved: true, clear: true}),
+            reviewer_decision!(%{reviewer: :runtime, reviewer_index: 1, approved: true, clear: true})
+          ],
+          artifact: "draft-v1",
+          open_findings: []
+        })
+      ),
+      Workflow.Event.refine_completed(
+        hd(InlineConverges.tree().nodes),
+        TerminalProjection.from_payload(%{
+          converged: true,
+          final_round: 0,
+          rounds: 1,
+          artifact: "draft-v1",
+          open_findings: []
+        })
+      )
     ]
 
     Enum.reduce(events, 0, fn event, seq ->
-      assert :ok = Journal.append(id, seq, event)
+      assert {:ok, %{seq: ^seq}} = Journal.append_next(id, event)
       seq + 1
     end)
 

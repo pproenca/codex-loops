@@ -2,7 +2,7 @@ defmodule Workflow.Run.Stream do
   @moduledoc """
   Subscription boundary for committed run notifications.
 
-  Writers persist every event before broadcasting `{:journal_committed, ...}`.
+  Writers persist every event before broadcasting `{:journal_committed, run_id, seq}`.
   PubSub is therefore only a refresh signal; reconnecting readers always fold the
   SQLite journal.
   """

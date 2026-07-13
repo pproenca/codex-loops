@@ -14,7 +14,7 @@ defmodule Workflow.Run.Writer do
   `handle_continue`) lets the caller establish its `Process.monitor` before any
   effect runs, so a mid-turn crash is observed with its real exit reason rather
   than a `:noproc` race. On `:begin` the writer executes, reports its result to the
-  caller, and stops `:normal`. Unexpected crashes are still treated as bugs. For
+  a synchronous caller when present, and stops `:normal`. Unexpected crashes are still treated as bugs. For
   crashes, the async scheduler path also needs a terminal journal fact: the writer
   records `run_failed` before re-raising, so read models do not leave an ownerless
   run folded as forever running. A crash with an unmatched `agent_started` marker
@@ -39,13 +39,13 @@ defmodule Workflow.Run.Writer do
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
   alias Workflow.JSONPointer
+  alias Workflow.JSONValue
   alias Workflow.Ledger
   alias Workflow.Node.Agent
   alias Workflow.Node.BudgetSlices
   alias Workflow.Node.Collect
   alias Workflow.Node.Emit
   alias Workflow.Node.EmitResult
-  alias Workflow.Node.FanOut
   alias Workflow.Node.GenericFanout
   alias Workflow.Node.Judge
   alias Workflow.Node.Log
@@ -58,13 +58,12 @@ defmodule Workflow.Run.Writer do
   alias Workflow.Node.Return
   alias Workflow.Node.Synthesize
   alias Workflow.Node.Until
-  alias Workflow.Node.UntilDry
   alias Workflow.Node.Verify
-  alias Workflow.Node.WhileBudget
   alias Workflow.Predicate
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
   alias Workflow.PubSub
+  alias Workflow.Refine.ColdRead
   alias Workflow.Refine.Gate
   alias Workflow.Refine.OpenFinding
   alias Workflow.Refine.Result, as: RefineResult
@@ -72,6 +71,8 @@ defmodule Workflow.Run.Writer do
   alias Workflow.Refine.ReviewerAdapter
   alias Workflow.Refine.ReviewerDecision
   alias Workflow.Refine.RoleFailure
+  alias Workflow.Refine.RoundDecision
+  alias Workflow.Refine.TerminalProjection
   alias Workflow.RenderText
   alias Workflow.Schema
   alias Workflow.Status
@@ -104,9 +105,16 @@ defmodule Workflow.Run.Writer do
   @impl true
   def handle_info(:begin, state) do
     result = execute_or_journal_crash(state)
-    send(state.parent, {:run_finished, state.run_id, result})
+    notify_parent(state.parent, state.run_id, result)
     {:stop, :normal, state}
   end
+
+  defp notify_parent(parent, run_id, result) when is_pid(parent) do
+    send(parent, {:run_finished, run_id, result})
+    :ok
+  end
+
+  defp notify_parent(nil, _run_id, _result), do: :ok
 
   defp execute_or_journal_crash(state) do
     execute(state)
@@ -334,17 +342,6 @@ defmodule Workflow.Run.Writer do
   defp run_node(%Loop{} = node, run_id, provider, prior, ctx),
     do: loop(node, loop_seen_by(node.until), run_id, provider, prior, ctx, 0)
 
-  # `while_budget`: loop while the ledger's `remaining` exceeds `reserve` (and any
-  # `until` predicate stays false). Termination is guaranteed — `remaining` only
-  # falls — and bounded by `max_iterations` regardless.
-  defp run_node(%WhileBudget{} = node, run_id, provider, prior, ctx),
-    do: loop(node, while_budget_seen_by(node), run_id, provider, prior, ctx, 0)
-
-  # `until_dry`: loop until `rounds` consecutive iterations add nothing new,
-  # deduping by `seen_by`; bounded by `max_iterations`.
-  defp run_node(%UntilDry{} = node, run_id, provider, prior, ctx),
-    do: loop(node, node.seen_by, run_id, provider, prior, ctx, 0)
-
   # Barrier fan-out: bracket the concurrent region with started/completed markers,
   # run every branch concurrently under the cap, then commit each branch's journalled
   # events in branch order. Branches build events off-thread and never touch the
@@ -501,28 +498,6 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  # Budget-scaled fan-out: decide (and journal) the width once, then run that many
-  # branches concurrently under the cap, each a lane over the body re-addressed to
-  # `parent ++ [branch, stage]`.
-  defp run_node(%FanOut{} = node, run_id, provider, prior, ctx) do
-    {width, seq} = decide_width(node, run_id, prior, ctx.seq)
-    branches = for i <- 0..(width - 1)//1, do: rebase_body(node.body, node.address ++ [i])
-    cap = node.max_concurrency || max(width, 1)
-
-    results =
-      run_concurrently(branches, cap, fn lane ->
-        run_lane(lane, run_id, provider, prior, ctx.iteration)
-      end)
-
-    case commit_lanes(results, run_id, seq) do
-      {:ok, seq} ->
-        {:cont, %{ctx | seq: commit_marker(run_id, seq, prior, Event.fan_out_completed(node))}}
-
-      {:halt, seq, reason} ->
-        {:halt, %{ctx | seq: seq}, reason}
-    end
-  end
-
   # --- Verify / judge tally (pure folds over each panel's committed results) ---
 
   defp confirmed?(%{"verdict" => verdict}) when is_boolean(verdict), do: verdict
@@ -652,7 +627,6 @@ defmodule Workflow.Run.Writer do
     case BoundValue.of(run_id, ref) do
       {:ok, value} -> normalize_bound_artifact(value)
       {:error, {:unbound, _ref}} -> {:error, :unbound_binding}
-      {:error, _reason} -> {:error, :artifact_value_unsupported}
     end
   end
 
@@ -820,7 +794,7 @@ defmodule Workflow.Run.Writer do
               run_id,
               seq,
               prior,
-              Event.refine_non_converged(node, Map.put(projection, :reason, reason))
+              Event.refine_non_converged(node, projection, reason)
             )
 
           {:failed, seq, {:did_not_converge, node.address, reason}}
@@ -831,7 +805,7 @@ defmodule Workflow.Run.Writer do
               run_id,
               seq,
               prior,
-              Event.refine_non_converged(node, Map.put(projection, :reason, base_reason))
+              Event.refine_non_converged(node, projection, base_reason)
             )
 
           {:failed, seq, {:did_not_converge, node.address, base_reason}}
@@ -851,18 +825,7 @@ defmodule Workflow.Run.Writer do
   end
 
   defp terminal_projection(converged, round, artifact, decision) do
-    %{
-      converged: converged,
-      final_round: round,
-      rounds: round + 1,
-      artifact: artifact,
-      open_findings: decision.open_findings,
-      role_failures: decision.role_failures,
-      failed_reviewers: decision.failed_reviewers,
-      reviewer_decisions: decision.reviewer_decisions,
-      report_snippets: decision.report_snippets,
-      cold_read: nil
-    }
+    TerminalProjection.new(converged, round, artifact, decision)
   end
 
   defp maybe_run_cold_read_gate(%Refine{gates: gates} = node, projection, run_id, provider, seq) do
@@ -1377,29 +1340,29 @@ defmodule Workflow.Run.Writer do
 
     %{
       projection
-      | cold_read: %{
-          state: :completed,
-          open_findings: open_findings,
-          reviewer_decision: reviewer_decision,
-          report_snippets: Map.get(review, "report_snippets", []),
-          repaired: false
-        }
+      | cold_read:
+          ColdRead.completed(
+            open_findings,
+            reviewer_decision,
+            Map.get(review, "report_snippets", [])
+          )
     }
   end
 
   defp cold_read_failed_projection(projection, failure) do
     projection
     |> append_role_failure(failure)
-    |> Map.put(:cold_read, %{state: :failed, role_failure: failure, repaired: false})
+    |> Map.put(:cold_read, ColdRead.failed(failure))
   end
 
   defp repair_completed_projection(projection, artifact) do
-    projection
-    |> Map.put(:artifact, artifact)
-    |> update_in([:cold_read], fn
-      %{state: :completed} = cold_read -> %{cold_read | repaired: true}
-      other -> other
-    end)
+    cold_read =
+      case projection.cold_read do
+        %ColdRead{} = cold_read -> ColdRead.repaired(cold_read)
+        nil -> nil
+      end
+
+    %{projection | artifact: artifact, cold_read: cold_read}
   end
 
   defp append_role_failure(projection, %RoleFailure{} = failure) do
@@ -1419,16 +1382,23 @@ defmodule Workflow.Run.Writer do
     %ReviewerDecision{
       reviewer: name,
       reviewer_index: index,
-      approved: approved,
-      clear: clear,
       adapter: adapter,
-      status: :completed
+      outcome: reviewer_outcome(approved, clear)
     }
   end
 
-  defp review_open_findings(%Reviewer{index: index, name: name}, review) do
+  defp reviewer_outcome(approved, clear) do
+    cond do
+      clear -> :clear
+      approved -> :approved_with_findings
+      true -> :rejected
+    end
+  end
+
+  defp review_open_findings(%Reviewer{index: index, name: name}, %{"approved" => approved, "findings" => findings})
+       when is_boolean(approved) do
     blocking =
-      review["findings"]
+      findings
       |> Enum.filter(&(&1["blocking"] == true))
       |> Enum.uniq_by(& &1["id"])
       |> Enum.sort_by(& &1["id"], :asc)
@@ -1437,7 +1407,7 @@ defmodule Workflow.Run.Writer do
       blocking != [] ->
         Enum.map(blocking, &open_finding(name, index, &1))
 
-      review["approved"] == false ->
+      not approved ->
         [
           %OpenFinding{
             reviewer: name,
@@ -1544,27 +1514,15 @@ defmodule Workflow.Run.Writer do
       node.reviewers
       |> Enum.zip(settlements)
       |> Enum.map(fn
-        {%Reviewer{index: index, name: name, adapter: adapter}, {:completed, review}} ->
-          approved = Map.fetch!(review, "approved")
-          clear = approved and not Enum.any?(review["findings"], &(&1["blocking"] == true))
-
-          %ReviewerDecision{
-            reviewer: name,
-            reviewer_index: index,
-            approved: approved,
-            clear: clear,
-            adapter: adapter,
-            status: :completed
-          }
+        {%Reviewer{} = reviewer, {:completed, review}} ->
+          review_decision(reviewer, review)
 
         {%Reviewer{index: index, name: name, adapter: adapter}, {:failed, _failure}} ->
           %ReviewerDecision{
             reviewer: name,
             reviewer_index: index,
-            approved: false,
-            clear: false,
             adapter: adapter,
-            status: :failed
+            outcome: :failed
           }
       end)
 
@@ -1572,40 +1530,17 @@ defmodule Workflow.Run.Writer do
       node.reviewers
       |> Enum.zip(settlements)
       |> Enum.flat_map(fn
-        {%Reviewer{index: index, name: name}, {:completed, review}} ->
-          blocking =
-            review["findings"]
-            |> Enum.filter(&(&1["blocking"] == true))
-            |> Enum.uniq_by(& &1["id"])
-            |> Enum.sort_by(& &1["id"], :asc)
-
-          cond do
-            blocking != [] ->
-              Enum.map(blocking, &open_finding(name, index, &1))
-
-            review["approved"] == false ->
-              [
-                %OpenFinding{
-                  reviewer: name,
-                  reviewer_index: index,
-                  id: "__codex_loops_no_blocking_finding__",
-                  issue: "Reviewer did not approve but returned no blocking finding.",
-                  fix: "Revise the artifact to address this reviewer, or return approved: true with no blocking findings."
-                }
-              ]
-
-            true ->
-              []
-          end
+        {%Reviewer{} = reviewer, {:completed, review}} ->
+          review_open_findings(reviewer, review)
 
         {_reviewer, {:failed, _failure}} ->
           []
       end)
 
     role_failures = role_failures(settlements)
-    approval_count = Enum.count(decisions, & &1.clear)
+    approval_count = Enum.count(decisions, &ReviewerDecision.clear?/1)
 
-    %{
+    %RoundDecision{
       consensus: approval_count == length(decisions) and role_failures == [],
       approval_count: approval_count,
       total: length(decisions),
@@ -1801,23 +1736,7 @@ defmodule Workflow.Run.Writer do
   end
 
   defp replayed_refine_decision(payload) do
-    payload
-    |> Map.delete(:address)
-    |> Map.delete(:round)
-    |> Map.put_new(:role_failures, [])
-    |> Map.put_new(:failed_reviewers, [])
-    |> Map.put_new(:report_snippets, [])
-    |> Map.update!(:role_failures, &Enum.map(&1, fn failure -> RoleFailure.from_payload(failure) end))
-    |> Map.update(
-      :open_findings,
-      [],
-      &Enum.map(&1, fn finding -> OpenFinding.from_payload(finding) end)
-    )
-    |> Map.update(
-      :reviewer_decisions,
-      [],
-      &Enum.map(&1, fn decision -> ReviewerDecision.from_payload(decision) end)
-    )
+    RoundDecision.from_payload(payload)
   end
 
   defp journaled_refine_role_failure(prior, address, round, %Reviewer{agent: %Agent{} = agent}) do
@@ -1911,7 +1830,7 @@ defmodule Workflow.Run.Writer do
       {:ok, value} ->
         value
         |> JSONPointer.resolve(pointer)
-        |> path_count()
+        |> JSONValue.count_resolution()
         |> min(max)
         |> cap_width(nil)
 
@@ -1923,8 +1842,12 @@ defmodule Workflow.Run.Writer do
   defp journaled_fanout_width(prior, address, iteration) do
     case Enum.find(
            prior,
-           &(&1.type == :fanout_started and &1.payload.address == address and
-               Map.get(&1.payload, :iteration) == iteration)
+           fn event ->
+             (event.type == :fanout_started and event.payload.address == address and
+                Map.get(event.payload, :iteration) == iteration) or
+               (is_nil(iteration) and event.type == :fan_out_started and
+                  event.payload.address == address)
+           end
          ) do
       nil -> :none
       event -> {:ok, event.payload.width}
@@ -1932,45 +1855,30 @@ defmodule Workflow.Run.Writer do
   end
 
   defp commit_fanout_completed(run_id, seq, prior, %GenericFanout{} = node, iteration) do
-    if journaled_fanout_marker?(prior, :fanout_completed, node.address, iteration) do
+    if journaled_fanout_completed?(prior, node.address, iteration) do
       seq
     else
       commit(run_id, seq, Event.fanout_completed(node, iteration))
     end
   end
 
-  defp journaled_fanout_marker?(prior, type, address, iteration) do
+  defp journaled_fanout_completed?(prior, address, iteration) do
     Enum.any?(
       prior,
-      &(&1.type == type and &1.payload.address == address and
-          Map.get(&1.payload, :iteration) == iteration)
+      fn event ->
+        (event.type == :fanout_completed and event.payload.address == address and
+           Map.get(event.payload, :iteration) == iteration) or
+          (is_nil(iteration) and event.type == :fan_out_completed and
+             event.payload.address == address)
+      end
     )
   end
 
-  defp materialize_fanout_branches(%GenericFanout{repeated: true, lanes: [lane]} = node, width) do
+  defp materialize_fanout_branches(%GenericFanout{lanes: {:repeat, lane}} = node, width) do
     for i <- 0..(width - 1)//1, do: rebase_body(lane, node.address ++ [i])
   end
 
-  defp materialize_fanout_branches(%GenericFanout{repeated: false, lanes: lanes}, width) do
-    true = length(lanes) == width
-    lanes
-  end
-
-  # --- Budget-scaled fan-out width (a journaled runtime decision) ---
-
-  # Decide the width once and journal it; a resume replays the journaled width rather
-  # than recomputing `floor(remaining / per)` against a ledger the branches have
-  # since spent down.
-  defp decide_width(%FanOut{} = node, run_id, prior, seq) do
-    case journaled_fan_out_width(prior, node.address) do
-      {:ok, width} ->
-        {width, seq}
-
-      :none ->
-        width = compute_width(node.width, run_id)
-        {width, commit(run_id, seq, Event.fan_out_started(node, width))}
-    end
-  end
+  defp materialize_fanout_branches(%GenericFanout{lanes: {:explicit, lanes}}, _width), do: lanes
 
   defp compute_width(%BudgetSlices{per: per, max: cap}, run_id) do
     case Ledger.remaining(Ledger.of(run_id)) do
@@ -1987,13 +1895,6 @@ defmodule Workflow.Run.Writer do
 
   defp cap_width(width, nil), do: min(width, @max_fanout_width)
   defp cap_width(width, cap), do: min(width, min(cap, @max_fanout_width))
-
-  defp journaled_fan_out_width(prior, address) do
-    case Enum.find(prior, fn e -> e.type == :fan_out_started and e.payload.address == address end) do
-      nil -> :none
-      event -> {:ok, event.payload.width}
-    end
-  end
 
   # Re-address a body template lane onto a concrete branch: stage `s` -> `branch ++ [s]`.
   defp rebase_body(body, branch_address) do
@@ -2153,32 +2054,6 @@ defmodule Workflow.Run.Writer do
     end
   end
 
-  defp fresh_decision(%WhileBudget{} = node, run_id, iteration) do
-    cond do
-      iteration >= node.max_iterations ->
-        control({:exhausted, :stop}, nil, true)
-
-      while_budget_stop?(node, run_id, iteration) ->
-        control({:stop, :until}, true, false)
-
-      Ledger.remaining(Ledger.of(run_id)) > node.reserve ->
-        control(:continue, false, false)
-
-      true ->
-        control({:stop, :until}, true, false)
-    end
-  end
-
-  defp fresh_decision(%UntilDry{} = node, run_id, iteration) do
-    result = dry_streak(run_id, node.address, iteration) >= node.rounds
-
-    cond do
-      iteration >= node.max_iterations -> control({:exhausted, :stop}, nil, true)
-      result -> control({:stop, :until}, true, false)
-      true -> control(:continue, false, false)
-    end
-  end
-
   defp fresh_decision(%Loop{} = node, run_id, iteration) do
     cond do
       iteration >= node.max_iterations ->
@@ -2198,12 +2073,6 @@ defmodule Workflow.Run.Writer do
       true ->
         control(:continue, false, false)
     end
-  end
-
-  defp while_budget_stop?(%WhileBudget{until: nil}, _run_id, _iteration), do: false
-
-  defp while_budget_stop?(%WhileBudget{} = node, run_id, iteration) do
-    Predicate.evaluate(node.until, predicate_context(run_id, node.address, iteration, node.until))
   end
 
   defp control(decision, predicate_result, exhausted) do
@@ -2231,12 +2100,6 @@ defmodule Workflow.Run.Writer do
       dry_streak: dry_streak(run_id, loop_address, iteration),
       bindings: predicate_bindings(run_id, predicate, iteration)
     }
-  end
-
-  defp while_budget_seen_by(%WhileBudget{until: nil}), do: []
-
-  defp while_budget_seen_by(%WhileBudget{until: predicate}) do
-    loop_seen_by(predicate)
   end
 
   defp loop_seen_by(nil), do: []
@@ -2294,12 +2157,6 @@ defmodule Workflow.Run.Writer do
 
   defp resolve_binding_ref(_events, {:fanout, _address, {:loop_local, _loop_address}} = ref, _iteration),
     do: {:error, {:unbound, ref}}
-
-  defp path_count(:missing), do: 0
-  defp path_count({:present, nil}), do: 0
-  defp path_count({:present, value}) when is_list(value), do: length(value)
-  defp path_count({:present, value}) when is_map(value), do: map_size(value)
-  defp path_count({:present, _scalar}), do: 1
 
   # Consecutive most-recent iterations (ending at `iteration - 1`) whose `collect`s
   # added nothing — derived purely from the journal, never from re-run agent output.
@@ -2873,16 +2730,13 @@ defmodule Workflow.Run.Writer do
   defp commit_all(run_id, seq, events), do: Enum.reduce(events, seq, fn event, seq -> commit(run_id, seq, event) end)
 
   defp activity_tracker(run_id, %Agent{} = node, iteration, attempt) do
-    counter = :counters.new(1, [])
     _started = persist(run_id, Event.agent_started(node, iteration, key(run_id, node.address, iteration, attempt)))
 
     sink = fn raw_entry ->
       entry = Activity.normalize!(raw_entry)
-      :counters.add(counter, 1, 1)
-      activity_index = :counters.get(counter, 1) - 1
-      event = Event.agent_activity(node, iteration, attempt, activity_index, Activity.without_index(entry))
-      _persisted = persist(run_id, event)
-      activity_index
+      event = Event.agent_activity(node, iteration, attempt, Activity.without_index(entry))
+      persisted = persist(run_id, event)
+      persisted.payload.activity_index
     end
 
     finalize = fn activity ->
@@ -2913,7 +2767,7 @@ defmodule Workflow.Run.Writer do
       raise ArgumentError, "invalid provider failure kind: #{inspect(kind)}"
     end
 
-    if !provider_failure_detail?(detail) do
+    if !JSONValue.durable_detail?(detail) do
       raise ArgumentError, "invalid provider failure detail: #{inspect(detail)}"
     end
 
@@ -2955,19 +2809,6 @@ defmodule Workflow.Run.Writer do
   defp non_negative_usage?(%Usage{input_tokens: input, output_tokens: output, total_tokens: total}) do
     Enum.all?([input, output, total], &(is_integer(&1) and &1 >= 0))
   end
-
-  defp provider_failure_detail?(value) when is_nil(value) or is_boolean(value), do: true
-  defp provider_failure_detail?(value) when is_integer(value) or is_binary(value), do: true
-
-  defp provider_failure_detail?(value) when is_list(value), do: Enum.all?(value, &provider_failure_detail?/1)
-
-  defp provider_failure_detail?(value) when is_map(value) do
-    Enum.all?(value, fn {key, nested} ->
-      is_binary(key) and provider_failure_detail?(nested)
-    end)
-  end
-
-  defp provider_failure_detail?(_value), do: false
 
   defp materialize_agent(%Agent{} = node, run_id) do
     %{node | prompt: materialize_prompt(node, run_id)}
@@ -3042,7 +2883,7 @@ defmodule Workflow.Run.Writer do
   defp persist(run_id, %Event{} = event) do
     {:ok, event} = Journal.append_next(run_id, event)
     # Post-commit broadcast so live read surfaces can subscribe.
-    Phoenix.PubSub.broadcast(PubSub, "run:" <> run_id, {:journal_committed, run_id, event})
+    Phoenix.PubSub.broadcast(PubSub, "run:" <> run_id, {:journal_committed, run_id, event.seq})
     event
   end
 end

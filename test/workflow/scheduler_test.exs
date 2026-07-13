@@ -183,8 +183,7 @@ defmodule Workflow.SchedulerTest do
     assert health.checks == %{
              otp_app: :available,
              journal: :available,
-             pubsub: :available,
-             endpoint: :available
+             pubsub: :available
            }
   end
 
@@ -347,12 +346,12 @@ defmodule Workflow.SchedulerTest do
              Scheduler.get_run(running_id)
 
     assert resume_action == %{
-             action: :resume,
-             label: "Resume",
-             enabled: true,
-             reason: "The writer is stopped before a terminal event.",
-             method: "post",
-             href: "/api/runs/#{running_id}/resume"
+             action: :resume_unavailable,
+             label: "Resume unavailable",
+             enabled: false,
+             reason: "A provider attempt has an unknown outcome; replay could duplicate a paid effect.",
+             method: nil,
+             href: nil
            }
   end
 
@@ -387,19 +386,11 @@ defmodule Workflow.SchedulerTest do
     id = run_id("scheduler_lifecycle_missing_script")
     {:ok, tree} = Script.load_tree(path)
 
-    assert {:ok, ^id, writer} =
-             Run.start(tree,
-               run_id: id,
-               provider: {GateProvider, sink: self()}
-             )
-
-    assert_receive {:agent_called, "ship it"}
-    assert_receive {:at_agent, ^writer}
+    assert :ok = Journal.register_run(id)
+    assert {:ok, %{seq: 0}} = Journal.append_next(id, Workflow.Event.run_started(tree))
 
     assert %Workflow.Event{payload: %{script_path: nil}} =
              Enum.find(Journal.fold(id), &(&1.type == :run_started))
-
-    kill_and_await(id, writer)
 
     assert {:ok, %{state: :running, lifecycle_action: action}} = Scheduler.get_run(id)
 

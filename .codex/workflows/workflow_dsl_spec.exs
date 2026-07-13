@@ -45,8 +45,8 @@ workflow "workflow-dsl-spec" do
         - A script is exactly one bare top-level `workflow "name" do ... end` form. Workflow.Compiler.compile/3 turns its body into an
           INERT %Tree{} of node structs — ZERO closures — and owns ALL load-time validation through caller-located findings.
         - Determinism is enforced by ABSENCE of vocabulary nodes + compiler rejection, never a runtime linter.
-        - The journal is the single source of truth; status/inspect/LiveView are pure folds. Effects are exactly-once via
-          (run_id, node-path, iteration) idempotency keys. Loops are bounded and provably terminate.
+        - The journal is the single source of truth; status/inspect/LiveView are pure folds. Paid attempts are durably marked
+          before dispatch and never redelivered; a missing settlement becomes outcome_unknown. Loops are bounded and provably terminate.
 
         MAINTENANCE EDIT — DO NOT REWRITE SPEC.md. SPEC.md at the repo root is an already-authored, adversarially-hardened, committed spec. §10 is the current normative home for implemented dataflow core; §11 is the current authoring guide. Your job is to audit and maintain the current document, making only targeted corrections for drift. You MUST preserve unrelated content byte-for-byte. This is a maintenance pass, never a rewrite.
 
@@ -100,8 +100,8 @@ workflow "workflow-dsl-spec" do
         - A script is exactly one bare top-level `workflow "name" do ... end` form. Workflow.Compiler.compile/3 turns its body into an
           INERT %Tree{} of node structs — ZERO closures — and owns ALL load-time validation through caller-located findings.
         - Determinism is enforced by ABSENCE of vocabulary nodes + compiler rejection, never a runtime linter.
-        - The journal is the single source of truth; status/inspect/LiveView are pure folds. Effects are exactly-once via
-          (run_id, node-path, iteration) idempotency keys. Loops are bounded and provably terminate.
+        - The journal is the single source of truth; status/inspect/LiveView are pure folds. Paid attempts are durably marked
+          before dispatch and never redelivered; a missing settlement becomes outcome_unknown. Loops are bounded and provably terminate.
 
         LENS: IMPLEMENTATION FIDELITY. For every normative claim about the IMPLEMENTED vocabulary, verify it against the REAL source (grep lib/workflow/*.ex and .spec-workshop/*.md). A defect is any spec statement the code contradicts, any combinator option/arg shape that is wrong, any node field/event name that doesn't exist. `refine` V1 is implemented/normative and is NOT exempt: it must match the compiler, runtime, events, status fold, and binding behavior in lib/. The §10 implemented dataflow core is also NOT exempt: Template, `let`, top-level prompt injection, `emit`, `emit_result`, and pipeline-by-composition must match the compiler/runtime/events. Treat the §10 DEFER/REJECT surfaces as documented boundaries; do not require code for them, but verify SPEC.md clearly excludes them from the current compiler vocabulary. If code and spec disagree, the CODE is right — the spec is the defect.
 
@@ -118,10 +118,10 @@ workflow "workflow-dsl-spec" do
         - A script is exactly one bare top-level `workflow "name" do ... end` form. Workflow.Compiler.compile/3 turns its body into an
           INERT %Tree{} of node structs — ZERO closures — and owns ALL load-time validation through caller-located findings.
         - Determinism is enforced by ABSENCE of vocabulary nodes + compiler rejection, never a runtime linter.
-        - The journal is the single source of truth; status/inspect/LiveView are pure folds. Effects are exactly-once via
-          (run_id, node-path, iteration) idempotency keys. Loops are bounded and provably terminate.
+        - The journal is the single source of truth; status/inspect/LiveView are pure folds. Paid attempts are durably marked
+          before dispatch and never redelivered; a missing settlement becomes outcome_unknown. Loops are bounded and provably terminate.
 
-        LENS: INVARIANTS. A defect is any place the spec states or implies something that violates: inert closure-free tree, determinism-by-absence, journal-as-sole-truth (no process state), exactly-once effects, bounded/terminating loops, validate-while-parsing-at-load-time. Also flag any execution algorithm whose determinism or replay-safety is not actually guaranteed by what the spec says. NOTE the §10 dataflow core adopts the journaled-values-only, deterministic-render-only rule as current normative behavior; do NOT flag value binding itself as an invariant violation, but DO verify the rule preserves the listed invariants — flag any dataflow construct whose closure-freedom, determinism-by-absence, journal-as-sole-truth, exactly-once, or bounded termination is not actually guaranteed by what the spec says (e.g. an unpinned inspect-map render order, a template hole that could admit non-journaled data, a bound value read before its producer commits, an unbounded map).
+        LENS: INVARIANTS. A defect is any place the spec states or implies something that violates: inert closure-free tree, determinism-by-absence, journal-as-sole-truth (no process state), at-most-once paid-effect delivery with explicit unknown outcomes, bounded/terminating loops, validate-while-parsing-at-load-time. Also flag any execution algorithm whose determinism or replay-safety is not actually guaranteed by what the spec says. NOTE the §10 dataflow core adopts the journaled-values-only, deterministic-render-only rule as current normative behavior; do NOT flag value binding itself as an invariant violation, but DO verify the rule preserves the listed invariants — flag any dataflow construct whose closure-freedom, determinism-by-absence, journal-as-sole-truth, at-most-once delivery, or bounded termination is not actually guaranteed by what the spec says (e.g. an unpinned inspect-map render order, a template hole that could admit non-journaled data, a bound value read before its producer commits, an unbounded map).
 
         SCOPE — this run maintains the current SPEC.md. §10 dataflow core is normative and §11 is the current authoring guide; do not ask to add a new §10 or renumber the guide. Confine defects to (i) current §10 dataflow correctness, (ii) §11 authoring-guide fidelity, (iii) cross-reference/heading drift involving §10/§11, and (iv) unintended changes introduced by this maintenance pass. (The non-destructiveness lens is the exception — it audits the whole diff.)
 
@@ -191,8 +191,8 @@ workflow "workflow-dsl-spec" do
       - A script is exactly one bare top-level `workflow "name" do ... end` form. Workflow.Compiler.compile/3 turns its body into an
         INERT %Tree{} of node structs — ZERO closures — and owns ALL load-time validation through caller-located findings.
       - Determinism is enforced by ABSENCE of vocabulary nodes + compiler rejection, never a runtime linter.
-      - The journal is the single source of truth; status/inspect/LiveView are pure folds. Effects are exactly-once via
-        (run_id, node-path, iteration) idempotency keys. Loops are bounded and provably terminate.
+      - The journal is the single source of truth; status/inspect/LiveView are pure folds. Paid attempts are durably marked
+        before dispatch and never redelivered; a missing settlement becomes outcome_unknown. Loops are bounded and provably terminate.
 
       The adversarial refine panel found blocking defects in the SPEC.md maintenance pass. Resolve EVERY finding provided in the CODEX LOOPS REFINE REVISION INPUT with TARGETED edits. §10 dataflow core is normative; §11 is the current authoring guide. If a non-destructiveness defect says an unrelated hunk was altered, REVERT that hunk to its committed HEAD text (`git --no-pager show HEAD:SPEC.md` is the source of truth). Keep DEFER/REJECT dataflow surfaces clearly excluded from the current compiler vocabulary, and keep historical design provenance secondary to SPEC.md.
       Edit SPEC.md with targeted edits and return an artifact string summarizing the revisions and the current SPEC.md state for the next reviewer round.

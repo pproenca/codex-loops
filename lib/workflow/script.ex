@@ -131,11 +131,18 @@ defmodule Workflow.Script do
            static_atoms_encoder: &static_atom/2
          ) do
       {:ok, ast} ->
-        {:ok, ast}
+        {:ok, retain_source_binaries(ast)}
 
       {:error, {meta, message, token}} ->
         {:error, Error.new(:syntax, path, parser_message(path, meta, message, token))}
     end
+  end
+
+  defp retain_source_binaries(ast) do
+    Macro.prewalk(ast, fn
+      value when is_binary(value) -> :binary.copy(value)
+      node -> node
+    end)
   end
 
   defp static_atom(name, _meta) do

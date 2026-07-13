@@ -2,10 +2,11 @@
 
 ## Purpose
 
-Provide one Codex skill plus a native Rust MCP adapter for authoring, validating,
-testing, executing, and inspecting local Elixir workflow scripts.
+Specify the optional skill-only plugin and the native runtime's directly
+registered MCP adapter for authoring, validating, testing, executing, and
+inspecting local Elixir workflow scripts.
 
-The plugin is deliberately thin. The Elixir runtime owns runner behavior; the
+The plugin is deliberately skill-only. The Elixir runtime owns runner behavior; the
 skill teaches when to use it, how to write compatible `.exs` workflow scripts,
 how to run validation and mock-test gates, and how to relay journal-backed
 lifecycle state. The MCP adapter is the Codex-facing surface: it reaches the

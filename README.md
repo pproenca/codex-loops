@@ -55,6 +55,12 @@ A workflow file contains exactly one bare, top-level `workflow` declaration.
 The scheduler parses that declaration as data; it does not compile the file,
 execute it, or discover a module through reflection.
 
+The language is bounded: agent retries are `0..5`, loops require
+`max_iterations` in `1..1000`, resolved fanout width never exceeds 64, and the
+runtime executes at most eight workflow tasks concurrently. `while_budget`,
+`until_dry`, and `fan_out` are compatibility aliases over the generic
+`loop`/`fanout` semantic core.
+
 Drive it through MCP:
 
 ```text

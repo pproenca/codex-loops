@@ -57,6 +57,7 @@ defmodule Workflow.Test.StreamingGateProvider do
   """
   @behaviour Workflow.Provider
 
+  alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
 
   @impl true
@@ -64,11 +65,11 @@ defmodule Workflow.Test.StreamingGateProvider do
     sink = Keyword.fetch!(opts, :sink)
     activity_sink = Keyword.fetch!(opts, :activity_sink)
 
-    activity_sink.(%{
+    activity_sink.(%Activity{
       kind: "lifecycle",
       label: "Turn started",
       summary: "Streaming #{prompt}",
-      status: "running"
+      status: :running
     })
 
     send(sink, {:at_agent, self()})
@@ -76,11 +77,11 @@ defmodule Workflow.Test.StreamingGateProvider do
 
     {:ok, %{"echo" => prompt}, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2},
      [
-       %{
+       %Activity{
          kind: "reasoning",
          label: "Reasoning",
          summary: "Finished #{prompt}",
-         status: "completed"
+         status: :completed
        }
      ]}
   end
@@ -150,9 +151,9 @@ defmodule Workflow.Test.LedgeredProvider do
   With `opts[:crash_once]`, the first call for a fresh key records its charge and
   then hard-kills the caller — the live writer — *before returning*, reproducing
   the crash-between-provider-return-and-commit window: the effect happened
-  server-side but no `agent_committed` ever lands. On resume the writer re-invokes
-  with the same key, the store dedupes (`charges/2` stays at 1), and the commit
-  finally lands — proving the paid effect is exactly-once and never dropped.
+  server-side but no `agent_committed` ever lands. The durable start marker then
+  makes resume fail with an unknown outcome without redelivering the effect; the
+  store proves `charges/2` remains at 1.
   """
   @behaviour Workflow.Provider
 
@@ -251,16 +252,15 @@ defmodule Workflow.Test.LoopProvider do
   (`Workflow.IdempotencyKey`). The *first* call for a fresh key pops the next
   scripted output, records it under the key, and charges once; any later call for
   the *same* key replays that recorded output without charging again — modelling a
-  real backend's request idempotency so a loop iteration re-run after a lost commit
-  is free and deterministic.
+  real backend's request idempotency independently of the scheduler's at-most-once
+  delivery boundary.
 
   With `opts[:crash_at]` set to an iteration index, the first (fresh) call for that
   iteration records its output durably in the store and then hard-kills the caller —
   the live writer — *before returning*, reproducing the return→commit crash window
   mid-loop: the effect happened but no `agent_committed`/`accumulate` landed for
-  that round. On resume the writer re-invokes with the same key, the store dedupes
-  (no re-pop, no new charge), and the round finally commits — proving the
-  accumulator rebuilds with no lost or duplicated items.
+  that round. On resume the durable start marker prevents redelivery and reports an
+  unknown outcome; the store proves there is no extra pop or charge.
 
   Every call pings `{:agent_called, prompt, iteration}` to `opts[:sink]`, so a test
   can assert the exact per-iteration call sequence.
@@ -308,9 +308,8 @@ end
 
 defmodule Workflow.Test.ExplodingProvider do
   @moduledoc """
-  Fails the test loudly if it is ever called. Used to prove exactly-once: on
-  resume, a settled turn must be replayed from the journal, so this provider must
-  never run.
+  Fails the test loudly if it is ever called. On resume, a settled turn must be
+  replayed from the journal without provider redelivery.
   """
   @behaviour Workflow.Provider
 

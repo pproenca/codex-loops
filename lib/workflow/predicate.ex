@@ -16,6 +16,7 @@ defmodule Workflow.Predicate do
 
   alias Workflow.Compiler.Finding
   alias Workflow.JSONPointer
+  alias Workflow.JSONValue
 
   defmodule Count do
     @moduledoc "The size of a declared accumulator -- the left operand of a compare."
@@ -524,7 +525,7 @@ defmodule Workflow.Predicate do
   defp resolve(%BudgetRemaining{}, ctx), do: Map.get(ctx, :remaining, :infinity)
 
   defp resolve(%PathCount{ref: ref, pointer: pointer}, ctx),
-    do: ref |> resolve_ref(ctx) |> resolve_path(pointer) |> path_count()
+    do: ref |> resolve_ref(ctx) |> resolve_path(pointer) |> JSONValue.count_resolution()
 
   defp dry_streak(ctx), do: Map.get(ctx, :dry_streak, 0)
 
@@ -544,18 +545,7 @@ defmodule Workflow.Predicate do
   defp resolve_path(:missing, _pointer), do: :missing
   defp resolve_path(value, pointer), do: JSONPointer.resolve(value, pointer)
 
-  defp path_non_empty?(:missing), do: false
-  defp path_non_empty?({:present, nil}), do: false
-  defp path_non_empty?({:present, value}) when is_binary(value), do: byte_size(value) > 0
-  defp path_non_empty?({:present, value}) when is_list(value), do: value != []
-  defp path_non_empty?({:present, value}) when is_map(value), do: map_size(value) > 0
-  defp path_non_empty?({:present, _scalar}), do: true
-
-  defp path_count(:missing), do: 0
-  defp path_count({:present, nil}), do: 0
-  defp path_count({:present, value}) when is_list(value), do: length(value)
-  defp path_count({:present, value}) when is_map(value), do: map_size(value)
-  defp path_count({:present, _scalar}), do: 1
+  defp path_non_empty?(resolution), do: JSONValue.non_empty_resolution?(resolution)
 
   defp agree?(value, pointer, literal, threshold) when is_list(value) do
     value_count = length(value)

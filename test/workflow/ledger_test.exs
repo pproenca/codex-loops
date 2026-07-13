@@ -14,6 +14,7 @@ defmodule Workflow.LedgerTest do
   alias Workflow.Ledger
   alias Workflow.Node.Agent
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.RoleFailure
   alias Workflow.Run
   alias Workflow.Test.EchoProvider
   alias Workflow.Test.ProviderFailureProvider
@@ -23,10 +24,14 @@ defmodule Workflow.LedgerTest do
     @moduledoc false
 
     def tree do
-      Workflow.Test.tree!("demo", quote do
-      agent("say hello")
-      return(:ok)
-      end, __ENV__)
+      Workflow.Test.tree!(
+        "demo",
+        quote do
+          agent("say hello")
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -36,10 +41,14 @@ defmodule Workflow.LedgerTest do
     @moduledoc false
 
     def tree do
-      Workflow.Test.tree!("classify", quote do
-      agent("classify", schema: %{"type" => "object", "required" => ["label"]}, retries: 2)
-      return(:ok)
-      end, __ENV__)
+      Workflow.Test.tree!(
+        "classify",
+        quote do
+          agent("classify", schema: %{"type" => "object", "required" => ["label"]}, retries: 2)
+          return(:ok)
+        end,
+        __ENV__
+      )
     end
   end
 
@@ -73,7 +82,7 @@ defmodule Workflow.LedgerTest do
   end
 
   defp role_failed(total_tokens) do
-    Event.refine_role_failed(%{
+    Event.refine_role_failed(%RoleFailure{
       address: [0],
       role: :reviewer,
       role_address: [0, 1, 0],

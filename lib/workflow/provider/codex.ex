@@ -70,8 +70,8 @@ defmodule Workflow.Provider.Codex do
               {usage, activity} = StreamAccumulator.partial(accumulator)
 
               {:error,
-               {:provider_failure, :model_limit, %{"message" => "codex prompt exceeded the containment input limit"}, usage,
-                activity}}
+               {:provider_failure, :model_limit, %{"message" => "codex prompt exceeded the containment input limit"},
+                usage, activity}}
 
             {:error, :output_limit, accumulator} ->
               {usage, activity} = StreamAccumulator.partial(accumulator)

@@ -2,7 +2,6 @@ defmodule Workflow.CodexProviderEnvTest do
   use ExUnit.Case, async: false
 
   alias Workflow.Journal
-  alias Workflow.Provider
   alias Workflow.Provider.Codex
   alias Workflow.Run
   alias Workflow.Status
@@ -69,7 +68,7 @@ defmodule Workflow.CodexProviderEnvTest do
     id = "codex_env_missing_#{System.unique_integer([:positive])}"
 
     assert {:error, {:provider_failure, [0], :unavailable, detail}} =
-             Run.run(EchoWorkflow.tree(), run_id: id, provider: Provider.select(:codex, []))
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: {Codex, []})
 
     assert detail["config"] == "codex_command"
     assert detail["message"] =~ "Codex command was not configured"

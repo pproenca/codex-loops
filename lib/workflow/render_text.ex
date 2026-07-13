@@ -12,6 +12,7 @@ defmodule Workflow.RenderText do
   alias Workflow.Event
   alias Workflow.Journal
   alias Workflow.JSONPointer
+  alias Workflow.JSONValue
   alias Workflow.Template
 
   @type part ::
@@ -85,7 +86,7 @@ defmodule Workflow.RenderText do
     do: {:ok, value |> pointer_value(pointer) |> flatten_value()}
 
   defp apply_formatter(%Template.Hole{op: :count, args: %{pointer: pointer}}, value),
-    do: {:ok, value |> pointer_value(pointer) |> count_value()}
+    do: {:ok, value |> pointer_value(pointer) |> JSONValue.count()}
 
   defp apply_formatter(%Template.Hole{op: :numbered_findings, args: %{pointer: pointer}}, value),
     do: {:ok, value |> pointer_value(pointer) |> numbered_findings()}
@@ -105,11 +106,6 @@ defmodule Workflow.RenderText do
 
   defp flatten_value(list) when is_list(list), do: Enum.flat_map(list, &flatten_value/1)
   defp flatten_value(value), do: [value]
-
-  defp count_value(nil), do: 0
-  defp count_value(list) when is_list(list), do: length(list)
-  defp count_value(map) when is_map(map), do: map_size(map)
-  defp count_value(_value), do: 1
 
   defp numbered_findings(value) do
     value

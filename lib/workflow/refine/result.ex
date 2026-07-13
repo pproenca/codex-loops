@@ -9,8 +9,10 @@ defmodule Workflow.Refine.Result do
 
   alias Workflow.Event
   alias Workflow.Journal
+  alias Workflow.JSONValue
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
+  alias Workflow.Refine.ColdRead
   alias Workflow.Refine.OpenFinding
   alias Workflow.Refine.ReviewerDecision
   alias Workflow.Refine.RoleFailure
@@ -58,7 +60,7 @@ defmodule Workflow.Refine.Result do
         |> Map.get(:reviewer_decisions, decision_field(final_decision, :reviewer_decisions, []))
         |> Enum.map(&ReviewerDecision.from_payload/1)
         |> Enum.map(&reviewer_decision_json/1),
-      "coldRead" => cold_read_json(Map.get(attrs, :cold_read)),
+      "coldRead" => attrs |> Map.get(:cold_read) |> normalize_cold_read() |> cold_read_json(),
       "reportSnippets" => report_snippets,
       "rawRefs" => %{"journal" => raw_refs(events, run_id, address)}
     }
@@ -97,10 +99,10 @@ defmodule Workflow.Refine.Result do
     %{
       "reviewer" => atom_string(decision.reviewer),
       "reviewerIndex" => decision.reviewer_index,
-      "approved" => decision.approved,
-      "clear" => decision.clear,
+      "approved" => ReviewerDecision.approved?(decision),
+      "clear" => ReviewerDecision.clear?(decision),
       "adapter" => atom_string(decision.adapter),
-      "status" => atom_string(decision.status)
+      "status" => atom_string(ReviewerDecision.status(decision))
     }
   end
 
@@ -135,7 +137,7 @@ defmodule Workflow.Refine.Result do
         |> ReviewerDecision.from_payload()
         |> reviewer_decision_json(),
       "reportSnippets" => Map.get(cold_read, :report_snippets, []),
-      "repaired" => Map.get(cold_read, :repaired, false)
+      "repaired" => ColdRead.repaired?(cold_read)
     }
   end
 
@@ -147,9 +149,12 @@ defmodule Workflow.Refine.Result do
         |> Map.fetch!(:role_failure)
         |> RoleFailure.from_payload()
         |> role_failure_json(),
-      "repaired" => Map.get(cold_read, :repaired, false)
+      "repaired" => ColdRead.repaired?(cold_read)
     }
   end
+
+  defp normalize_cold_read(nil), do: nil
+  defp normalize_cold_read(cold_read), do: ColdRead.from_payload(cold_read)
 
   defp role_failures_as_defects(role_failures) do
     role_failures
@@ -194,7 +199,7 @@ defmodule Workflow.Refine.Result do
   defp role_failure_detail_json(detail) when is_binary(detail), do: detail
 
   defp role_failure_detail_json(detail) do
-    if json_value?(detail), do: detail, else: diagnostic_string(detail)
+    if JSONValue.durable_detail?(detail), do: detail, else: diagnostic_string(detail)
   end
 
   defp usage_json(nil), do: nil
@@ -307,16 +312,6 @@ defmodule Workflow.Refine.Result do
 
     "{" <> encoded <> "}"
   end
-
-  defp json_value?(value) when is_nil(value) or is_boolean(value), do: true
-  defp json_value?(value) when is_integer(value) or is_binary(value), do: true
-  defp json_value?(value) when is_list(value), do: Enum.all?(value, &json_value?/1)
-
-  defp json_value?(value) when is_map(value) do
-    Enum.all?(value, fn {key, nested} -> is_binary(key) and json_value?(nested) end)
-  end
-
-  defp json_value?(_value), do: false
 
   defp atom_string(value) when is_atom(value), do: Atom.to_string(value)
   defp atom_string(value) when is_binary(value), do: value

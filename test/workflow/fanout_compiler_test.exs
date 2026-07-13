@@ -181,14 +181,15 @@ defmodule Workflow.FanoutCompilerTest do
                %GenericFanout{
                  address: [0],
                  width: 2,
-                 repeated: false,
-                 lanes: [
-                   [%Agent{address: [0, 0, 0], prompt: "research"}],
-                   [
-                     %Agent{address: [0, 1, 0], prompt: "draft"},
-                     %Agent{address: [0, 1, 1], prompt: "review"}
-                   ]
-                 ]
+                 lanes:
+                   {:explicit,
+                    [
+                      [%Agent{address: [0, 0, 0], prompt: "research"}],
+                      [
+                        %Agent{address: [0, 1, 0], prompt: "draft"},
+                        %Agent{address: [0, 1, 1], prompt: "review"}
+                      ]
+                    ]}
                },
                %Return{}
              ] = tree.nodes
@@ -222,13 +223,12 @@ defmodule Workflow.FanoutCompilerTest do
                %GenericFanout{
                  address: [0],
                  width: 3,
-                 lanes: [
-                   [
-                     %Agent{address: [0], prompt: "work"},
-                     %Agent{address: [0], prompt: "check"}
-                   ]
-                 ],
-                 repeated: true,
+                 lanes:
+                   {:repeat,
+                    [
+                      %Agent{address: [0], prompt: "work"},
+                      %Agent{address: [0], prompt: "check"}
+                    ]},
                  on_zero: :complete,
                  max_concurrency: nil,
                  bind: nil
@@ -237,6 +237,16 @@ defmodule Workflow.FanoutCompilerTest do
              ] = tree.nodes
 
       refute contains_function?(tree)
+    end
+
+    test "accepts the global width limit and rejects the next literal width" do
+      assert {:ok, %Workflow.Tree{nodes: [%GenericFanout{width: 64}, %Return{}]}} =
+               parse("fanout width: 64 do\n  agent \"work\"\nend\nreturn :ok")
+
+      assert {:error, %Finding{} = finding} =
+               parse("fanout width: 65 do\n  agent \"work\"\nend\nreturn :ok")
+
+      assert finding.message =~ "at most 64"
     end
 
     test "binds the ordered fanout result list after the fanout node" do

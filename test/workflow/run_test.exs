@@ -63,6 +63,33 @@ defmodule Workflow.RunTest do
     end
   end
 
+  defmodule ConcurrentActivityProvider do
+    @moduledoc false
+    @behaviour Workflow.Provider
+
+    @activity_count 16
+
+    @impl true
+    def run_agent(prompt, _schema, _key, opts) do
+      activity_sink = Keyword.fetch!(opts, :activity_sink)
+
+      tasks =
+        for _index <- 1..@activity_count do
+          Task.async(fn ->
+            activity_sink.(%{
+              kind: "tool",
+              label: "Shell",
+              summary: "same observation",
+              status: "completed"
+            })
+          end)
+        end
+
+      _indices = Task.await_many(tasks)
+      {:ok, %{"echo" => prompt}, %Usage{}, []}
+    end
+  end
+
   defmodule ConfigurableProvider do
     @moduledoc false
     @behaviour Workflow.Provider
@@ -152,6 +179,21 @@ defmodule Workflow.RunTest do
     end
   end
 
+  defp wait_for_activity_cursor_cleanup(key, tries \\ 100)
+
+  defp wait_for_activity_cursor_cleanup(key, 0) do
+    flunk("activity cursor was not released: #{inspect(key)}")
+  end
+
+  defp wait_for_activity_cursor_cleanup(key, tries) do
+    if Map.has_key?(:sys.get_state(Journal).activity_cursors, key) do
+      Process.sleep(10)
+      wait_for_activity_cursor_cleanup(key, tries - 1)
+    else
+      :ok
+    end
+  end
+
   defp assert_no_run_started(id) do
     assert Journal.fold(id) == []
     assert Registry.lookup(Workflow.Run.Registry, id) == []
@@ -162,7 +204,7 @@ defmodule Workflow.RunTest do
 
     assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: echo())
 
-    # The provider ran exactly once.
+    # The uninterrupted turn makes one provider call.
     assert_received {:agent_called, "say hello"}
     refute_received {:agent_called, _}
 
@@ -279,11 +321,13 @@ defmodule Workflow.RunTest do
       }
     ]
 
+    provider =
+      {ProviderFailureProvider, sink: self(), kind: :timeout, detail: detail, usage: usage, activity: activity}
+
     assert {:error, {:provider_failure, [2], :timeout, ^detail}} =
              Run.run(DemoWorkflow.tree(),
                run_id: id,
-               provider:
-                 {ProviderFailureProvider, sink: self(), kind: :timeout, detail: detail, usage: usage, activity: activity}
+               provider: provider
              )
 
     assert_received {:agent_called, "say hello", %IdempotencyKey{run_id: ^id, node_path: [2], iteration: 0, attempt: 0}}
@@ -442,7 +486,9 @@ defmodule Workflow.RunTest do
     assert {:ok, ^id} =
              Run.run(DemoWorkflow.tree(), run_id: id, provider: {StreamingActivityProvider, []})
 
-    assert_receive {:journal_committed, ^id, %Event{type: :agent_activity}}, @receive_timeout
+    for seq <- 0..4 do
+      assert_receive {:journal_committed, ^id, ^seq}, @receive_timeout
+    end
 
     events = wait_for_journal_type_count(id, :agent_activity, 1)
 
@@ -461,17 +507,51 @@ defmodule Workflow.RunTest do
              Enum.filter(events, &(&1.type == :agent_activity))
   end
 
+  test "concurrent activity observations receive unique journal-ordered indexes" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(DemoWorkflow.tree(), run_id: id, provider: {ConcurrentActivityProvider, []})
+
+    activity_events = Enum.filter(Journal.fold(id), &(&1.type == :agent_activity))
+    assert Enum.map(activity_events, & &1.payload.activity_index) == Enum.to_list(0..15)
+
+    assert [%{activity: activity}] = Status.of(id).agents
+    assert Enum.map(activity, & &1.activity_index) == Enum.to_list(0..15)
+    assert activity |> Enum.map(&activity_fields/1) |> Enum.uniq() |> length() == 1
+  end
+
+  test "activity cursor follows the provider owner lifecycle" do
+    id = run_id()
+    node = %Workflow.Node.Agent{address: [0], prompt: "inspect"}
+    key = %IdempotencyKey{run_id: id, node_path: node.address, iteration: 0, attempt: 0}
+    parent = self()
+
+    owner =
+      spawn(fn ->
+        send(parent, {:started, Journal.append_next(id, Event.agent_started(node, 0, key))})
+        receive do: (:stop -> :ok)
+      end)
+
+    assert_receive {:started, {:ok, %Event{type: :agent_started}}}, @receive_timeout
+    ref = Process.monitor(owner)
+    Process.exit(owner, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^owner, :killed}, @receive_timeout
+
+    cursor_key = {id, node.address, 0, 0}
+    :ok = wait_for_activity_cursor_cleanup(cursor_key)
+
+    entry = %Activity{kind: "tool", label: "late", summary: nil, status: :completed}
+    assert {:error, :inactive_activity} = Journal.append_next(id, Event.agent_activity(node, 0, 0, entry))
+  end
+
   test "status dedupes repeated durable activity identities and preserves distinct indexes" do
     id = run_id()
     node = %Workflow.Node.Agent{address: [0], prompt: "inspect"}
     entry = %{kind: "tool", label: "Shell", summary: "mix test", status: "completed"}
 
-    :ok =
-      Journal.append(id, 0, %{
-        Event.run_started(%Workflow.Tree{name: "t", nodes: []})
-        | run_id: id,
-          seq: 0
-      })
+    assert {:ok, %{seq: 0}} =
+             Journal.append_next(id, Event.run_started(%Workflow.Tree{name: "t", nodes: []}))
 
     assert {:ok, first} = Journal.append_next(id, Event.agent_activity(node, 0, 0, 0, entry))
     assert {:ok, replayed} = Journal.append_next(id, Event.agent_activity(node, 0, 0, 0, entry))
@@ -718,14 +798,12 @@ defmodule Workflow.RunTest do
 
     {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: echo())
 
-    assert_receive {:journal_committed, ^id, %Event{type: :run_started}}, @receive_timeout
-    assert_receive {:journal_committed, ^id, %Event{type: :phase_entered}}, @receive_timeout
-    assert_receive {:journal_committed, ^id, %Event{type: :log_emitted}}, @receive_timeout
-    assert_receive {:journal_committed, ^id, %Event{type: :agent_committed}}, @receive_timeout
-    assert_receive {:journal_committed, ^id, %Event{type: :run_completed}}, @receive_timeout
+    for seq <- 0..5 do
+      assert_receive {:journal_committed, ^id, ^seq}, @receive_timeout
+    end
   end
 
-  test "exactly-once: a committed agent effect is replayed from the journal, not re-run" do
+  test "a settled agent result is replayed from the journal without redelivery" do
     committed =
       Event.agent_committed(
         %Workflow.Node.Agent{address: [2], prompt: "say hello"},

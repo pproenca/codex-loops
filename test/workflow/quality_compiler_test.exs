@@ -12,7 +12,7 @@ defmodule Workflow.QualityCompilerTest do
   alias Workflow.Compiler.Finding
   alias Workflow.Node.Agent
   alias Workflow.Node.BudgetSlices
-  alias Workflow.Node.FanOut
+  alias Workflow.Node.GenericFanout
   alias Workflow.Node.Judge
   alias Workflow.Node.Refine
   alias Workflow.Node.Return
@@ -255,11 +255,11 @@ defmodule Workflow.QualityCompilerTest do
         """)
 
       assert [
-               %FanOut{
+               %GenericFanout{
                  address: [0],
                  width: %BudgetSlices{per: 10},
                  max_concurrency: nil,
-                 body: [%Agent{address: [0], prompt: "work"}]
+                 lanes: {:repeat, [%Agent{address: [0], prompt: "work"}]}
                },
                %Return{}
              ] = tree.nodes
@@ -271,7 +271,7 @@ defmodule Workflow.QualityCompilerTest do
       {:ok, tree} =
         parse("fan_out width: budget_slices(per: 4), max_concurrency: 2 do\n agent \"w\"\nend\nreturn :ok")
 
-      assert [%FanOut{max_concurrency: 2}, _] = tree.nodes
+      assert [%GenericFanout{max_concurrency: 2}, _] = tree.nodes
     end
 
     test "a width that is not budget_slices is a located finding (no author arithmetic)" do

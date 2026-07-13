@@ -25,9 +25,10 @@ defmodule Workflow.Journal do
   migrated successfully.
 
   The ETF blob is an internal, user-owned persistence format, not an import format.
-  Decoding uses OTP's `:safe` option. Workflow source is parsed with an existing-atom
-  encoder, so persisted events contain only atoms compiled into the release; a blob
-  that tries to mint a new atom is rejected.
+  Decoding uses OTP's `:safe` option. At boot the journal loads the finite module
+  vocabulary compiled into this application, making every legitimate persisted
+  atom existing before the first fold. Workflow source cannot add atoms, and a blob
+  containing anything outside that release-owned vocabulary is rejected.
   """
   use GenServer
 
@@ -39,18 +40,12 @@ defmodule Workflow.Journal do
 
   def start_link(_opts), do: GenServer.start_link(__MODULE__, :ok, name: __MODULE__)
 
-  @doc "Append a single event at `seq`. Called only by the run's live writer."
-  @spec append(String.t(), non_neg_integer(), Event.t()) :: :ok
-  def append(run_id, seq, %Event{} = event) do
-    GenServer.call(__MODULE__, {:append, run_id, seq, event})
-  end
-
   @doc """
   Append an event at the next available sequence number for `run_id`.
 
   Used by callers that need the journal to allocate the next durable sequence.
   """
-  @spec append_next(String.t(), Event.t()) :: {:ok, Event.t()}
+  @spec append_next(String.t(), Event.t()) :: {:ok, Event.t()} | {:error, :inactive_activity}
   def append_next(run_id, %Event{} = event) do
     GenServer.call(__MODULE__, {:append_next, run_id, event})
   end
@@ -105,6 +100,7 @@ defmodule Workflow.Journal do
 
   @impl true
   def init(:ok) do
+    :ok = Code.ensure_all_loaded!(Application.spec(:codex_loops, :modules))
     path = database_path()
     File.mkdir_p!(Path.dirname(path))
     {:ok, db} = Sqlite3.open(path)
@@ -112,42 +108,37 @@ defmodule Workflow.Journal do
     :ok = migrate(db)
     _table = :ets.new(@metadata_table, [:named_table, :protected, read_concurrency: true])
     true = :ets.insert(@metadata_table, {:path, path})
-    {:ok, %{db: db, path: path}}
+    {:ok, %{db: db, path: path, activity_cursors: %{}}}
   end
 
   @impl true
   def terminate(_reason, %{db: db}), do: Sqlite3.close(db)
 
   @impl true
-  def handle_call({:append, run_id, seq, %Event{} = event}, _from, %{db: db} = state) do
-    sql = """
-    INSERT INTO events (run_id, seq, schema, type, event_blob)
-    VALUES (?, ?, ?, ?, ?)
-    """
+  def handle_call({:append_next, run_id, %Event{} = event}, {owner, _tag}, %{db: db} = state) do
+    if inactive_activity?(run_id, event, state.activity_cursors) do
+      {:reply, {:error, :inactive_activity}, state}
+    else
+      {event, activity_cursors} = prepare_event(run_id, event, owner, state.activity_cursors)
+      seq = last_seq(db, run_id) + 1
+      event = %{event | run_id: run_id, seq: seq}
+      :ok = insert_event(db, run_id, seq, event)
 
-    :ok =
-      exec(db, sql, [
-        run_id,
-        seq,
-        event.schema,
-        Atom.to_string(event.type),
-        {:blob, :erlang.term_to_binary(event)}
-      ])
-
-    {:reply, :ok, state}
-  end
-
-  def handle_call({:append_next, run_id, %Event{} = event}, _from, %{db: db} = state) do
-    seq = last_seq(db, run_id) + 1
-    event = %{event | run_id: run_id, seq: seq}
-    :ok = insert_event(db, run_id, seq, event)
-
-    {:reply, {:ok, event}, state}
+      {:reply, {:ok, event}, %{state | activity_cursors: activity_cursors}}
+    end
   end
 
   def handle_call({:register_run, run_id}, _from, %{db: db} = state) do
     :ok = exec(db, "INSERT OR IGNORE INTO runs (run_id) VALUES (?)", [run_id])
     {:reply, :ok, state}
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, _reason}, state) do
+    activity_cursors =
+      Map.reject(state.activity_cursors, fn {_key, {_next_index, cursor_ref}} -> cursor_ref == ref end)
+
+    {:noreply, %{state | activity_cursors: activity_cursors}}
   end
 
   defp database_path do
@@ -194,12 +185,118 @@ defmodule Workflow.Journal do
     ])
   end
 
+  defp prepare_event(run_id, %Event{type: :agent_started, payload: payload} = event, owner, cursors) do
+    key = activity_key(run_id, payload.address, payload.iteration, payload.attempt)
+
+    case Map.fetch(cursors, key) do
+      {:ok, _cursor} ->
+        {event, cursors}
+
+      :error ->
+        {event, Map.put(cursors, key, {0, Process.monitor(owner)})}
+    end
+  end
+
+  defp prepare_event(run_id, %Event{type: :agent_activity, payload: payload} = event, _owner, cursors) do
+    key = activity_key(run_id, payload.address, payload.iteration, payload.attempt)
+
+    case {payload.activity_index, Map.fetch(cursors, key)} do
+      {nil, :error} ->
+        raise ArgumentError, "activity arrived outside an active provider attempt"
+
+      {nil, {:ok, {next_index, ref}}} ->
+        event = %{event | payload: %{payload | activity_index: next_index}}
+        {event, Map.put(cursors, key, {next_index + 1, ref})}
+
+      {index, :error} when is_integer(index) and index >= 0 ->
+        {event, cursors}
+
+      {index, {:ok, {next_index, ref}}} when is_integer(index) and index >= 0 ->
+        {event, Map.put(cursors, key, {max(next_index, index + 1), ref})}
+
+      {invalid, _cursor} ->
+        raise ArgumentError, "invalid activity index: #{inspect(invalid)}"
+    end
+  end
+
+  defp prepare_event(run_id, %Event{type: :agent_committed, payload: payload} = event, _owner, cursors) do
+    attempt = payload.idempotency_key.attempt
+    {event, drop_activity_cursor(cursors, activity_key(run_id, payload.address, payload.iteration, attempt))}
+  end
+
+  defp prepare_event(run_id, %Event{type: :agent_attempt_rejected, payload: payload} = event, _owner, cursors) do
+    {event, drop_activity_cursor(cursors, activity_key(run_id, payload.address, payload.iteration, payload.attempt))}
+  end
+
+  defp prepare_event(run_id, %Event{type: :agent_failed, payload: payload} = event, _owner, cursors) do
+    key = activity_key(run_id, payload.address, payload.iteration, max(payload.attempts - 1, 0))
+    {event, drop_activity_cursor(cursors, key)}
+  end
+
+  defp prepare_event(run_id, %Event{type: :refine_role_failed, payload: payload} = event, _owner, cursors) do
+    attempt = max(payload.attempts - 1, 0)
+
+    cursors =
+      case payload.round do
+        round when is_integer(round) ->
+          drop_activity_cursor(cursors, activity_key(run_id, payload.role_address, round, attempt))
+
+        nil ->
+          drop_activity_cursors(cursors, fn {cursor_run_id, address, _iteration, cursor_attempt} ->
+            cursor_run_id == run_id and address == payload.role_address and cursor_attempt == attempt
+          end)
+      end
+
+    {event, cursors}
+  end
+
+  defp prepare_event(run_id, %Event{type: type} = event, _owner, cursors) when type in [:run_completed, :run_failed] do
+    {event,
+     drop_activity_cursors(cursors, fn {cursor_run_id, _address, _iteration, _attempt} -> cursor_run_id == run_id end)}
+  end
+
+  defp prepare_event(_run_id, %Event{} = event, _owner, cursors), do: {event, cursors}
+
+  defp inactive_activity?(run_id, %Event{type: :agent_activity, payload: %{activity_index: nil} = payload}, cursors) do
+    key = activity_key(run_id, payload.address, payload.iteration, payload.attempt)
+    not Map.has_key?(cursors, key)
+  end
+
+  defp inactive_activity?(_run_id, %Event{}, _cursors), do: false
+
+  defp activity_key(run_id, address, iteration, attempt), do: {run_id, address, iteration, attempt}
+
+  defp drop_activity_cursor(cursors, key) do
+    case Map.pop(cursors, key) do
+      {{_next_index, ref}, cursors} ->
+        demonitor(ref)
+        cursors
+
+      {nil, cursors} ->
+        cursors
+    end
+  end
+
+  defp drop_activity_cursors(cursors, matches?) do
+    Enum.reduce(cursors, %{}, fn {key, {_next_index, ref} = cursor}, kept ->
+      if matches?.(key) do
+        demonitor(ref)
+        kept
+      else
+        Map.put(kept, key, cursor)
+      end
+    end)
+  end
+
+  defp demonitor(nil), do: :ok
+  defp demonitor(ref), do: Process.demonitor(ref, [:flush])
+
   # sobelow_skip ["Misc.BinToTerm"]
   defp decode_event(blob) when is_binary(blob) and byte_size(blob) <= @max_event_blob_bytes do
     case :erlang.binary_to_term(blob, [:safe]) do
       %Event{} = event ->
         if data_only?(event) do
-          event
+          copy_data(event)
         else
           raise ArgumentError, "journal event contains a runtime-only term"
         end
@@ -219,9 +316,32 @@ defmodule Workflow.Journal do
   defp data_only?(term) when is_map(term),
     do: Enum.all?(term, fn {key, value} -> data_only?(key) and data_only?(value) end)
 
-  defp data_only?(term) when is_list(term), do: Enum.all?(term, &data_only?/1)
+  defp data_only?([head | tail]), do: data_only?(head) and data_only?(tail)
+  defp data_only?([]), do: true
   defp data_only?(term) when is_tuple(term), do: term |> Tuple.to_list() |> Enum.all?(&data_only?/1)
   defp data_only?(_term), do: true
+
+  defp copy_data(value) when is_binary(value), do: :binary.copy(value)
+  defp copy_data([head | tail]), do: [copy_data(head) | copy_data(tail)]
+  defp copy_data([]), do: []
+
+  defp copy_data(value) when is_tuple(value) do
+    value
+    |> Tuple.to_list()
+    |> Enum.map(&copy_data/1)
+    |> List.to_tuple()
+  end
+
+  defp copy_data(%_{} = value) do
+    fields = value |> Map.from_struct() |> copy_data()
+    struct(value.__struct__, fields)
+  end
+
+  defp copy_data(value) when is_map(value) do
+    Map.new(value, fn {key, item} -> {copy_data(key), copy_data(item)} end)
+  end
+
+  defp copy_data(value), do: value
 
   defp last_seq(db, run_id) do
     case query(db, "SELECT seq FROM events WHERE run_id = ? ORDER BY seq DESC LIMIT 1", [run_id]) do
@@ -232,7 +352,7 @@ defmodule Workflow.Journal do
 
   defp read(fun) when is_function(fun, 1) do
     [{:path, path}] = :ets.lookup(@metadata_table, :path)
-    {:ok, db} = Sqlite3.open(path, [:readonly])
+    {:ok, db} = Sqlite3.open(path, mode: :readonly)
     :ok = Sqlite3.set_busy_timeout(db, 5_000)
 
     try do

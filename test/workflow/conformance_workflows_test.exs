@@ -22,6 +22,6 @@ defmodule Workflow.ConformanceWorkflowsTest do
     assert match?(%Emit{}, List.last(dataflow.nodes))
     assert match?(%EmitResult{}, List.last(refine.nodes))
 
-    assert Enum.any?(core.nodes, &match?(%GenericFanout{repeated: false}, &1))
+    assert Enum.any?(core.nodes, &match?(%GenericFanout{lanes: {:explicit, _}}, &1))
   end
 end

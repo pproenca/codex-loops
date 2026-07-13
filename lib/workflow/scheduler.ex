@@ -9,7 +9,7 @@ defmodule Workflow.Scheduler do
 
   alias Workflow.Journal
   alias Workflow.PackageVersion
-  alias Workflow.Provider
+  alias Workflow.Provider.Mock
   alias Workflow.Run
   alias Workflow.Scheduler.Error
   alias Workflow.Scheduler.Health
@@ -28,8 +28,7 @@ defmodule Workflow.Scheduler do
     checks = %{
       otp_app: available?(application_started?(@app)),
       journal: available?(process_alive?(Journal)),
-      pubsub: available?(process_alive?(Workflow.PubSub)),
-      endpoint: available?(process_alive?(Workflow.Web.Endpoint))
+      pubsub: available?(process_alive?(Workflow.PubSub))
     }
 
     if Enum.all?(checks, fn {_dependency, status} -> status == :available end) do
@@ -73,7 +72,6 @@ defmodule Workflow.Scheduler do
     with {:ok, run_id} <- route_safe_run_id(run_id),
          :ok <- ensure_run_exists(run_id),
          {:ok, provider} <- run_provider(params),
-         :ok <- ensure_not_running(run_id),
          {:ok, path} <- resume_script_path(run_id, params),
          {:ok, tree} <- Script.load_tree(path) do
       case Run.start(tree,
@@ -200,25 +198,17 @@ defmodule Workflow.Scheduler do
 
   defp route_safe_run_id(id) do
     if Regex.match?(~r/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/, id) do
-      {:ok, id}
+      {:ok, :binary.copy(id)}
     else
       {:error, Error.invalid_run_id()}
     end
   end
 
   defp ensure_run_exists(run_id) do
-    if run_id in Journal.run_ids() do
+    if Journal.run_exists?(run_id) do
       :ok
     else
       {:error, Error.run_not_found(run_id)}
-    end
-  end
-
-  defp ensure_not_running(run_id) do
-    if run_running?(run_id) do
-      {:error, Error.run_already_running(run_id)}
-    else
-      :ok
     end
   end
 
@@ -249,9 +239,9 @@ defmodule Workflow.Scheduler do
 
   defp run_provider(params) do
     case fetch_param(params, :provider, "provider") do
-      :missing -> {:ok, Provider.select(:mock, [])}
-      {:ok, provider} when provider in ["mock", :mock] -> {:ok, Provider.select(:mock, [])}
-      {:ok, provider} when provider in ["codex", :codex] -> {:ok, Provider.select(:codex, [])}
+      :missing -> {:ok, {Mock, []}}
+      {:ok, provider} when provider in ["mock", :mock] -> {:ok, {Mock, []}}
+      {:ok, provider} when provider in ["codex", :codex] -> {:ok, {Workflow.Provider.Codex, []}}
       {:ok, _unsupported} -> {:error, Error.invalid_provider(@supported_providers)}
     end
   end

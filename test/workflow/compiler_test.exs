@@ -119,6 +119,13 @@ defmodule Workflow.CompilerTest do
       assert [%Agent{retries: 5}, %Return{}] = tree.nodes
     end
 
+    test "rejects retry budgets above the global limit" do
+      assert {:error, %Finding{} = finding} =
+               parse(~s|agent("go", schema: %{"type" => "object"}, retries: 6)\nreturn(:ok)|)
+
+      assert finding.message =~ "at most 5"
+    end
+
     test "agent options with no schema fail closed (located finding)" do
       assert {:error, %Finding{line: 1} = f} = parse("agent(\"go\", retries: 2)\nreturn(:ok)")
       assert f.message =~ "requires a `schema:`"

@@ -225,7 +225,7 @@ done
 
 assert_contains "$status" '"state":"completed"' "run completed"
 assert_contains "$status" '"treeName":"scheduler-release-proof"' "status tree name"
-assert_contains "$status" '"eventCount":5' "status event count"
+assert_contains "$status" '"eventCount":6' "status event count"
 
 echo "-- read run events through API"
 events="$tmpdir/events.json"
@@ -233,6 +233,7 @@ curl_get "/api/runs/$run_id/events" "$events"
 assert_contains "$events" '"type":"run_started"' "events include run_started"
 assert_contains "$events" '"type":"phase_entered"' "events include phase_entered"
 assert_contains "$events" '"type":"log_emitted"' "events include log_emitted"
+assert_contains "$events" '"type":"agent_started"' "events include agent_started"
 assert_contains "$events" '"type":"agent_committed"' "events include agent_committed"
 assert_contains "$events" '"type":"run_completed"' "events include run_completed"
 
@@ -240,7 +241,7 @@ echo "-- fetch run UI"
 ui="$tmpdir/run.html"
 curl_get "/runs/$run_id" "$ui"
 assert_contains "$ui" "data-run-id=\"$run_id\"" "run UI has target run id"
-assert_contains "$ui" "scheduler-release-proof" "run UI renders workflow projection"
+assert_contains "$ui" 'data-testid="status-strip"' "run UI renders the LiveView shell"
 
 echo "-- run workflow through user CLI"
 cli_run_id="${run_id}_cli"

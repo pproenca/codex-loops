@@ -9,18 +9,17 @@ defmodule Workflow.Event do
   keeps the fold deterministic.
   """
 
-  alias Workflow.Node.FanOut
   alias Workflow.Node.GenericFanout
   alias Workflow.Node.Judge
   alias Workflow.Node.Parallel
   alias Workflow.Node.Pipeline
   alias Workflow.Node.Refine
   alias Workflow.Node.Verify
-  alias Workflow.Refine.OpenFinding
   alias Workflow.Refine.Reviewer
   alias Workflow.Refine.ReviewerAdapter
-  alias Workflow.Refine.ReviewerDecision
   alias Workflow.Refine.RoleFailure
+  alias Workflow.Refine.RoundDecision
+  alias Workflow.Refine.TerminalProjection
 
   @schema 1
 
@@ -380,26 +379,10 @@ defmodule Workflow.Event do
     }
   end
 
-  def refine_round_decision(%Refine{} = node, round, decision) do
+  def refine_round_decision(%Refine{} = node, round, %RoundDecision{} = decision) do
     %__MODULE__{
       type: :refine_round_decision,
-      payload:
-        %{address: node.address, round: round}
-        |> Map.merge(
-          Map.take(decision, [
-            :consensus,
-            :approval_count,
-            :total,
-            :reviewer_decisions,
-            :artifact,
-            :open_findings,
-            :role_failures,
-            :failed_reviewers,
-            :report_snippets,
-            :cold_read
-          ])
-        )
-        |> serialize_refine_entities()
+      payload: decision |> RoundDecision.to_payload() |> Map.merge(%{address: node.address, round: round})
     }
   end
 
@@ -410,47 +393,20 @@ defmodule Workflow.Event do
     }
   end
 
-  def refine_completed(%Refine{} = node, attrs) do
+  def refine_completed(%Refine{} = node, %TerminalProjection{} = projection) do
     %__MODULE__{
       type: :refine_completed,
-      payload:
-        %{address: node.address}
-        |> Map.merge(
-          Map.take(attrs, [
-            :converged,
-            :final_round,
-            :rounds,
-            :artifact,
-            :open_findings,
-            :role_failures,
-            :failed_reviewers,
-            :report_snippets,
-            :cold_read
-          ])
-        )
-        |> serialize_refine_entities()
+      payload: projection |> TerminalProjection.to_payload() |> Map.put(:address, node.address)
     }
   end
 
-  def refine_non_converged(%Refine{} = node, attrs) do
+  def refine_non_converged(%Refine{} = node, %TerminalProjection{} = projection, reason) do
     %__MODULE__{
       type: :refine_non_converged,
       payload:
-        %{address: node.address, reason: :max_rounds}
-        |> Map.merge(
-          Map.take(attrs, [
-            :reason,
-            :final_round,
-            :rounds,
-            :artifact,
-            :open_findings,
-            :role_failures,
-            :failed_reviewers,
-            :report_snippets,
-            :cold_read
-          ])
-        )
-        |> serialize_refine_entities()
+        projection
+        |> TerminalProjection.to_payload()
+        |> Map.merge(%{address: node.address, converged: false, reason: reason})
     }
   end
 
@@ -500,40 +456,6 @@ defmodule Workflow.Event do
       name: name,
       adapter: adapter
     })
-  end
-
-  defp serialize_refine_entities(attrs) do
-    attrs
-    |> map_present(:open_findings, &Enum.map(&1, fn %OpenFinding{} = finding -> OpenFinding.to_payload(finding) end))
-    |> map_present(:role_failures, &Enum.map(&1, fn %RoleFailure{} = failure -> RoleFailure.to_payload(failure) end))
-    |> map_present(
-      :reviewer_decisions,
-      &Enum.map(&1, fn %ReviewerDecision{} = decision -> ReviewerDecision.to_payload(decision) end)
-    )
-    |> map_present(:cold_read, &serialize_cold_read/1)
-  end
-
-  defp serialize_cold_read(nil), do: nil
-
-  defp serialize_cold_read(%{state: :completed} = cold_read) do
-    cold_read
-    |> map_present(:open_findings, &Enum.map(&1, fn %OpenFinding{} = finding -> OpenFinding.to_payload(finding) end))
-    |> map_present(:reviewer_decision, fn %ReviewerDecision{} = decision ->
-      ReviewerDecision.to_payload(decision)
-    end)
-  end
-
-  defp serialize_cold_read(%{state: :failed} = cold_read) do
-    map_present(cold_read, :role_failure, fn %RoleFailure{} = failure ->
-      RoleFailure.to_payload(failure)
-    end)
-  end
-
-  defp map_present(map, key, fun) do
-    case Map.fetch(map, key) do
-      {:ok, value} -> Map.put(map, key, fun.(value))
-      :error -> map
-    end
   end
 
   defp gate_descriptors(%Refine{gates: gates}) when map_size(gates) == 0, do: %{}
@@ -588,24 +510,6 @@ defmodule Workflow.Event do
         winner: winner
       }
     }
-  end
-
-  @doc """
-  Budget-scaled fan-out markers. `fan_out_started` **journals the decided width**
-  (`floor(remaining / per)`) so a resume replays that width rather than recomputing
-  it against a since-spent ledger; `fan_out_completed` marks the join. Each
-  branch's turns are journaled as ordinary `agent_committed` events at their
-  `[branch, stage]` addresses.
-  """
-  def fan_out_started(%FanOut{} = node, width) do
-    %__MODULE__{
-      type: :fan_out_started,
-      payload: %{address: node.address, per: node.width.per, width: width}
-    }
-  end
-
-  def fan_out_completed(%FanOut{} = node) do
-    %__MODULE__{type: :fan_out_completed, payload: %{address: node.address}}
   end
 
   def run_completed(value) do

@@ -365,7 +365,18 @@ defmodule Workflow.Web.RunLiveTest do
   end
 
   defp append_event(run_id, seq, %Event{} = event) do
-    :ok = Journal.append(run_id, seq, %{event | run_id: run_id, seq: seq})
+    assert {:ok, %{seq: ^seq}} = Journal.append_next(run_id, event)
+  end
+
+  defp live_run(run_id) do
+    case live(conn(), "/runs/#{run_id}") do
+      {:ok, view, html} ->
+        html = if Journal.run_exists?(run_id), do: render_async(view, 1_000), else: html
+        {:ok, view, html}
+
+      other ->
+        other
+    end
   end
 
   defp wait_for_render(view, text, attempts \\ 50)
@@ -418,27 +429,6 @@ defmodule Workflow.Web.RunLiveTest do
     assert_receive {:DOWN, ^ref, :process, ^writer, :normal}
   end
 
-  defp await_lease_released(run_id, tries \\ 200) do
-    cond do
-      Registry.lookup(Workflow.Run.Registry, run_id) == [] ->
-        :ok
-
-      tries == 0 ->
-        flunk("lease for #{run_id} was never released")
-
-      true ->
-        Process.sleep(5)
-        await_lease_released(run_id, tries - 1)
-    end
-  end
-
-  defp kill_and_await(run_id, pid) do
-    ref = Process.monitor(pid)
-    Process.exit(pid, :kill)
-    assert_receive {:DOWN, ^ref, :process, ^pid, :killed}
-    await_lease_released(run_id)
-  end
-
   defp assert_in_order(rendered, snippets) do
     Enum.reduce(snippets, -1, fn snippet, previous_index ->
       index =
@@ -469,7 +459,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
     {writer, turn} = start_gated(id)
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     strip = view |> element("[data-testid=status-strip]") |> render()
 
@@ -499,18 +489,12 @@ defmodule Workflow.Web.RunLiveTest do
     recoverable_id = run_id()
     path = api_workflow()
     {:ok, tree} = Script.load_tree(path)
+    assert :ok = Journal.register_run(recoverable_id)
 
-    {:ok, ^recoverable_id, recoverable_writer} =
-      Run.start(tree,
-        run_id: recoverable_id,
-        provider: {GateProvider, sink: self()},
-        script_path: path
-      )
+    assert {:ok, %{seq: 0}} =
+             Journal.append_next(recoverable_id, Event.run_started(tree, nil, path))
 
-    assert_receive {:at_agent, _recoverable_turn}
-    kill_and_await(recoverable_id, recoverable_writer)
-
-    {:ok, recoverable_view, _html} = live(conn(), "/runs/#{recoverable_id}")
+    {:ok, recoverable_view, _html} = live_run(recoverable_id)
 
     assert has_element?(
              recoverable_view,
@@ -528,17 +512,10 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
     path = api_workflow()
     {:ok, tree} = Script.load_tree(path)
+    assert :ok = Journal.register_run(id)
+    assert {:ok, %{seq: 0}} = Journal.append_next(id, Event.run_started(tree))
 
-    {:ok, ^id, writer} =
-      Run.start(tree,
-        run_id: id,
-        provider: {GateProvider, sink: self()}
-      )
-
-    assert_receive {:at_agent, ^writer}
-    kill_and_await(id, writer)
-
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(
              view,
@@ -557,7 +534,7 @@ defmodule Workflow.Web.RunLiveTest do
     {writer, turn} = start_gated(id)
 
     # Mounted mid-run: the initial projection already reflects the committed prefix.
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
     html = wait_for_render(view, "running")
     assert html =~ "running"
     assert html =~ "plan"
@@ -587,7 +564,7 @@ defmodule Workflow.Web.RunLiveTest do
 
     assert_receive {:at_agent, turn}
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
     html = wait_for_render(view, "running")
 
     assert html =~ "running"
@@ -620,7 +597,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
     assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
     status = Status.of(id)
 
     # Every workflow-body field is sourced from the fold; lifecycle availability is
@@ -640,7 +617,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert {:ok, ^id} =
              Run.run(LogHeavyWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     recent = view |> element("[data-testid=recent-events]") |> render()
 
@@ -666,7 +643,7 @@ defmodule Workflow.Web.RunLiveTest do
 
     assert {:ok, ^id} = Run.run(DemoWorkflow.tree(), run_id: id, provider: {EchoProvider, sink: self()})
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
     html = wait_for_render(view, "Completed successfully")
 
     assert html =~ ~s(href="/assets/codex-loops/run.css?v=5")
@@ -703,7 +680,7 @@ defmodule Workflow.Web.RunLiveTest do
 
     # A brand-new LiveView (a fresh connection that never observed the earlier
     # broadcasts live) must rebuild the committed prefix from the scheduler snapshot.
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
     html = wait_for_render(view, "running")
     committed = Status.of(id)
 
@@ -718,7 +695,7 @@ defmodule Workflow.Web.RunLiveTest do
     finish(writer, turn)
 
     # After completion, another fresh reconnect rebuilds the terminal state too.
-    {:ok, view2, _html2} = live(conn(), "/runs/#{id}")
+    {:ok, view2, _html2} = live_run(id)
     html2 = wait_for_render(view2, "completed")
     assert html2 =~ "completed"
     assert length(Journal.fold(id)) == 6
@@ -728,7 +705,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
     path = api_workflow()
 
-    {:ok, view, html} = live(conn(), "/runs/#{id}")
+    {:ok, view, html} = live_run(id)
     view_pid = view.pid
 
     assert html =~ "pending"
@@ -756,7 +733,7 @@ defmodule Workflow.Web.RunLiveTest do
       id = run_id()
       path = codex_streaming_workflow()
 
-      {:ok, view, html} = live(conn(), "/runs/#{id}")
+      {:ok, view, html} = live_run(id)
       assert html =~ "pending"
 
       conn = post_json(json_conn(), "/api/runs", %{script_path: path, run_id: id, provider: "codex"})
@@ -797,7 +774,7 @@ defmodule Workflow.Web.RunLiveTest do
       refute Map.has_key?(status_response["data"], "events")
       refute Map.has_key?(status_response["data"], "journalEvents")
 
-      {:ok, fresh_view, _fresh_html} = live(conn(), "/runs/#{id}")
+      {:ok, fresh_view, _fresh_html} = live_run(id)
       fresh_html = wait_for_render(fresh_view, "codex final draft")
       assert fresh_html =~ "codex final draft"
       assert fresh_html =~ "Turn started"
@@ -834,7 +811,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert {:ok, ^id} =
              Run.run(InspectorWorkflow.tree(), run_id: id, provider: {ActivityProvider, sink: self()})
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(view, "[data-testid=run-header]", "inspector-demo")
     assert has_element?(view, "[data-testid=phase-list]", "plan")
@@ -881,7 +858,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert {:ok, ^id} =
              Run.run(InspectorWorkflow.tree(), run_id: id, provider: {ActivityProvider, sink: self()})
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(
              view,
@@ -931,7 +908,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert_receive {:agent_called, "first-agent"}
     assert_receive {:at_agent, first_turn}
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(
              view,
@@ -991,7 +968,7 @@ defmodule Workflow.Web.RunLiveTest do
     send(first_turn, :proceed)
     assert_receive {:at_agent, second_turn}
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
     wait_for_render(view, "ship")
 
     view
@@ -1020,7 +997,7 @@ defmodule Workflow.Web.RunLiveTest do
     assert {:ok, ^id} =
              Run.run(InspectorWorkflow.tree(), run_id: id, provider: {ActivityProvider, sink: self()})
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     collapsed =
       view
@@ -1059,7 +1036,7 @@ defmodule Workflow.Web.RunLiveTest do
                provider: {RetryActivityProvider, sink: self(), mode: :retry_twice_long}
              )
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     row =
       view
@@ -1083,7 +1060,7 @@ defmodule Workflow.Web.RunLiveTest do
                provider: {RetryActivityProvider, sink: self(), mode: :retry}
              )
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(view, "[data-testid=agent-detail]", "classify")
 
@@ -1117,7 +1094,7 @@ defmodule Workflow.Web.RunLiveTest do
                provider: {RetryActivityProvider, sink: self(), mode: :fail}
              )
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(view, "[data-testid=phase-list] [data-status=failed]", "validate")
     assert has_element?(view, "[data-testid=phase-agents]", "classify")
@@ -1148,6 +1125,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
     usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
     node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
+    assert :ok = Journal.register_run(id)
 
     append_event(id, 0, Event.phase_entered(%Phase{address: [0], name: "loop"}))
 
@@ -1203,7 +1181,7 @@ defmodule Workflow.Web.RunLiveTest do
       )
     )
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(view, "[data-testid=phase-agent-loop-work-i0]")
     assert has_element?(view, "[data-testid=phase-agent-loop-work-i1]")
@@ -1249,6 +1227,7 @@ defmodule Workflow.Web.RunLiveTest do
     id = run_id()
     usage = %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}
     node = %Workflow.Node.Agent{address: [1], prompt: "loop work"}
+    assert :ok = Journal.register_run(id)
 
     append_event(id, 0, Event.phase_entered(%Phase{address: [0], name: "loop"}))
 
@@ -1291,7 +1270,7 @@ defmodule Workflow.Web.RunLiveTest do
       Event.agent_failed(node, 1, 1, {:missing_required, "label"})
     )
 
-    {:ok, view, _html} = live(conn(), "/runs/#{id}")
+    {:ok, view, _html} = live_run(id)
 
     assert has_element?(view, "[data-testid=phase-agent-loop-work-i0]")
 

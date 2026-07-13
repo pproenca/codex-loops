@@ -262,8 +262,7 @@ defmodule Workflow.Web.SchedulerAPITest do
                "checks" => %{
                  "otp_app" => "available",
                  "journal" => "available",
-                 "pubsub" => "available",
-                 "endpoint" => "available"
+                 "pubsub" => "available"
                }
              }
            } = json_response(conn, 200)
@@ -478,12 +477,12 @@ defmodule Workflow.Web.SchedulerAPITest do
            } = json_response(conn, 200)
 
     assert resume_action == %{
-             "action" => "resume",
-             "label" => "Resume",
-             "enabled" => true,
-             "reason" => "The writer is stopped before a terminal event.",
-             "method" => "post",
-             "href" => "/api/runs/#{running_id}/resume"
+             "action" => "resume_unavailable",
+             "label" => "Resume unavailable",
+             "enabled" => false,
+             "reason" => "A provider attempt has an unknown outcome; replay could duplicate a paid effect.",
+             "method" => nil,
+             "href" => nil
            }
   end
 
@@ -493,16 +492,8 @@ defmodule Workflow.Web.SchedulerAPITest do
     id = run_id("scheduler_api_lifecycle_missing_script")
     {:ok, tree} = Script.load_tree(path)
 
-    assert {:ok, ^id, writer} =
-             Run.start(tree,
-               run_id: id,
-               provider: {GateProvider, sink: self()}
-             )
-
-    assert_receive {:agent_called, "ship it"}
-    assert_receive {:at_agent, ^writer}
-
-    kill_and_await(id, writer)
+    assert :ok = Journal.register_run(id)
+    assert {:ok, %{seq: 0}} = Journal.append_next(id, Workflow.Event.run_started(tree))
 
     conn = get(json_conn(), "/api/runs/#{id}")
 

@@ -1,6 +1,6 @@
 defmodule Workflow.ResumeTest do
   @moduledoc """
-  Slice #5: the exactly-once effect boundary, resume, and the single-writer run
+  The durable at-most-once effect boundary, resume, and the single-writer run
   lease — proven at the highest seam (`Workflow.Run` + a real crash + a resume),
   never by inspecting process internals. Each assertion is on external behaviour:
   a call-counting / charge-counting mock provider, the committed journal, the
@@ -158,7 +158,7 @@ defmodule Workflow.ResumeTest do
     assert status.state == :failed
     assert status.failure.reason == {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}
 
-    # The already-settled first turn remains committed exactly once.
+    # The already-settled first turn remains one committed journal result.
     committed = Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
     assert Enum.map(committed, & &1.payload.address) == [[0]]
   end
@@ -195,8 +195,8 @@ defmodule Workflow.ResumeTest do
     refute_received {:agent_called, "b"}
     refute_received {:agent_called, "gate"}
 
-    # The bracket is exactly-once: resume did not double-emit the started/completed
-    # markers, so a fold that pairs them sees a single region.
+    # Resume does not duplicate the structural started/completed markers, so a
+    # fold that pairs them sees a single region.
     types = id |> Journal.fold() |> Enum.map(& &1.type)
     assert Enum.count(types, &(&1 == :parallel_started)) == 1
     assert Enum.count(types, &(&1 == :parallel_completed)) == 1
@@ -299,8 +299,8 @@ defmodule Workflow.ResumeTest do
     [fanout, _return] = tree.nodes
 
     :ok = Journal.register_run(id)
-    :ok = Journal.append(id, 0, Event.run_started(tree, 5))
-    :ok = Journal.append(id, 1, Event.fanout_started(fanout, 3))
+    assert {:ok, %{seq: 0}} = Journal.append_next(id, Event.run_started(tree, 5))
+    assert {:ok, %{seq: 1}} = Journal.append_next(id, Event.fanout_started(fanout, 3))
 
     assert {:ok, ^id} =
              Run.run(JournaledDynamicFanout.tree(),

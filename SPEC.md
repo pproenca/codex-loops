@@ -634,24 +634,19 @@ legacy surfaces, but conformance is judged by their specified core desugaring.
 | `EmitResult` | `[:address, :binding_ref]` | — | `binding_ref :: BindingRef` |
 | `Loop` | `[:address, :body, :max_iterations]` | `until: nil, on_exhausted: :stop` | `body :: [struct()]`; `until :: Predicate.t() \| nil`; `max_iterations :: pos_integer()`; `on_exhausted :: :stop \| :fail \| :accept_current` |
 | `Until` | `[:address, :predicate]` | — | `predicate :: Predicate.t()` |
-| `Fanout` | `[:address, :width, :lanes]` | `bind: nil, max_concurrency: nil, on_zero: :complete, repeated: true` | `width :: WidthExpr.t()`; `lanes :: [[Agent.t()]]`; `repeated :: boolean()`; `bind :: atom() \| nil`; `max_concurrency :: pos_integer() \| nil`; `on_zero :: :complete \| :fail` |
+| `Fanout` | `[:address, :width, :lanes]` | `bind: nil, max_concurrency: nil, on_zero: :complete` | `width :: WidthExpr.t()`; `lanes :: {:repeat, [Agent.t()]} \| {:explicit, [[Agent.t()]]}`; `bind :: atom() \| nil`; `max_concurrency :: pos_integer() \| nil`; `on_zero :: :complete \| :fail` |
 | `Parallel` | `[:address, :branches]` | `max_concurrency: nil` | `branches :: [Agent.t()]`; `max_concurrency :: pos_integer() \| nil` |
 | `Pipeline` | `[:address, :items, :lanes]` | `max_concurrency: nil` | `items :: [term()]`; `lanes :: [[Agent.t()]]` |
 | `Collect` | `[:address, :into]` | — | `into :: atom()` |
-| `WhileBudget` | `[:address, :reserve, :body, :max_iterations]` | `until: nil` | `reserve :: non_neg_integer()`; `until :: struct() \| nil`; `body :: [struct()]`; `max_iterations :: pos_integer()` |
-| `UntilDry` | `[:address, :rounds, :seen_by, :body, :max_iterations]` | — | `rounds :: pos_integer()`; `seen_by :: [atom()]`; `body :: [struct()]`; `max_iterations :: pos_integer()` |
 | `Verify` | `[:address, :subject, :mode, :voters, :threshold]` | — | `subject :: term()`; `mode :: {:voters, pos_integer()} \| {:lenses, [atom()]}`; `voters :: [Agent.t()]`; `threshold :: :majority \| :unanimous \| :any \| pos_integer()` |
 | `Judge` | `[:address, :candidates, :by, :pick, :scorers]` | — | `candidates :: [term()]`; `by :: [atom()]`; `pick :: :max_score \| :min_score`; `scorers :: [[Agent.t()]]` |
 | `Synthesize` | `[:address, :inputs, :prompt]` | — | `inputs :: term()`; `prompt :: String.t()` |
-| `BudgetSlices` | `[:per]` | — (no address) | `per :: pos_integer()` |
-| `FanOut` | `[:address, :width, :body]` | `max_concurrency: nil` | `width :: BudgetSlices.t()`; `body :: [Agent.t()]` |
+| `BudgetSlices` | `[:per]` | `max: nil` (no address) | `per :: pos_integer()`; `max :: pos_integer() \| nil` |
 
-The legacy `Parallel`, `Pipeline`, `WhileBudget`, `UntilDry`, `Verify`, `Judge`,
-`Synthesize`, and `FanOut` rows document the reference implementation's compatibility
-structs. They are **not** additional core primitives. A non-Elixir conforming
-implementation MAY skip these structs and construct only the core `Loop`, `Fanout`, `Agent`,
-`Collect`, marker, binding, and terminal nodes, provided the observable journal and result
-match the desugaring below.
+The `Parallel`, `Pipeline`, `Verify`, `Judge`, and `Synthesize` rows are
+library-level inert records, not additional dynamic loop/fanout primitives.
+`while_budget`, `until_dry`, and `fan_out` never produce distinct node kinds: the
+compiler lowers them directly to `Loop` or `Fanout` as described below.
 
 ### 4.3.1 Desugaring contract
 
@@ -769,12 +764,11 @@ score schema   = %{"type" => "object",
                    "required" => ["score"]}
 ```
 
-`fan_out` is the **only** combinator whose fan width is not statically fixed: its
-body is stored with placeholder addresses and re-addressed per branch at runtime (§6.10),
-because the width is a runtime budget decision. Like `pipeline` (and unlike
-`synthesize`/`verify`/`judge`, which inject their data), a `fan_out` lane receives **no**
-per-branch content or index — every branch runs the identical literal lane prompt; the branch
-index appears only in the address, never in the prompt (§3.9).
+Any generic `fanout` with a `budget_slices` or `path_count` width resolves its
+bounded width at runtime and journals that decision before materializing branches
+(§6.10). The `fan_out` alias lowers to the `budget_slices` case. Its lane receives
+no per-branch content or index: every branch runs the identical literal lane
+prompt, and the branch index appears only in the address (§3.9).
 
 Voter and scorer agents are always `retries: 0` and schema-bound, so a malformed vote or
 score is a **hard panel failure**, never a re-roll.
@@ -1371,7 +1365,8 @@ partial progress**:
   provider failures differently: they journal non-terminal role-failure data and continue
   the convergence loop with consensus false (§9.7).
 - **Concurrent regions are partial-commit then abort.** In `parallel`, `pipeline`,
-  `verify`, `judge`, and `fan_out`, every lane's events are committed in input order —
+  `verify`, `judge`, and `fanout` (including the `fan_out` alias), every lane's
+  terminal events are committed in input order —
   **including the events of a failed lane** — and the **first** failure reason (in input
   order) becomes the run's halt reason. A failed voter or scorer fails its whole panel.
   Inside such a region `agent_failed` is **not** necessarily the last event in `seq` order:
@@ -1401,7 +1396,7 @@ partial progress**:
   name a genuine failing lane in the same region, so the run's terminal disposition
   (`:failed` at a real address, exit 8) is identical across all reads.
 - **An off-thread provider crash inside a concurrent region is a run crash, not a lane
-  failure.** In `parallel`/`pipeline`/`verify`/`judge`/`fan_out` the provider call runs
+  failure.** In `parallel`/`pipeline`/`verify`/`judge`/`fanout` the provider call runs
   off-thread inside `BuildAgent`/`RunLane`/`ScoreLane`, whose result contract is only
   `{:ok, …}` or the schema-`{:failed, …}` lane result (§6.9). A **provider-level** crash —
   `CallProvider` returning malformed data, raising, or exiting (§6.4.1) — is
@@ -1533,7 +1528,7 @@ The reference performs **no** structural comparison between that recompiled tree
 the journaled, address-keyed events were written against: `ExecuteRun` folds the journal,
 short-circuits on a terminal `:completed`/`:failed` fold (above), and otherwise runs the
 recompiled tree directly through `RunTree`. Journaled **decisions** (committed agent turns,
-`loop_decision`, `fan_out_started.width`, panel settlements) are still replayed by address
+`loop_decision`, `fanout_started.width`, panel settlements) are still replayed by address
 rather than recomputed (Principle 3). But resume is address-safe **only to the extent the
 script file is unchanged**: if the script was edited between the original run and the resume (a
 single inserted top-level statement shifts every subsequent `[i]` address, §4.2), the
@@ -1546,11 +1541,11 @@ implemented and is **not** required for conformance.)
 **Resume with no resolvable script path.** Because `:script_path` is OPTIONAL (§7.6), a run
 started programmatically from a `%Tree{}` may journal `run_started.script_path == nil`.
 A resume that must recompile from a script — i.e. one handed only a `run_id`, not a
-`%Tree{}`/module — resolves its source as **the explicitly passed path, else the journaled
+`%Tree{}` — resolves its source as **the explicitly passed path, else the journaled
 `run_started.script_path`**. If **neither** is available (no explicit path and a `nil`
 journaled `script_path`), there is nothing to recompile: resume MUST NOT start a writer and
 returns `{:error, {:no_script_path, run_id}}` ⇒ exit 2 (`:usage`, §7.5). (Such a run remains
-resumable by re-invoking the run API with the original `%Tree{}`/module and the same
+resumable by re-invoking the run API with the original `%Tree{}` and the same
 `:run_id`, §7.6 — that path carries the tree directly and needs no script to recompile.)
 
 `RunNodes` reduces over the node list, threading `ctx`, short-circuiting on the first
@@ -1620,10 +1615,10 @@ or, only inside a loop body, `{:loop_stop, ctx, reason}`, by node kind:
   identify the owning loop pass.
 - **`Loop`** — RunLoop (§6.7).
 - **`Fanout`** — RunFanout (§6.10).
-- **`WhileBudget`** / **`UntilDry`** — compatibility loop sugar (§3.7); desugar to a
-  generic `Loop` and then run `RunLoop`, emitting the generic `loop_decision` payloads.
-- **`Parallel`** / **`Pipeline`** / **`Verify`** / **`Judge`** / **`FanOut`** —
-  compatibility fanout/panel sugar (§6.8–6.10).
+- **`Parallel`** / **`Pipeline`** / **`Verify`** / **`Judge`** —
+  library fanout/panel forms (§6.8–6.10). `while_budget`, `until_dry`, and
+  `fan_out` cannot reach dispatch because compilation has already lowered them
+  to `Loop` or `Fanout`.
 - **`Synthesize`** — construct an ephemeral `%Agent{address: node.address, prompt:
   "<prompt>\n\nInputs: <inspect(inputs)>", schema: nil, retries: 0}` and delegate to
   RunAgent, reusing the ordinary journaled/keyed/resumable agent path.
@@ -1639,7 +1634,6 @@ otherwise committed. They key on the tuples below:
   except generic `fanout_started`/`fanout_completed` markers, which are handled below:
   `parallel_started`/`parallel_completed`, `pipeline_started`/`pipeline_completed`,
   `verify_started`/`verify_settled`, `judge_started`/`judge_settled`,
-  `fan_out_started`/`fan_out_completed`,
   `loop_completed`) are keyed by `(type, address)` and
   are committed **at most once per address**. On resume, if a marker with that
   `(type, address)` is already journaled it is reused verbatim and not re-committed.
@@ -1648,9 +1642,9 @@ otherwise committed. They key on the tuples below:
   event each pass (one per iteration `0, 1, 2, …`), via `IterationMarker` (§6.7).
 
 Every positional marker in §6.9–§6.10 — including the region **start** markers
-(`parallel_started`, `pipeline_started`, `verify_started`, `judge_started`,
-`fan_out_started`) and the region **settle/complete** markers (`parallel_completed`,
-`pipeline_completed`, `verify_settled`, `judge_settled`, `fan_out_completed`,
+(`parallel_started`, `pipeline_started`, `verify_started`, `judge_started`) and
+the region **settle/complete** markers (`parallel_completed`,
+`pipeline_completed`, `verify_settled`, `judge_settled`,
 `loop_completed`) — is committed through `CommitMarker`, which enforces the at-most-once
 `(type, address)` idempotency on resume:
 
@@ -2036,8 +2030,9 @@ IdempotencyKey = %{run_id, node_path :: address, iteration :: non_neg_integer, a
 ```
 
 - The logical turn identity is `(run_id, node_path, iteration)`.
-- `iteration` is `0` for any node outside a dynamic loop; inside `while_budget`/`until_dry`
-  it is the real per-iteration index, so the same body address keys a **distinct** paid
+- `iteration` is `0` for any node outside a dynamic `Loop`; inside any loop
+  (including source written with a compatibility alias) it is the real
+  per-iteration index, so the same body address keys a **distinct** paid
   effect each pass.
 - `attempt` (zero-based) refines the logical identity into a single physical provider
   invocation. The writer journals this full key in `agent_started` before invoking the
@@ -2256,10 +2251,9 @@ A loop may have either a top-level `until:` option, which is evaluated before th
 Both use the same closed predicate semantics and the same `loop_decision` event shape; the
 `source_address` distinguishes a body stop point from the loop header.
 
-Historical note: older reference sketches named compatibility structs `WhileBudget` and
-`UntilDry` directly. A conforming implementation MAY keep such structs internally, but it
-MUST lower them to the generic `Loop` decision model before execution or emit byte-equivalent
-generic loop events.
+`while_budget` and `until_dry` are accepted only as compile-time aliases. The
+compiled tree contains `Loop`, and execution emits only the generic loop event
+model.
 
 `PredicateContext(run_id, loop_address, iteration) = %{run_id: run_id,
 accumulators: Accumulator.Of(run_id), remaining: Ledger.Remaining(run_id),
@@ -2311,8 +2305,8 @@ to terminate a loop.
 
 ### 6.7.1 The ledger fold (budget accounting)
 
-`Ledger.Remaining(run_id)` is the budget quantity that `while_budget` (§6.7) and `fan_out`
-(§6.10) consult. It is a pure fold over committed usage:
+`Ledger.Remaining(run_id)` is the budget quantity that loop predicates and
+`budget_slices` fanout widths consult. It is a pure fold over committed usage:
 
 ```
 Ledger.Of(run_id):
@@ -2341,8 +2335,9 @@ Pinned rules a conforming implementation MUST honor:
   `reserve:` (§3.7) and `budget_slices(per:)` (§3.9) are compared in total tokens.
 - **`total` comes from `run_started.budget`.** `budget :: non_neg_integer() | nil`. A
   `nil` (absent) budget is the **unbounded** case: `Remaining` returns the atom `:infinity`,
-  which sorts above every integer (§6.8), so `budget_remaining() > n` is always `true` and
-  `fan_out` raises (§6.10). A `non_neg_integer()` budget makes `Remaining` an integer.
+  which sorts above every integer (§6.8), so `budget_remaining() > n` is always
+  `true` and a `budget_slices` width fails to resolve (§6.10). A
+  `non_neg_integer()` budget makes `Remaining` an integer.
 - **Rejected and expected-failed attempts still pay.** `agent_committed`,
   `agent_attempt_rejected`, `agent_failed` with provider usage, and `refine_role_failed`
   with provider usage add to `spent`. A schema-exhaustion `agent_failed` has `usage == nil`
@@ -2543,7 +2538,7 @@ CommitAll(run_id, seq, events):
 
 Return contracts a conforming implementation MUST honor:
 
-- **`CommitLanes`** (used by `RunParallel`, `RunPipeline`, `RunFanOut`) returns
+- **`CommitLanes`** (used by `RunParallel`, `RunPipeline`, and `RunFanout`) returns
   `{:ok, seq'}` when no lane failed, else `{:halt, seq', reason}` where `reason` is the
   **first** failing lane's reason in input order. Successful-lane results are **not**
   threaded out (these regions consume no per-lane result).
@@ -2590,10 +2585,11 @@ attempt already wrote. Consequently a region resumed after a crash mid-region re
 **exactly** the crash-free journal: committed branches contribute no new events, and the run
 continues at the first un-journaled attempt of the first incomplete branch (C4, §8).
 
-`RunLane` is the sequential runner for a `pipeline` lane and a `fan_out` branch. Like
-`BuildAgent` it runs **off-thread and writes no journal events** — it returns accumulated
-events for `CommitLanes` to commit in input order, so lanes never touch the journal
-directly:
+`RunLane` is the sequential runner for a `pipeline` or generic `fanout` lane.
+It returns terminal events for `CommitLanes` to commit in input order. The two
+durability exceptions are deliberate: each lane synchronously appends
+`agent_started` before its provider effect and each `agent_activity` before the
+corresponding post-commit notification.
 
 ```
 RunLane(stages, run_id, provider, prior, lane_iteration):
@@ -2773,12 +2769,10 @@ CommitFanoutCompleted(node, prior, seq, fanout_iteration):
 
 MaterializeFanoutBranches(node, width):
   - If width == 0: Return [].
-  - If node.repeated is true:
-    - Let lane_template be the single lane in node.lanes.
+  - If node.lanes is {:repeat, lane_template}:
     - Return the List [RebaseBody(lane_template, node.address ++ [i]) for i in 0..(width - 1)].
-  - Otherwise node.repeated is false:
-    - Assert length(node.lanes) == width.      ; guaranteed by validation (§5.8.0)
-    - Return the List [RebaseBody(node.lanes[i], node.address ++ [i]) for i in 0..(width - 1)].
+  - Otherwise node.lanes is {:explicit, lanes}:
+    - Return lanes.                            ; addresses and length validated by the compiler (§5.8.0)
 ```
 
 `ComputeFanoutWidth`:
@@ -2799,37 +2793,13 @@ Top-level generic fanout markers use `iteration: nil`, but their lane agents run
 iteration `0`; loop-body generic fanout markers and lane agents both use the owning loop
 iteration.
 
-`FanOut` — the legacy budget-scaled surface:
-
-```
-RunFanOut(node, run_id, provider, prior, ctx):
-  - Let {width, seq} be DecideWidth(node, run_id, prior, ctx.seq):
-    - If a `fan_out_started` for node.address is in {prior}: replay its payload.width.
-    - Else width = ComputeWidth(node.width, run_id); commit Event.fan_out_started(node, width).  ; %{address, per, width}
-  - ComputeWidth(BudgetSlices{per}, run_id):
-    - If Ledger.Remaining(run_id) is :infinity: Raise ArgumentError
-        ("budget_slices requires a bounded run (no budget target set)").
-    - Return div(max(remaining, 0), per).
-  - Let {branches} be, for each {i} from 0 to {width} - 1 inclusive,
-      RebaseBody(node.body, node.address ++ [i]); if {width} is 0, {branches} is [].
-      ; RebaseBody re-addresses stage s to branch_address ++ [s]
-  - Let {cap} be min(node.max_concurrency or max(width, 1), 8).
-  - RunConcurrently(branches, cap,
-      fn branch -> RunLane(branch, run_id, provider, prior, 0) end); CommitLanes.
-  - On {:ok, seq'}: Return {:cont, ctx with seq = CommitMarker(fan_out_completed, node, prior, seq')}.
-```
-
-**Zero-width fan-out (pinned).** `ComputeWidth` = `div(max(remaining, 0), per)` can
-legitimately be **0** — e.g. `budget_slices(per: 100)` with `remaining` 50. A width of 0
-means the region has **no branches**: `RunFanOut` commits `fan_out_started` with `width: 0`,
-runs **zero** lanes (`RunConcurrently([], …)` returns immediately), commits
-`fan_out_completed`, and leaves `ctx` — including `ctx.last_result` — **unchanged**. The
-loop "for each `i` from 0 to `width` - 1 inclusive" produces the empty branch list when
-`width` is 0; an implementation MUST NOT interpret it as a descending range (which would
-fabricate a branch at a negative index).
-
-An unbounded run raises when it reaches a `fan_out` (there is no budget to slice) — this is
-the one execution-time raise that is not a validation failure; it surfaces as a run crash.
+`fan_out` has no runtime algorithm of its own. Compilation lowers it to a
+repeated-lane `Fanout` with `width: budget_slices(per: N)` and
+`on_zero: :complete`; `RunFanout` above is the only execution path. A computed
+width of zero therefore writes generic `fanout_started`/`fanout_completed`
+markers, runs no lanes, and leaves `ctx.last_result` unchanged. An unbounded run
+raises while resolving `budget_slices`, exactly as it does for the equivalent
+generic `fanout` source.
 
 **Panels are observational unless explicitly bound.** Legacy `verify` and `judge` journal
 `verify_settled` / `judge_settled` projections but do not implicitly alter control flow.
@@ -2846,16 +2816,17 @@ outside the workflow by folding the journal (`Status.verifications` / `Status.ju
 
 ### 6.11 Concurrency: what is parallel vs serial
 
-- `fanout` branches, `parallel` branches, `pipeline` lanes, `verify` voters, `judge`
-  **candidate lanes**, and `fan_out` branches MAY run concurrently up to their `cap`. The
+- `fanout` branches (including source written with `fan_out`), `parallel`
+  branches, `pipeline` lanes, `verify` voters, and `judge` **candidate lanes**
+  MAY run concurrently up to their `cap`. The
   `cap` sources are:
-  `fanout`/`parallel`/`pipeline`/`fan_out` take `node.max_concurrency`; omitted means every
+  `fanout`/`parallel`/`pipeline` take `node.max_concurrency`; omitted means every
   lane is eligible. `verify` and `judge` make every panel lane eligible. In every case the
   effective cap is `min(requested-or-width, 8)`. Terminal settlements are gathered and
-  committed in input order. Pre-effect `agent_started` and streamed `agent_activity`
+  committed in input order. Pre-effect `agent_started` and in-flight `agent_activity`
   append synchronously as concurrent tasks reach them, so their journal order is arrival
   order; projections sort agents by stable address, iteration, and attempt.
-- Within a `fanout` lane, a `pipeline` lane, a `fan_out` branch, or a `judge` candidate lane, the constituent
+- Within a `fanout` lane, a `pipeline` lane, or a `judge` candidate lane, the constituent
   agents (stages / criterion scorers) run **sequentially**.
 - Top-level statements run **sequentially** in source order.
 
@@ -2915,7 +2886,6 @@ additive log policy in §7.1.
 | `:judge_started` / `:judge_settled` | `address, candidates, criteria` / `address, scores, pick, winner` |
 | `:fanout_started` / `:fanout_completed` | `address, iteration?, width_expr, width, bind` / `address, iteration?` |
 | `:fanout_failed` | `address, iteration?, reason` (terminal failure for `fanout on_zero: :fail`) |
-| `:fan_out_started` / `:fan_out_completed` | `address, per, width` / `address` (legacy sugar payload) |
 | `:refine_started` | `address, input, max_rounds, until, on_non_convergence, max_concurrency, reviewer_timeout_ms, gates, reviewers, reviser, artifact_schema_version, review_schema_version, review_adapter_versions` |
 | `:refine_round_started` | `address, round, artifact` |
 | `:refine_role_failed` | `address, role, role_address, round, reviewer, reviewer_index, attempts, reason, detail, usage, activity` |
@@ -2926,6 +2896,12 @@ additive log policy in §7.1.
 | `:refine_input_invalid` | `address, input, reason` |
 | `:run_completed` | `value` (terminal on success path; no address) |
 | `:run_failed` | `reason` (terminal unexpected failure or `{:outcome_unknown, attempt}`) |
+
+Read compatibility only: journals written by older releases may contain
+`fan_out_started` or `fan_out_completed`. Readers treat those markers as the
+top-level equivalent generic fanout boundary when resuming or folding history.
+Current writers never emit them; source `fan_out` produces the generic
+`fanout_started`/`fanout_completed` events above.
 
 > *(Proposed §10 — dataflow: a proposed extension pins `agent_committed.prompt` and
 > `agent_attempt_rejected.prompt` to the materialized `EffectivePrompt` string for template-prompt
@@ -2970,7 +2946,7 @@ Payload-value pins (each is observable output, so it is normative):
   even when their content is identical.
 - **`agent_committed.activity` / `agent_attempt_rejected.activity`** are ordered lists of
   activity entry maps for the completed attempt. Entries MAY carry `activity_index` when the
-  runner reconciles them with streamed `agent_activity` events; read-model folds use that
+  runner reconciles them with earlier durable `agent_activity` events; read-model folds use that
   index to avoid counting the same streamed/final activity twice, never value-only dedupe.
 - **`agent_failed.usage` / `agent_failed.activity`** are present on every `agent_failed`.
   Schema-exhaustion failures write `usage: nil, activity: []` because each paid rejected
@@ -2983,7 +2959,7 @@ Payload-value pins (each is observable output, so it is normative):
 `refine_input_invalid`, or `run_failed` and **no**
 `run_completed` is written. Control-flow outcomes
 (`loop_decision`, `fanout_started` width keyed by address plus optional iteration,
-`fan_out_started` width, `verify_settled`, `judge_settled`) are journaled
+`verify_settled`, `judge_settled`) are journaled
 so that resume replays rather than recomputes them. A canonical minimal run journals, in
 order: `run_started, phase_entered, log_emitted, agent_started, agent_committed,
 run_completed` with contiguous `seq` `0..5` when the provider emits no activity.
@@ -3236,15 +3212,16 @@ programmatic path.
 ### 7.6 Running a workflow (the invocation entry point)
 
 A workflow is invoked through the public run API. This is the only place a **budget** — the
-quantity `while_budget` (§6.7), `budget_remaining()` (§6.8), and `fan_out` (§6.10) consult —
-enters the system: the budget is **not** part of the workflow source; it is supplied here.
+quantity `budget_remaining()` and `budget_slices()` consult — enters the system:
+the budget is **not** part of the workflow source; it is supplied here.
 
 - **`Workflow.Run.run(workflow, opts)` → `{:ok, run_id} | {:error, reason}`** blocks until
   the run finishes and returns the run-outcome tuple (§7.4).
 - **`Workflow.Run.start(workflow, opts)` → `{:ok, run_id, pid} | {:error, {:already_running,
   pid}}`** starts the writer and returns immediately (asynchronous).
-- **`workflow`** is a compiled `%Workflow.Tree{}` **or** a module that `use`s `Workflow`
-  (resolved via `module.__workflow__(:tree)`).
+- **`workflow`** is a compiled `%Workflow.Tree{}`. Executable files are loaded
+  through `Workflow.Script.load_tree/1`; modules and reflection callbacks are
+  not accepted run inputs.
 - **`opts`** is a keyword list:
   - `:provider` — **REQUIRED**, a `{module, opts}` pair (§6.4.1); the run cannot start
     without it. An **absent or `nil`** `:provider` is a caller misuse reported as
@@ -3252,9 +3229,10 @@ enters the system: the budget is **not** part of the workflow source; it is supp
     A **supplied** provider that cannot be resolved/configured (`ResolveProvider` fails,
     §6.4.1) is a distinct pre-run `provider-config` failure (exit 4, §7.5).
   - `:budget` — OPTIONAL, `non_neg_integer()`, the run's total-token budget (§6.7.1).
-    **Omitted / `nil` ⇒ unbounded** (`Ledger.Remaining` = `:infinity`): `while_budget` still
-    runs (bounded by `max_iterations`), but `fan_out` **raises at run time** (a run crash,
-    exit 1) because there is no budget to slice (§6.10). `1` budget unit = `1` total token.
+    **Omitted / `nil` ⇒ unbounded** (`Ledger.Remaining` = `:infinity`): loops
+    remain bounded by `max_iterations`, but any `fanout` whose width is
+    `budget_slices(...)` raises at run time because there is no budget to slice
+    (§6.10). `1` budget unit = `1` total token.
   - `:run_id` — OPTIONAL, `String.t()`; a fresh id is generated when omitted. Reusing an id
     resumes/attaches to that run (§6.2); a second live writer for the same `run_id` is
     refused with `{:error, {:already_running, pid}}` (§6.2.1).
@@ -3268,8 +3246,10 @@ enters the system: the budget is **not** part of the workflow source; it is supp
     addresses, §4.2) can desynchronize the recompiled tree from the journal, undetected.
     Operators MUST resume against the same script the run was started with.
 
-**Precondition — `fan_out` REQUIRES a budget.** A workflow containing a `fan_out` MUST be run
-with a `:budget`; run unbounded it crashes when it reaches the `fan_out` (§6.10). Read state
+**Precondition — `budget_slices` REQUIRES a budget.** A workflow containing a
+generic `fanout` width of `budget_slices(...)`, including source written with
+the `fan_out` alias, MUST be run with a `:budget`; unbounded execution fails
+while resolving that width (§6.10). Read state
 back with `Workflow.Status.of(run_id)` (§7.3) or the raw journal via
 `Workflow.Journal.fold(run_id)`.
 
@@ -3479,7 +3459,7 @@ let :final =
 
 **R1 — `refine` is top-level only.**
 
-It MUST be rejected inside loop bodies, `parallel`, `pipeline`, `fan_out`, `verify`,
+It MUST be rejected inside loop bodies, `parallel`, `pipeline`, `fanout`, `verify`,
 `judge`, or another `refine`.
 
 ```counter-example
@@ -3797,15 +3777,23 @@ If a reviewer is non-clear but has no blocking finding, insert:
 }
 ```
 
-Reviewer decisions have this exact shape, in reviewer index order:
+Reviewer decisions have this exact durable payload shape, in reviewer index order:
 
 ```elixir
-%{reviewer: atom(), reviewer_index: non_neg_integer(), approved: boolean(), clear: boolean(),
-  adapter: reviewer_adapter(), status: :completed | :failed}
+%{
+  reviewer: atom(),
+  reviewer_index: non_neg_integer() | nil,
+  adapter: reviewer_adapter(),
+  outcome: :clear | :approved_with_findings | :rejected | :failed
+}
 ```
 
 For a `refine_role_failed` reviewer, the corresponding decision is present with
-`approved: false`, `clear: false`, `status: :failed`, and the reviewer's literal adapter.
+`outcome: :failed` and the reviewer's literal adapter. The public JSON projection derives
+`approved`, `clear`, and `status` from `outcome` as pinned in §9.11; current writers never
+journal those three flags. Readers accept the former
+`%{approved: boolean(), clear: boolean(), status: :completed | :failed}` decision payload
+only for compatibility with journals written by older releases.
 
 Role failures have this exact shape:
 
@@ -4026,6 +4014,13 @@ at the same address.
 
 Payload descriptors store plain maps, never Agent structs.
 
+Refine execution uses `%Workflow.Refine.RoundDecision{}` and
+`%Workflow.Refine.TerminalProjection{}` in memory, with tagged nested structs for reviewer
+decisions, open findings, role failures, and cold-read state. Event constructors serialize
+those records to the atom-keyed maps specified below; journal event payloads never retain
+the runtime structs. Apart from the tagged reviewer-decision and cold-read fields pinned in
+this section, the serialized round and terminal payload field contract is unchanged.
+
 ```elixir
 input =
   %{kind: :producer, address: [i, 0], prompt: binary(), retries: non_neg_integer(), label: binary() | nil}
@@ -4186,7 +4181,7 @@ table: `:did_not_converge` serializes as `did-not-converge` with exit code `9`, 
 | Direct `synthesize(...)` as refine input | Unsupported | Bind first, then `refine :draft` |
 | Direct nested `refine(...)` as refine input | Unsupported | Bind first, then `refine :previous` |
 | Dynamic reviewer list from runtime data | Unsupported | Keep orchestration outside V1; future collection dataflow may address this |
-| Large collection fan-out over files/issues | Unsupported by `refine` | Use existing `parallel`/`pipeline`/`fan_out`; dataflow `map` remains deferred |
+| Large collection fan-out over files/issues | Unsupported by `refine` | Use existing `parallel`/`pipeline`/`fanout`; dataflow `map` remains deferred |
 | Arbitrary JS loop condition or majority threshold | Unsupported | V1 is `max_rounds` plus unanimous consensus only |
 
 ### 9.11 §10 dataflow integration
@@ -4238,7 +4233,7 @@ FinalOpenDefectJSON =
   OpenFindingJSON | RoleFailureDefectJSON
 
 ReviewerDecisionJSON =
-  %{"reviewer" => string(), "reviewerIndex" => non_neg_integer(),
+  %{"reviewer" => string(), "reviewerIndex" => non_neg_integer() | nil,
     "approved" => boolean(), "clear" => boolean(),
     "adapter" => string(), "status" => "completed" | "failed"}
 
@@ -4262,6 +4257,16 @@ ColdReadJSON =
       "repaired" => boolean()}
   | %{"state" => "failed", "roleFailure" => RoleFailureJSON, "repaired" => false}
 ```
+
+`ReviewerDecisionJSON` is derived from the durable decision `outcome`; the flags are not
+independent state:
+
+| durable `outcome` | `approved` | `clear` | `status` |
+| --- | --- | --- | --- |
+| `:clear` | `true` | `true` | `"completed"` |
+| `:approved_with_findings` | `true` | `false` | `"completed"` |
+| `:rejected` | `false` | `false` | `"completed"` |
+| `:failed` | `false` | `false` | `"failed"` |
 
 Role failure conversion is normative. `BoundRefineResult` and every JSON status projection
 that exposes role failures MUST use these algorithms; they MUST NOT expose internal atoms,
@@ -4381,10 +4386,30 @@ and no trailing slash; for example `[4, 3]` becomes `"/4/3"`.
 `RenderJSONDetail(nil) = ""`; for a string it returns the string; for any other `JsonValue`
 it returns deterministic JSON encoding with object keys sorted bytewise ascending.
 
-`cold_read_state()` in journal payloads is `nil` when no cold-read ran, otherwise the
-internal atom-keyed form of the completed/failed variants above. `ColdReadJSON` is its
-public JSON projection. The conversion is key-by-key and atom values become the strings
-shown in `ColdReadJSON`.
+`cold_read_state()` in journal payloads is `nil` when no cold-read ran, otherwise one of
+these tagged atom-keyed maps:
+
+```elixir
+%{
+  state: :completed,
+  open_findings: [open_finding],
+  reviewer_decision: reviewer_decision,
+  report_snippets: [binary()],
+  repair: :not_run | :completed
+}
+
+%{
+  state: :failed,
+  role_failure: role_failure,
+  repair: :not_run | :completed
+}
+```
+
+`ColdReadJSON` is the public JSON projection. It derives `"repaired"` as
+`repair == :completed`; the durable payload does not carry a boolean `repaired` flag.
+Readers accept that former boolean only for compatibility with journals written by older
+releases. The remaining conversion is key-by-key and atom values become the strings shown
+in `ColdReadJSON`.
 
 The shared §10.11 `BindingRef` union includes `{:refine, address}`. `ResolveRef` adds:
 
@@ -4597,14 +4622,15 @@ RunOrReplayColdRead(node, projection):
   - If outcome is {:committed, review, _usage}:
     - Return projection with cold_read from that committed canonical review.
   - If a refine_role_failed exists with role: :cold_read and role_address == descriptor.address:
-    - Return projection with cold_read = %{state: :failed, role_failure, repaired: false}
+    - Return projection with cold_read =
+      %{state: :failed, role_failure, repair: :not_run}
       and role_failures including that failure.
   - Otherwise run RunReviewerRoleAgent with role :cold_read, address descriptor.address,
     iteration 0, adapter descriptor.adapter, prompt ColdReadPrompt(descriptor.prompt, projection),
     and the same reviewer_timeout_ms captured in refine_started.
   - On success, commit its ordinary agent events at [i,3] and return projection with
     cold_read = %{state: :completed, open_findings, reviewer_decision, report_snippets,
-      repaired: false}.
+      repair: :not_run}.
   - On expected provider/schema/timeout/crash lane failure, commit refine_role_failed with
     role: :cold_read, reviewer: descriptor.name, reviewer_index: nil, round: nil, and return
     projection with cold_read failed. Do not fail the run.
@@ -4617,15 +4643,15 @@ RunOrReplayRepair(node, projection):
   - Let descriptor be refine_started.payload.gates.repair.
   - Let outcome be ResolveIdempotency(prior, descriptor.address, 0).
   - If outcome is {:committed, artifact, _usage}:
-    - Return projection with artifact replaced by artifact and cold_read.repaired = true
+    - Return projection with artifact replaced by artifact and cold_read.repair = :completed
       when cold_read.state is :completed.
   - If a refine_role_failed exists with role: :repair and role_address == descriptor.address:
     - Return projection with that role_failure appended, artifact unchanged, and
-      cold_read.repaired unchanged or false.
+      cold_read.repair unchanged or `:not_run`.
   - Otherwise run an artifact role agent at [i,4], iteration 0, with ArtifactSchemaV1 and
     ArtifactNormalizer over RepairPrompt(descriptor.prompt, projection).
   - On success, commit ordinary agent events at [i,4], replace artifact with the normalized
-    artifact, and set cold_read.repaired = true when cold_read.state is :completed.
+    artifact, and set cold_read.repair = :completed when cold_read.state is :completed.
   - On ExpectedProviderFailure or schema/normalization exhaustion, commit refine_role_failed
     with role: :repair, reviewer: nil, reviewer_index: nil, round: nil, and reason
     {:repair_failed, underlying_reason}. Do not crash and do not commit terminal
@@ -4686,7 +4712,8 @@ materialized result of an inert template over journaled bindings. The `agent →
 accumulator` edge (§6.6) carries collected content into a named accumulator and its count into
 closed predicates. The worked dataflow boundaries (§11.4 C/F/G) remain: `judge`'s winner is
 never implicitly passed to `synthesize`; a
-`pipeline` stage never sees its item; a `fan_out` lane is a byte-identical replica.
+`pipeline` stage never sees its item; a repeated generic `fanout` lane is a
+byte-identical replica.
 The implemented dataflow core opens one narrow edge for `agent`/`synthesize` outputs: bind the
 producer with `let`, render it through `~P`, and consume it from a later top-level `agent` or
 `emit`.
@@ -5262,7 +5289,7 @@ promoted. A `%Template{}` prompt is rejected in two families, each by an **activ
 matching `{:sigil_P, meta, _}`: (1) observational/literal-only positions (`verify`/`judge`
 subject/candidate, `return`, `phase`/`log`, and a `synthesize` prompt or inputs — a `let`-bound
 `synthesize` stays literal-only) — panels stay literal-only (Principles 2 and 6); (2) nested
-agent positions (`parallel` branch, `pipeline` stage, `fan_out` body, loop body). The guard emits
+agent positions (`parallel` branch, `pipeline` stage, `fanout` body, loop body). The guard emits
 a precise diagnostic ("templates are not admissible in a `parallel` branch"; for a `synthesize`,
 "templates are not admissible in a `synthesize` prompt — use `gather` (§10.9.1) to fold journaled
 inputs") rather than a misleading "unbound assign". So although §10.5.1 lists `synthesize` among
@@ -5853,7 +5880,7 @@ is rejected by the compiler. Put the terminal you want as the result **last**.
 | `fanout width: N, bind: :xs do lanes([...]) end` | lane list or repeated lane | bounded core fan-out, optionally bound as an ordered list |
 | `fan_out width: budget_slices(per: N) do agent(…) end` | sugar | budget-scaled fan-out (**requires a run budget** — crashes without one; see §11.4 Use-case F) |
 
-Not combinators: `budget_slices(per: N)` (only a `fan_out` width); the `until:` predicate
+Not combinators: `budget_slices(per: N)` (only a `fanout` width expression); the `until:` predicate
 forms `count(:acc)`, `budget_remaining()`, `all([..])`, `any([..])`, legacy
 `all_of([..])`/`any_of([..])`, `dry(...)`, `agree(...)`, and `path_*`.
 
@@ -6050,7 +6077,7 @@ The loop still terminates unconditionally under `max_iterations` (default `1000`
 Principle 5) even if neither `until:` condition ever fires; the predicate only stops it
 sooner. `all_of([...])` is the conjunction form (stop only when **every** listed condition
 holds). The `budget_remaining()` operand reads the budget supplied at invocation
-(`Workflow.Run.run(mod, provider: …, budget: N)`, §7.6); run without a `:budget` it is
+(`Workflow.Run.run(tree, provider: …, budget: N)`, §7.6); run without a `:budget` it is
 `:infinity`, so `budget_remaining() < 500` is never true and only `count(:items) >= 5` (or
 `max_iterations`) can stop the loop.
 
@@ -6071,7 +6098,7 @@ workflow "budget-fan-out" do
   return(:done)
 end
 # Invoke with a budget (see §7.6 for the full entry API and options):
-#   Workflow.Run.run(mod, provider: {MyProvider, []}, budget: 8000)
+#   Workflow.Run.run(tree, provider: {MyProvider, []}, budget: 8000)
 # `:provider` is REQUIRED; `:budget` is in total tokens; omit it and `fan_out` crashes.
 ```
 

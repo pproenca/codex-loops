@@ -14,11 +14,10 @@ defmodule Workflow.LoopCompilerTest do
   alias Workflow.Node.GenericFanout
   alias Workflow.Node.Loop
   alias Workflow.Node.Until
-  alias Workflow.Node.UntilDry
-  alias Workflow.Node.WhileBudget
   alias Workflow.Predicate.Agree
   alias Workflow.Predicate.AllOf
   alias Workflow.Predicate.AnyOf
+  alias Workflow.Predicate.BudgetRemaining
   alias Workflow.Predicate.Compare
   alias Workflow.Predicate.Count
   alias Workflow.Predicate.Dry
@@ -142,6 +141,11 @@ defmodule Workflow.LoopCompilerTest do
                """)
 
       assert f.message =~ "on_exhausted"
+
+      assert {:error, %Finding{} = f} =
+               parse("loop max_iterations: 1001 do\n  agent \"work\"\nend\nreturn :ok")
+
+      assert f.message =~ "between 1 and 1000"
     end
 
     test "rejects conflicting header and body until predicates" do
@@ -209,10 +213,9 @@ defmodule Workflow.LoopCompilerTest do
         """)
 
       assert [
-               %WhileBudget{
+               %Loop{
                  address: [0],
-                 reserve: 8,
-                 until: nil,
+                 until: %Compare{op: :<=, left: %BudgetRemaining{}, right: 8},
                  max_iterations: cap,
                  body: [
                    %Agent{address: [0, 0], prompt: "work"},
@@ -236,8 +239,17 @@ defmodule Workflow.LoopCompilerTest do
         return :ok
         """)
 
-      assert [%WhileBudget{until: %Compare{op: :>=, left: %Count{acc: :items}, right: 3}}, _] =
-               tree.nodes
+      assert [
+               %Loop{
+                 until: %AnyOf{
+                   predicates: [
+                     %Compare{op: :<=, left: %BudgetRemaining{}, right: 0},
+                     %Compare{op: :>=, left: %Count{acc: :items}, right: 3}
+                   ]
+                 }
+               },
+               _
+             ] = tree.nodes
 
       refute contains_function?(tree)
     end
@@ -253,7 +265,14 @@ defmodule Workflow.LoopCompilerTest do
         """)
 
       assert [
-               %WhileBudget{until: %Dry{rounds: 1, seen_by: [:id]}},
+               %Loop{
+                 until: %AnyOf{
+                   predicates: [
+                     %Compare{op: :<=, left: %BudgetRemaining{}, right: 0},
+                     %Dry{rounds: 1, seen_by: [:id]}
+                   ]
+                 }
+               },
                _return
              ] = tree.nodes
 
@@ -291,7 +310,7 @@ defmodule Workflow.LoopCompilerTest do
         return :ok
         """)
 
-      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %AnyOf{}]}}, _] =
+      assert [%Loop{until: %AnyOf{predicates: [_, %AllOf{predicates: [%Dry{}, %AnyOf{}]}]}}, _] =
                tree.nodes
     end
 
@@ -309,7 +328,7 @@ defmodule Workflow.LoopCompilerTest do
         return :ok
         """)
 
-      assert [%WhileBudget{until: %AllOf{predicates: [%Dry{}, %AnyOf{}]}}, _] =
+      assert [%Loop{until: %AnyOf{predicates: [_, %AllOf{predicates: [%Dry{}, %AnyOf{}]}]}}, _] =
                tree.nodes
     end
 
@@ -338,10 +357,9 @@ defmodule Workflow.LoopCompilerTest do
         """)
 
       assert [
-               %UntilDry{
+               %Loop{
                  address: [0],
-                 rounds: 2,
-                 seen_by: [:file, :line],
+                 until: %Dry{rounds: 2, seen_by: [:file, :line]},
                  body: [%Agent{address: [0, 0]}, %Collect{address: [0, 1], into: :findings}]
                },
                _return

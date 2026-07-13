@@ -1,7 +1,8 @@
 # Elixir, Burrito, and Homebrew distribution guidance
 
-> Historical note: ADR 0002 supersedes the Burrito packaging recommendation.
-> Homebrew now installs one OTP release with user and MCP command overlays.
+> **Status: superseded by ADR 0004.** The current artifact is an immutable bundle
+> with a native Rust CLI/MCP control plane and a packaged OTP scheduler. The
+> Burrito and release-overlay recommendations below are historical.
 
 Date: 2026-07-09
 

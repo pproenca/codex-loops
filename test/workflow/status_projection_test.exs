@@ -14,6 +14,8 @@ defmodule Workflow.StatusProjectionTest do
   alias Workflow.Refine.Reviewer
   alias Workflow.Refine.ReviewerDecision
   alias Workflow.Refine.RoleFailure
+  alias Workflow.Refine.RoundDecision
+  alias Workflow.Refine.TerminalProjection
   alias Workflow.Scheduler.RunProjection
   alias Workflow.Status
   alias Workflow.Tree
@@ -165,13 +167,6 @@ defmodule Workflow.StatusProjectionTest do
       status: "running"
     }
 
-    committed_activity = %{
-      kind: "tool",
-      label: "Cold read",
-      summary: "cold read completed",
-      status: "completed"
-    }
-
     failed_activity = %{
       kind: "provider",
       label: "Cold read",
@@ -206,7 +201,7 @@ defmodule Workflow.StatusProjectionTest do
             %IdempotencyKey{run_id: run_id, node_path: [0, 3], iteration: 0, attempt: 0},
             %{"approved" => false, "findings" => []},
             usage,
-            [committed_activity]
+            [streamed_activity]
           ),
           Event.refine_role_failed(role_failure),
           Event.refine_gate_evaluated(node, :cold_read, {:path_non_empty, "/openFindings"},
@@ -214,36 +209,41 @@ defmodule Workflow.StatusProjectionTest do
             input_round: 0,
             input_refs: []
           ),
-          Event.refine_round_decision(node, 0, %{
-            consensus: false,
-            approval_count: 0,
-            total: 1,
-            reviewer_decisions: [
-              %ReviewerDecision{
-                reviewer: :spec,
-                reviewer_index: 0,
-                approved: false,
-                clear: false,
-                adapter: :findings_v1,
-                status: :completed
-              }
-            ],
-            artifact: "draft-v1",
-            open_findings: [finding()],
-            role_failures: [role_failure],
-            failed_reviewers: [:cold],
-            report_snippets: ["cold read timed out"]
-          }),
-          Event.refine_completed(node, %{
-            converged: true,
-            final_round: 0,
-            rounds: 1,
-            artifact: "draft-v2",
-            open_findings: [],
-            role_failures: [role_failure],
-            failed_reviewers: [:cold],
-            report_snippets: ["cold read timed out"]
-          }),
+          Event.refine_round_decision(
+            node,
+            0,
+            RoundDecision.from_payload(%{
+              consensus: false,
+              approval_count: 0,
+              total: 1,
+              reviewer_decisions: [
+                %ReviewerDecision{
+                  reviewer: :spec,
+                  reviewer_index: 0,
+                  adapter: :findings_v1,
+                  outcome: :rejected
+                }
+              ],
+              artifact: "draft-v1",
+              open_findings: [finding()],
+              role_failures: [role_failure],
+              failed_reviewers: [:cold],
+              report_snippets: ["cold read timed out"]
+            })
+          ),
+          Event.refine_completed(
+            node,
+            TerminalProjection.from_payload(%{
+              converged: true,
+              final_round: 0,
+              rounds: 1,
+              artifact: "draft-v2",
+              open_findings: [],
+              role_failures: [role_failure],
+              failed_reviewers: [:cold],
+              report_snippets: ["cold read timed out"]
+            })
+          ),
           Event.run_completed("draft-v2")
         ],
         run_id
@@ -267,7 +267,7 @@ defmodule Workflow.StatusProjectionTest do
            ] = status.tool_activity
 
     assert activity_fields(streamed_entry) == normalized_activity_fields(streamed_activity)
-    assert activity_fields(committed_entry) == normalized_activity_fields(committed_activity)
+    assert activity_fields(committed_entry) == normalized_activity_fields(streamed_activity)
     assert activity_fields(failed_entry) == normalized_activity_fields(failed_activity)
 
     assert [refine] = status.refines
@@ -312,7 +312,7 @@ defmodule Workflow.StatusProjectionTest do
     node = %GenericFanout{
       address: [0],
       width: 0,
-      lanes: [[%Agent{address: [0], prompt: "never"}]],
+      lanes: {:repeat, [%Agent{address: [0], prompt: "never"}]},
       on_zero: :fail
     }
 
@@ -354,7 +354,11 @@ defmodule Workflow.StatusProjectionTest do
           Event.run_started(%Tree{name: "loop-status", nodes: [node]}),
           Event.loop_decision(node, 0, :continue, predicate_result: false, exhausted: false, source_address: nil),
           Event.iteration_started(node, 0),
-          Event.loop_decision(node, 1, {:exhausted, :fail}, predicate_result: nil, exhausted: true, source_address: nil),
+          Event.loop_decision(node, 1, {:exhausted, :fail},
+            predicate_result: nil,
+            exhausted: true,
+            source_address: nil
+          ),
           Event.loop_exhausted(node, 1, :max_iterations)
         ],
         run_id

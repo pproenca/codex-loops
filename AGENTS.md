@@ -42,8 +42,14 @@ Codex proofs remain manual because they require credentials and spend a turn.
 - MCP tools call the scheduler HTTP API. They do not read SQLite or call
   scheduler internals directly.
 - A supervised per-run writer process walks the compiled workflow tree, invokes
-  the selected provider, commits ordered journal events, and publishes updates.
+  the selected provider, synchronously commits ordered journal events, and only
+  then publishes post-commit refresh notifications.
 - Phoenix LiveView renders journal-backed scheduler projections.
+- Provider attempts are at-most-once: an unsettled durable `agent_started` is
+  never redelivered, and resume terminates it as `outcome_unknown`.
+- Agent retries are capped at 5, loop iterations at 1000, resolved fanout width
+  at 64, and runtime concurrency at eight tasks. Legacy `while_budget`,
+  `until_dry`, and `fan_out` syntax lowers to generic `loop`/`fanout` semantics.
 
 ## Workflow Scripts
 

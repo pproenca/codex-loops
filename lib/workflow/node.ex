@@ -71,8 +71,8 @@ defmodule Workflow.Node.Agent do
   @moduledoc """
   An agent turn. The prompt is either a static literal or an inert `~P` template
   over earlier journal bindings; execution materializes any template to a string
-  before the paid effect, still keyed for exactly-once by
-  `(run_id, address, iteration)`.
+  before the paid effect. The stable `(run_id, address, iteration, attempt)` key is
+  journaled before dispatch so that attempt is never redelivered.
 
   `schema` is an inert, raw JSON-schema **map** (or `nil` for a schemaless turn),
   materialized from a literal map in the workflow source. When present the turn is
@@ -108,7 +108,7 @@ defmodule Workflow.Node.Parallel do
   Static barrier fan-out: run every branch **concurrently** under a bounded
   concurrency cap, then join (barrier) before the run continues. Each branch is one
   inert `%Workflow.Node.Agent{}` with its own stable address `parent ++ [branch]`,
-  so every branch's paid turn is journaled and keyed for exactly-once independently.
+  so every branch's paid attempt is journaled and delivered at most once independently.
 
   Fan-out width is bounded by the branch list — a compile-time constant — so there
   is no unbounded or linked task explosion. `max_concurrency` may cap it further;
@@ -198,59 +198,6 @@ defmodule Workflow.Node.Until do
   @type t :: %__MODULE__{address: Workflow.Node.address(), predicate: struct()}
 end
 
-defmodule Workflow.Node.WhileBudget do
-  @moduledoc """
-  A dynamic loop that runs its `body` once per iteration **while the budget
-  ledger's `remaining` exceeds `reserve`** (and, optionally, while an `until`
-  predicate stays false). Because every paid turn only lowers `remaining`
-  (monotonically non-increasing), the loop **provably terminates**: it stops once
-  `remaining <= reserve`. `max_iterations` is a structural safety bound that
-  guarantees termination even for a body that spends nothing.
-
-  The body is an inert list of nodes addressed `parent ++ [i]`; each iteration
-  re-runs those addresses under a distinct `iteration`, which is the real
-  per-iteration component of the exactly-once key. Every control-flow decision is
-  journaled (`loop_decision`), so a resume **replays** the decision rather than
-  recomputing it from a ledger fold that reflects the whole run instead of the
-  historical decision point.
-  """
-  @enforce_keys [:address, :reserve, :body, :max_iterations]
-  defstruct [:address, :reserve, :body, :max_iterations, until: nil]
-
-  @type t :: %__MODULE__{
-          address: Workflow.Node.address(),
-          reserve: non_neg_integer(),
-          until: struct() | nil,
-          body: [struct()],
-          max_iterations: pos_integer()
-        }
-end
-
-defmodule Workflow.Node.UntilDry do
-  @moduledoc """
-  A dynamic loop that runs its `body` until **`rounds` consecutive iterations add
-  nothing new** to their accumulators, deduping by the `seen_by` field list. A
-  round is "dry" when its `collect`s added zero new items; `rounds` consecutive dry
-  iterations stop the loop. `max_iterations` bounds it structurally so it
-  terminates even if the body never goes dry.
-
-  `seen_by` is a **field list, never a closure**, so the compiler sees it and the
-  node stays inert and serializable. Dryness is derived by folding the journaled
-  `accumulate` events — never from re-inspecting non-deterministic agent output —
-  and each `loop_decision` is journaled so resume replays it.
-  """
-  @enforce_keys [:address, :rounds, :seen_by, :body, :max_iterations]
-  defstruct [:address, :rounds, :seen_by, :body, :max_iterations]
-
-  @type t :: %__MODULE__{
-          address: Workflow.Node.address(),
-          rounds: pos_integer(),
-          seen_by: [atom()],
-          body: [struct()],
-          max_iterations: pos_integer()
-        }
-end
-
 defmodule Workflow.Node.Verify do
   @moduledoc """
   Higher-order verification: submit a `subject` (a literal finding) to a bounded
@@ -264,7 +211,7 @@ defmodule Workflow.Node.Verify do
 
   Each voter is pre-expanded into an inert, fail-closed `%Workflow.Node.Agent{}`
   with its own stable address `parent ++ [voter]`, schema-bound to a boolean
-  `verdict`, so every vote is journaled and keyed for exactly-once independently.
+  `verdict`, so every vote is journaled and delivered at most once independently.
   Survival is a **pure fold** over the journaled verdicts against `threshold`
   (`:majority` | `:unanimous` | `:any` | a positive integer count) — never process
   state — so a resume replays the settled outcome.
@@ -366,9 +313,9 @@ defmodule Workflow.Node.Synthesize do
   @moduledoc """
   Fold a set of `inputs` into a single result under a static `prompt`. Both are
   compile-time literals, so the node stays inert. At runtime it is one schemaless,
-  exactly-once agent turn whose effective prompt deterministically embeds the
+  at-most-once agent turn whose effective prompt deterministically embeds the
   `inputs` — reusing the same paid-effect machinery every other agent turn does, so
-  it is journaled and resumable with no special case.
+  its settled result replays from the journal with no special case.
   """
   @enforce_keys [:address, :inputs, :prompt]
   defstruct [:address, :inputs, :prompt]
@@ -416,13 +363,12 @@ end
 
 defmodule Workflow.Node.GenericFanout do
   @moduledoc """
-  Generic core fanout over inert agent lanes. A repeated fanout stores one lane and
-  rebases it to `parent ++ [branch, stage]`; an explicit fanout stores each
-  heterogeneous lane at its final stable address.
+  Generic core fanout over inert agent lanes. `{:repeat, lane}` stores one lane
+  template and rebases it to `parent ++ [branch, stage]`; `{:explicit, lanes}`
+  stores each heterogeneous lane at its final stable address.
 
-  The struct is named `GenericFanout` to coexist with the legacy `%FanOut{}` node
-  on case-insensitive filesystems; the DSL and journal surface remain `fanout` and
-  `fanout_*`.
+  The DSL and journal surface are `fanout` and `fanout_*`; older `fan_out` syntax
+  is compiled into this same node.
   """
   @enforce_keys [:address, :width, :lanes]
   defstruct [
@@ -431,42 +377,17 @@ defmodule Workflow.Node.GenericFanout do
     :lanes,
     bind: nil,
     max_concurrency: nil,
-    on_zero: :complete,
-    repeated: true
+    on_zero: :complete
   ]
 
   @type t :: %__MODULE__{
           address: Workflow.Node.address(),
           width: non_neg_integer() | Workflow.Node.BudgetSlices.t() | Workflow.Node.PathCount.t(),
-          lanes: [[Workflow.Node.Agent.t()]],
+          lanes:
+            {:repeat, [Workflow.Node.Agent.t()]}
+            | {:explicit, [[Workflow.Node.Agent.t()]]},
           bind: atom() | nil,
           max_concurrency: pos_integer() | nil,
-          on_zero: :complete | :fail,
-          repeated: boolean()
-        }
-end
-
-defmodule Workflow.Node.FanOut do
-  @moduledoc """
-  Budget-scaled fan-out: run `body` concurrently across a **dynamic** number of
-  branches whose width is a runtime-owned `%Workflow.Node.BudgetSlices{}` decision
-  (`floor(remaining / per)`), not a compile-time constant like `parallel`. The
-  decided width is journaled (`fan_out_started`) so a resume replays it rather than
-  recomputing against a ledger the branches have since spent down.
-
-  `body` is an inert list of `%Workflow.Node.Agent{}` templates at placeholder
-  addresses; at runtime branch `i` re-addresses them to `parent ++ [i, stage]` — a
-  pure data rebase, no closure — so every branch turn is journaled and keyed for
-  exactly-once independently. Width is bounded by the budget and further capped by
-  `max_concurrency`.
-  """
-  @enforce_keys [:address, :width, :body]
-  defstruct [:address, :width, :body, max_concurrency: nil]
-
-  @type t :: %__MODULE__{
-          address: Workflow.Node.address(),
-          width: Workflow.Node.BudgetSlices.t(),
-          body: [Workflow.Node.Agent.t()],
-          max_concurrency: pos_integer() | nil
+          on_zero: :complete | :fail
         }
 end

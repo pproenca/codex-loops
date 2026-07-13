@@ -247,7 +247,7 @@ defmodule Workflow.LoopRunTest do
 
     assert Accumulator.of(id) == %{items: [%{"id" => 1}, %{"id" => 2}]}
 
-    # And iteration 1's paid effect was charged exactly once across the crash.
+    # The unknown iteration is never redelivered, so its recorded charge stays one.
     key = %IdempotencyKey{run_id: id, node_path: [0, 0], iteration: 1, attempt: 0}
     assert LoopProvider.charges(store, key) == 1
 

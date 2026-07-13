@@ -2,12 +2,11 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   use ExUnit.Case, async: true
 
   alias Workflow.Node.Agent
-  alias Workflow.Node.FanOut
+  alias Workflow.Node.GenericFanout
+  alias Workflow.Node.Loop
   alias Workflow.Node.Parallel
   alias Workflow.Node.Pipeline
   alias Workflow.Node.Refine
-  alias Workflow.Node.UntilDry
-  alias Workflow.Node.WhileBudget
   alias Workflow.Script
   alias Workflow.Tree
 
@@ -137,9 +136,9 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     |> agent_prompts()
   end
 
-  defp agent_prompts(%FanOut{body: body}), do: agent_prompts(body)
-  defp agent_prompts(%UntilDry{body: body}), do: agent_prompts(body)
-  defp agent_prompts(%WhileBudget{body: body}), do: agent_prompts(body)
+  defp agent_prompts(%GenericFanout{lanes: {:repeat, lane}}), do: agent_prompts(lane)
+  defp agent_prompts(%GenericFanout{lanes: {:explicit, lanes}}), do: agent_prompts(lanes)
+  defp agent_prompts(%Loop{body: body}), do: agent_prompts(body)
 
   defp agent_prompts(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser, gates: gates}) do
     [producer, reviser | refine_gate_agents(gates)]
@@ -181,9 +180,9 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     |> agent_labels()
   end
 
-  defp agent_labels(%FanOut{body: body}), do: agent_labels(body)
-  defp agent_labels(%UntilDry{body: body}), do: agent_labels(body)
-  defp agent_labels(%WhileBudget{body: body}), do: agent_labels(body)
+  defp agent_labels(%GenericFanout{lanes: {:repeat, lane}}), do: agent_labels(lane)
+  defp agent_labels(%GenericFanout{lanes: {:explicit, lanes}}), do: agent_labels(lanes)
+  defp agent_labels(%Loop{body: body}), do: agent_labels(body)
 
   defp agent_labels(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser, gates: gates}) do
     [producer, reviser | refine_gate_agents(gates)]
@@ -209,9 +208,9 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
     |> agents()
   end
 
-  defp agents(%FanOut{body: body}), do: agents(body)
-  defp agents(%UntilDry{body: body}), do: agents(body)
-  defp agents(%WhileBudget{body: body}), do: agents(body)
+  defp agents(%GenericFanout{lanes: {:repeat, lane}}), do: agents(lane)
+  defp agents(%GenericFanout{lanes: {:explicit, lanes}}), do: agents(lanes)
+  defp agents(%Loop{body: body}), do: agents(body)
 
   defp agents(%Refine{input: {:producer, producer}, reviewers: reviewers, reviser: reviser, gates: gates}) do
     [producer, reviser | refine_gate_agents(gates)]

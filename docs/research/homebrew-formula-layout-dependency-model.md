@@ -1,8 +1,9 @@
 # Homebrew formula layout and dependency model
 
-> Implementation update: ADR 0002 removes the second Burrito release. The
-> formula no longer needs Zig or XZ and stages both commands from one OTP
-> release. The ownership and `libexec` decisions below remain current.
+> **Status: superseded by ADR 0004 for the product artifact.** The runtime now
+> ships as one immutable bundle with a native Rust CLI/MCP binary and packaged
+> scheduler. The formula layout below is retained as historical package-manager
+> research, not as the canonical runtime layout.
 
 Date: 2026-07-09
 

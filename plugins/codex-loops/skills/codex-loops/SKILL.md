@@ -37,7 +37,7 @@ If working from a repo clone, the packaged binary is built with:
 ```bash
 make build
 make ci
-make release
+make dev-bundle
 ```
 
 For a user-driven manual run from the shell, prefer the progressive CLI over
@@ -197,7 +197,8 @@ workflow_open_ui run_id=<id-live>
 `workflow_status` is a polling snapshot. `workflow_inspect` is durable journal
 inspection. LiveView, opened through `workflow_open_ui`, renders the same
 journal-backed projection: every activity entry is appended before a
-post-commit PubSub notification asks the UI to refresh.
+post-commit `{:journal_committed, run_id, seq}` PubSub signal asks the UI to
+refold. The signal carries no event snapshot.
 
 Use `workflow_resume run_id=<id> provider=codex` when a run failed and should
 reuse completed journaled nodes. Provider effects are at-most-once: a durable
@@ -212,7 +213,8 @@ For this repo:
 ```bash
 make build
 make ci
-make release
+make dev-bundle
+MINISIGN_SECRET_KEY=/path/to/key make dist
 ```
 
 `make ci` proves the skill-only plugin package, directly registered MCP runtime, scheduler lifecycle,

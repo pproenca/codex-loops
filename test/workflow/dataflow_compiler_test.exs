@@ -457,7 +457,7 @@ defmodule Workflow.DataflowCompilerTest do
                """)
 
       assert f.message =~ "template prompts are only allowed on top-level agents"
-      assert f.message =~ "fan_out"
+      assert f.message =~ "fanout"
 
       assert {:error, %Finding{line: 3} = f} =
                parse("""

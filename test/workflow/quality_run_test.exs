@@ -357,18 +357,14 @@ defmodule Workflow.QualityRunTest do
              %{
                reviewer: :spec,
                reviewer_index: 0,
-               approved: true,
-               clear: true,
                adapter: :findings_v1,
-               status: :completed
+               outcome: :clear
              },
              %{
                reviewer: :runtime,
                reviewer_index: 1,
-               approved: true,
-               clear: true,
                adapter: :findings_v1,
-               status: :completed
+               outcome: :clear
              }
            ]
 
@@ -480,9 +476,17 @@ defmodule Workflow.QualityRunTest do
     for _ <- 1..4, do: assert_received({:agent_called, "work"})
     refute_received {:agent_called, _}
 
-    started = event(id, :fan_out_started).payload
-    assert started == %{address: [0], per: 10, width: 4}
-    assert :fan_out_completed in types(id)
+    started = event(id, :fanout_started).payload
+
+    assert started == %{
+             address: [0],
+             iteration: nil,
+             width_expr: %Workflow.Node.BudgetSlices{per: 10},
+             width: 4,
+             bind: nil
+           }
+
+    assert :fanout_completed in types(id)
 
     # Each branch runs the body at its own [fan_out, branch, stage] address.
     assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [0, 2, 0], [0, 3, 0]]
@@ -498,7 +502,7 @@ defmodule Workflow.QualityRunTest do
 
     for _ <- 1..2, do: assert_received({:agent_called, "work"})
     refute_received {:agent_called, _}
-    assert event(id, :fan_out_started).payload.width == 2
+    assert event(id, :fanout_started).payload.width == 2
     assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0]]
   end
 
@@ -510,9 +514,23 @@ defmodule Workflow.QualityRunTest do
              Run.run(Widen.tree(), run_id: id, budget: 5, provider: {EchoProvider, sink: self()})
 
     refute_received {:agent_called, _}
-    assert event(id, :fan_out_started).payload.width == 0
-    assert :fan_out_completed in types(id)
+    assert event(id, :fanout_started).payload.width == 0
+    assert :fanout_completed in types(id)
     assert committed_addresses(id) == []
+    assert Status.of(id).state == :completed
+  end
+
+  test "budget-derived fan_out width is capped at the global limit" do
+    id = run_id()
+
+    assert {:ok, ^id} =
+             Run.run(Widen.tree(), run_id: id, budget: 1_000, provider: {EchoProvider, sink: self()})
+
+    for _branch <- 1..64, do: assert_received({:agent_called, "work"})
+    refute_received {:agent_called, _}
+
+    assert event(id, :fanout_started).payload.width == 64
+    assert length(committed_addresses(id)) == 64
     assert Status.of(id).state == :completed
   end
 

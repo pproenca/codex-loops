@@ -3,6 +3,10 @@
 
 import json
 import sys
+import time
+
+
+HOLD_LEASE_MARKER = "CODEX_LOOPS_CONFORMANCE_HOLD_LEASE"
 
 
 def schema_path(arguments):
@@ -54,8 +58,11 @@ def emit(event):
 
 
 def main():
-    _prompt = sys.stdin.read()
+    prompt = sys.stdin.read()
     path = schema_path(sys.argv[1:])
+
+    if HOLD_LEASE_MARKER in prompt:
+        time.sleep(2)
 
     if path:
         with open(path, encoding="utf-8") as schema_file:

@@ -19,9 +19,10 @@ defmodule Workflow.CodexProviderTest do
   use ExUnit.Case, async: true
 
   alias Workflow.Journal
-  alias Workflow.Provider
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Codex
+  alias Workflow.Provider.Mock
+  alias Workflow.Provider.Usage
   alias Workflow.Run
   alias Workflow.Status
 
@@ -226,8 +227,7 @@ defmodule Workflow.CodexProviderTest do
   defp tmp(suffix), do: Path.join(System.tmp_dir!(), "codex_#{suffix}_#{System.unique_integer([:positive])}")
 
   # Select the codex backend as a port swap, pointed at the hermetic stub in `mode`.
-  defp codex(%{elixir: elixir, stub: stub}, mode, extra \\ []),
-    do: Provider.select(:codex, command: {elixir, [stub, mode | extra]})
+  defp codex(%{elixir: elixir, stub: stub}, mode, extra \\ []), do: {Codex, command: {elixir, [stub, mode | extra]}}
 
   defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
   defp settled_types(id), do: id |> types() |> Enum.reject(&(&1 in [:agent_started, :agent_activity]))
@@ -259,16 +259,14 @@ defmodule Workflow.CodexProviderTest do
     assert Enum.count(types(id), &(&1 == :agent_activity)) == 3
   end
 
-  test "provider selection is a port swap; the interpreter path is unchanged", ctx do
+  test "provider injection is a port swap; the interpreter path is unchanged", ctx do
     mock_id = run_id()
     codex_id = run_id()
 
-    # Selection resolves a name to a {module, opts} port — nothing else.
-    assert {Workflow.Provider.Mock, []} = Provider.select(:mock, [])
     assert {Codex, command: _} = codex(ctx, "echo")
 
     assert {:ok, ^mock_id} =
-             Run.run(EchoWorkflow.tree(), run_id: mock_id, provider: Provider.select(:mock, []))
+             Run.run(EchoWorkflow.tree(), run_id: mock_id, provider: {Mock, []})
 
     assert {:ok, ^codex_id} =
              Run.run(EchoWorkflow.tree(), run_id: codex_id, provider: codex(ctx, "echo"))
@@ -401,7 +399,7 @@ defmodule Workflow.CodexProviderTest do
 
     assert [agent] = status.agents
     assert agent.status == :failed
-    assert agent.usage == %Provider.Usage{}
+    assert agent.usage == %Usage{}
     assert agent.activity == []
     assert agent.provider_failure == %{kind: :timeout, detail: detail}
   end
@@ -457,7 +455,7 @@ defmodule Workflow.CodexProviderTest do
 
     key = %Workflow.IdempotencyKey{run_id: "large_schema", node_path: [0], iteration: 0}
 
-    assert {:ok, %{"body" => body}, %Provider.Usage{}, activity} =
+    assert {:ok, %{"body" => body}, %Usage{}, activity} =
              Codex.run_agent(
                "write a long schema output",
                schema,
@@ -523,7 +521,7 @@ defmodule Workflow.CodexProviderTest do
 
     key = %Workflow.IdempotencyKey{run_id: "schema", node_path: [0], iteration: 0}
 
-    assert {:ok, written, %Provider.Usage{}, _activity} =
+    assert {:ok, written, %Usage{}, _activity} =
              Codex.run_agent(
                "show schema",
                schema,

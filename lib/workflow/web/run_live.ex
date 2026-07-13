@@ -12,7 +12,8 @@ defmodule Workflow.Web.RunLive do
     * After a writer crash it shows what was *committed*, not a process's
       uncommitted belief.
     * A mid-run reconnect subscribes, returns from `mount/3`, then reconstructs the
-      full view from the scheduler snapshot in the first mailbox turn.
+      full view in a lifecycle-owned async task so SQLite never blocks the LiveView
+      mailbox.
     * The `{:journal_committed, ...}` broadcast is treated only as a *signal to
       refresh*: its payload is discarded and the whole read model is re-derived.
       Refreshing is idempotent, so an event seen by both the initial snapshot and a
@@ -29,28 +30,56 @@ defmodule Workflow.Web.RunLive do
 
   @impl true
   def mount(%{"run_id" => run_id}, _session, socket) do
+    run_id = :binary.copy(run_id)
     status = %Status{run_id: run_id}
-    socket = assign_projection(socket, run_id, status, RunProjection.from_status(status))
+
+    socket =
+      socket
+      |> assign_projection(run_id, status, RunProjection.from_status(status))
+      |> assign(
+        refresh_in_flight: false,
+        refresh_pending: false,
+        refresh_timer: nil,
+        refresh_error: false
+      )
 
     # Subscribe before scheduling the first fold so no commit slips through the
-    # gap. Returning first keeps SQLite work out of the supervised mount path.
+    # gap. The lifecycle-owned task keeps SQLite work out of the LiveView mailbox.
     if connected?(socket) do
       RunStream.subscribe(run_id)
-      send(self(), :refresh)
+      {:ok, request_refresh(socket)}
+    else
+      {:ok, socket}
     end
-
-    {:ok, socket}
   end
 
   @impl true
-  def handle_info({:journal_committed, run_id, _event}, socket) do
-    {:noreply, assign_projection(socket, run_id)}
+  def handle_info({:journal_committed, run_id, _seq}, socket) do
+    if run_id == socket.assigns.run_id do
+      {:noreply, request_refresh(socket)}
+    else
+      {:noreply, socket}
+    end
   end
 
   def handle_info(:refresh, socket) do
-    socket = assign_projection(socket, socket.assigns.run_id)
-    if socket.assigns.status.state == :running, do: schedule_refresh()
-    {:noreply, socket}
+    {:noreply, socket |> assign(refresh_timer: nil) |> request_refresh()}
+  end
+
+  @impl true
+  def handle_async(:run_snapshot, {:ok, {:ok, %{status: status, run_projection: projection}}}, socket) do
+    socket = assign_projection(socket, socket.assigns.run_id, status, projection)
+    {:noreply, finish_refresh(socket)}
+  end
+
+  def handle_async(:run_snapshot, {:ok, {:error, _error}}, socket) do
+    socket = assign(socket, refresh_in_flight: false, refresh_pending: false, refresh_error: true)
+    {:noreply, schedule_refresh(socket, true)}
+  end
+
+  def handle_async(:run_snapshot, {:exit, _reason}, socket) do
+    socket = assign(socket, refresh_in_flight: false, refresh_pending: false, refresh_error: true)
+    {:noreply, schedule_refresh(socket, true)}
   end
 
   @impl true
@@ -64,12 +93,6 @@ defmodule Workflow.Web.RunLive do
 
   def handle_event("select_agent", %{"id" => agent_id}, socket) do
     {:noreply, select_agent(socket, socket.assigns.focused_phase_id, agent_id)}
-  end
-
-  # The single point where state enters the socket: one scheduler-owned snapshot.
-  defp assign_projection(socket, run_id) do
-    %{status: status, run_projection: run_projection} = scheduler_snapshot(run_id)
-    assign_projection(socket, run_id, status, run_projection)
   end
 
   defp assign_projection(socket, run_id, %Status{} = status, %RunProjection{} = run_projection) do
@@ -94,14 +117,50 @@ defmodule Workflow.Web.RunLive do
     )
   end
 
-  defp scheduler_snapshot(run_id) do
-    case Scheduler.get_run_snapshot(run_id) do
-      {:ok, snapshot} -> snapshot
-      {:error, _error} -> raise ArgumentError, "invalid run id"
+  defp scheduler_snapshot(run_id), do: Scheduler.get_run_snapshot(run_id)
+
+  defp request_refresh(%{assigns: %{refresh_in_flight: true}} = socket) do
+    socket
+    |> cancel_refresh_timer()
+    |> assign(refresh_pending: true)
+  end
+
+  defp request_refresh(socket) do
+    run_id = socket.assigns.run_id
+
+    socket
+    |> cancel_refresh_timer()
+    |> assign(refresh_in_flight: true, refresh_pending: false)
+    |> start_async(:run_snapshot, fn -> scheduler_snapshot(run_id) end, supervisor: Workflow.TaskSupervisor)
+  end
+
+  defp finish_refresh(socket) do
+    pending? = socket.assigns.refresh_pending
+
+    socket =
+      assign(socket,
+        refresh_in_flight: false,
+        refresh_pending: false,
+        refresh_error: false
+      )
+
+    if pending?, do: request_refresh(socket), else: schedule_refresh(socket, false)
+  end
+
+  defp schedule_refresh(socket, force?) do
+    if force? or socket.assigns.status.state == :running do
+      assign(socket, refresh_timer: Process.send_after(self(), :refresh, @refresh_ms))
+    else
+      assign(socket, refresh_timer: nil)
     end
   end
 
-  defp schedule_refresh, do: Process.send_after(self(), :refresh, @refresh_ms)
+  defp cancel_refresh_timer(%{assigns: %{refresh_timer: nil}} = socket), do: socket
+
+  defp cancel_refresh_timer(%{assigns: %{refresh_timer: timer}} = socket) do
+    _cancelled = Process.cancel_timer(timer, async: true, info: false)
+    assign(socket, refresh_timer: nil)
+  end
 
   defp focus_phase(socket, phase_id) do
     status = socket.assigns.status
@@ -198,6 +257,10 @@ defmodule Workflow.Web.RunLive do
           </div>
         </section>
       </header>
+
+      <p :if={@refresh_error} data-testid="run-refresh-error" role="alert">
+        Run data is temporarily unavailable. Retrying…
+      </p>
 
       <section data-testid="inspector">
         <nav data-testid="phase-timeline" aria-label="Workflow timeline">
@@ -740,6 +803,7 @@ defmodule Workflow.Web.RunLive do
   end
 
   defp activity_label(entry), do: Map.get(entry, :label) || Map.get(entry, "label") || "Activity"
+
   defp activity_status(entry) do
     case Map.get(entry, :status) || Map.get(entry, "status") do
       nil -> nil
@@ -747,6 +811,7 @@ defmodule Workflow.Web.RunLive do
       status when is_binary(status) -> status
     end
   end
+
   defp activity_summary(entry), do: Map.get(entry, :summary) || Map.get(entry, "summary")
 
   defp formatted_tool_call(entry) do

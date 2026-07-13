@@ -79,7 +79,7 @@ defmodule Workflow.BindingResolutionTest do
     fanout = %GenericFanout{
       address: [4],
       width: 2,
-      lanes: [[%Agent{address: [4], prompt: "lane"}]],
+      lanes: {:repeat, [%Agent{address: [4], prompt: "lane"}]},
       bind: :reviews
     }
 
@@ -116,7 +116,7 @@ defmodule Workflow.BindingResolutionTest do
     fanout = %GenericFanout{
       address: [4],
       width: 0,
-      lanes: [[%Agent{address: [4], prompt: "lane"}]],
+      lanes: {:repeat, [%Agent{address: [4], prompt: "lane"}]},
       bind: :reviews
     }
 

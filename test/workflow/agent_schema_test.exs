@@ -86,7 +86,7 @@ defmodule Workflow.AgentSchemaTest do
 
     assert {:ok, ^id} = Run.run(Classify.tree(), run_id: id, provider: provider([valid]))
 
-    # The provider ran exactly once — the first output already conformed.
+    # The first output conforms, so the run makes one provider call.
     assert_received {:agent_called, "classify"}
     refute_received {:agent_called, _}
 
@@ -330,8 +330,7 @@ defmodule Workflow.AgentSchemaTest do
     assert_received {:agent_called, "classify"}
     refute_received {:agent_called, _}
 
-    # Each distinct attempt key was charged exactly once — no attempt was deduped
-    # onto another attempt's key.
+    # Each retry has its own key, so neither attempt is deduped onto the other.
     k0 = %IdempotencyKey{run_id: id, node_path: [0], iteration: 0, attempt: 0}
     k1 = %IdempotencyKey{run_id: id, node_path: [0], iteration: 0, attempt: 1}
     assert DedupingProvider.charges(store, k0) == 1

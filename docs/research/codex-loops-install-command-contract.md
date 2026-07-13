@@ -1,5 +1,10 @@
 # codex-loops install command contract
 
+> **Status: superseded by ADR 0004.** The installed native command now accepts an
+> explicit Codex path, persists that exact binding, installs the user skill, and
+> registers `codex-loops mcp` directly. It does not reconcile a marketplace
+> plugin or discover a brewed runtime. The contract below is historical.
+
 Date: 2026-07-09
 
 Wayfinder ticket: [Define the codex-loops install command contract](https://github.com/pproenca/codex-loops/issues/115)

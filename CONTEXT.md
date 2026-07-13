@@ -34,6 +34,12 @@ redelivers an unsettled attempt. A crash may leave the outcome unknown, but cann
 make the scheduler silently spend the same attempt again.
 _Avoid_: exactly-once result, backend idempotency guarantee
 
+**Bounded orchestration**:
+The closed runtime limits retries to 5, loop iterations to 1000, resolved fanout
+width to 64, and concurrent workflow tasks to 8. Compatibility loop/fan-out
+syntax lowers to the generic bounded core.
+_Avoid_: unbounded retry, unlimited fanout, runtime-specific legacy semantics
+
 **Codex event**:
 A raw JSON object emitted by `codex exec --json`; it is provider protocol input before Codex Loops normalizes it.
 _Avoid_: journal event, activity entry

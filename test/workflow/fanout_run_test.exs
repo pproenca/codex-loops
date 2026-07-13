@@ -108,7 +108,7 @@ defmodule Workflow.FanoutRunTest do
     id = run_id()
     assert {:ok, ^id} = Run.run(Par.tree(), run_id: id, provider: echo())
 
-    # Every branch's paid turn ran exactly once.
+    # The uninterrupted run makes one provider call per branch.
     for p <- ~w(a b c), do: assert_received({:agent_called, ^p})
     refute_received {:agent_called, _}
 
@@ -190,7 +190,7 @@ defmodule Workflow.FanoutRunTest do
     assert Status.of(id).state == :completed
   end
 
-  test "a branch address participates in exactly-once resolution like any node" do
+  test "a branch address participates in settled-result replay like any node" do
     # A committed branch turn at address [0, 1] resolves as settled, so a resume
     # replays it instead of re-running the paid effect.
     committed =

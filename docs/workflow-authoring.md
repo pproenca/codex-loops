@@ -54,8 +54,8 @@ known atoms; arbitrary source text cannot mint atoms in the scheduler VM.
   loop core.
 - `fanout width: n do ... end` is the generic repeated-lane fan-out core.
 - Higher-level combinators such as `parallel`, `pipeline`, `collect`, `verify`,
-  `judge`, and `synthesize` are available in the Elixir DSL and should be used
-  only when the orchestration genuinely needs them.
+  `judge`, and `synthesize` are available in the workflow language and should
+  be used only when the orchestration genuinely needs them.
 - `while_budget`, `until_dry`, and `fan_out` remain useful
   sugar/compatibility surfaces. Prefer modeling new orchestration with generic
   `loop`, generic `fanout`, and closed predicates first.

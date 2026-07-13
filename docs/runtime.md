@@ -26,7 +26,7 @@ SQLite is authoritative for every read surface, including LiveView. Immediately
 before a provider attempt, the writer synchronously appends `agent_started`.
 As the Codex provider normalizes JSONL into activity entries, the same writer
 synchronously appends each `agent_activity`. Only after an append succeeds does
-it publish `{:journal_committed, ...}`. PubSub is therefore a refresh signal,
+it publish `{:journal_committed, run_id, seq}`. PubSub is therefore a refresh signal,
 not a second progress bus, and a connected or reconnecting LiveView always
 renders a journal fold.
 
@@ -119,6 +119,10 @@ inspection, resume, and UI opening against that external runtime. The proof
 asserts that the scheduler survives MCP shutdown, then stops it explicitly
 through the native CLI.
 
+The health projection checks the OTP application, journal owner, and PubSub.
+`Workflow.Web.Endpoint` is intentionally not repeated as a component check:
+receiving `/api/health` already proves that the endpoint is serving requests.
+
 ## Journal Model
 
 Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite` by default, or
@@ -165,8 +169,10 @@ Every external provider process is one-shot and bounded: input and stdout are
 limited to 16 MiB, the default turn deadline is 30 minutes, stderr is discarded,
 and a timeout or size breach fails the attempt. Concurrent workflow work is
 bounded by a system cap of eight tasks, fanout width by 64 lanes, and requested
-per-node limits may reduce those caps further. Refine reviewers also have a
-finite per-reviewer deadline.
+per-node limits may reduce those caps further. Agent retries are limited to five
+and loop bounds to 1000 iterations. Refine reviewers also have a finite
+per-reviewer deadline. Compatibility `while_budget`, `until_dry`, and `fan_out`
+forms lower to the generic `loop`/`fanout` semantic core before execution.
 
 ## Supervision
 

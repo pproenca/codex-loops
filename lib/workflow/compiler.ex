@@ -35,7 +35,6 @@ defmodule Workflow.Compiler do
   alias Workflow.Node.Collect
   alias Workflow.Node.Emit
   alias Workflow.Node.EmitResult
-  alias Workflow.Node.FanOut
   alias Workflow.Node.GenericFanout
   alias Workflow.Node.Judge
   alias Workflow.Node.Log
@@ -48,9 +47,7 @@ defmodule Workflow.Compiler do
   alias Workflow.Node.Return
   alias Workflow.Node.Synthesize
   alias Workflow.Node.Until
-  alias Workflow.Node.UntilDry
   alias Workflow.Node.Verify
-  alias Workflow.Node.WhileBudget
   alias Workflow.Predicate
   alias Workflow.Refine.Gate
   alias Workflow.Refine.Reviewer
@@ -134,7 +131,7 @@ defmodule Workflow.Compiler do
   @spec compile(String.t(), Macro.t(), Macro.Env.t()) ::
           {:ok, Tree.t()} | {:error, Finding.t()}
   def compile(name, block, env) when is_binary(name) do
-    with {:ok, nodes} <- build(statements(block), 0, [], MapSet.new(), env, %{}),
+    with {:ok, nodes} <- build(statements(block), 0, [], %{}, env, %{}),
          :ok <- validate_tree(nodes, env) do
       {:ok, %Tree{name: name, nodes: nodes}}
     end
@@ -173,13 +170,13 @@ defmodule Workflow.Compiler do
   end
 
   defp finish_build(%Phase{name: name} = phase, stmt, rest, index, acc, seen, env, binding_env) do
-    if MapSet.member?(seen, name) do
+    if Map.has_key?(seen, name) do
       {:error,
        Finding.at(env, stmt, "duplicate phase name #{inspect(name)}",
          hint: "phase names must be unique within a workflow"
        )}
     else
-      build(rest, index + 1, [phase | acc], MapSet.put(seen, name), env, binding_env)
+      build(rest, index + 1, [phase | acc], Map.put(seen, name, true), env, binding_env)
     end
   end
 
@@ -407,8 +404,8 @@ defmodule Workflow.Compiler do
     end
   end
 
-  # `while_budget reserve: N[, until: <predicate>][, max_iterations: N] do <body> end`
-  # — a dynamic loop whose body runs while the ledger's `remaining` exceeds `reserve`.
+  # Legacy loop syntax lowers directly to the generic loop core. The runtime never
+  # needs to know which spelling produced the tree.
   defp node({:while_budget, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:reserve, :until, :max_iterations], form, env),
@@ -416,19 +413,29 @@ defmodule Workflow.Compiler do
          {:ok, until_pred} <- optional_predicate(opts, form, env, binding_env),
          {:ok, cap} <- max_iterations(opts, form, env),
          {:ok, body} <- parse_body(block, address, form, env, binding_env, mode: :legacy) do
+      budget_exhausted = %Predicate.Compare{
+        op: :<=,
+        left: %Predicate.BudgetRemaining{},
+        right: reserve
+      }
+
+      until =
+        case until_pred do
+          nil -> budget_exhausted
+          predicate -> %Predicate.AnyOf{predicates: [budget_exhausted, predicate]}
+        end
+
       {:ok,
-       %WhileBudget{
+       %Loop{
          address: address,
-         reserve: reserve,
-         until: until_pred,
+         until: until,
          body: body,
-         max_iterations: cap
+         max_iterations: cap,
+         on_exhausted: :stop
        }}
     end
   end
 
-  # `until_dry rounds: K, seen_by: [:field, ...][, max_iterations: N] do <body> end`
-  # — loops until K consecutive iterations add nothing new (deduped by `seen_by`).
   defp node({:until_dry, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:rounds, :seen_by, :max_iterations], form, env),
@@ -438,12 +445,12 @@ defmodule Workflow.Compiler do
          {:ok, body} <- parse_body(block, address, form, env, binding_env, mode: :legacy),
          :ok <- require_collect(body, form, env) do
       {:ok,
-       %UntilDry{
+       %Loop{
          address: address,
-         rounds: rounds,
-         seen_by: seen_by,
+         until: %Predicate.Dry{rounds: rounds, seen_by: seen_by},
          body: body,
-         max_iterations: cap
+         max_iterations: cap,
+         on_exhausted: :stop
        }}
     end
   end
@@ -561,7 +568,7 @@ defmodule Workflow.Compiler do
          {:ok, cap} <- fanout_concurrency(opts, form, env),
          {:ok, bind} <- fanout_bind(opts, form, env, binding_env),
          {:ok, on_zero} <- fanout_on_zero(opts, form, env),
-         {:ok, lanes, repeated} <- fanout_body(block, width, address, form, env, binding_env) do
+         {:ok, lanes} <- fanout_body(block, width, address, form, env, binding_env) do
       {:ok,
        %GenericFanout{
          address: address,
@@ -569,23 +576,26 @@ defmodule Workflow.Compiler do
          lanes: lanes,
          bind: bind,
          max_concurrency: cap,
-         on_zero: on_zero,
-         repeated: repeated
+         on_zero: on_zero
        }}
     end
   end
 
-  # `fan_out width: budget_slices(per: N)[, max_concurrency: M] do <body> end` —
-  # run the body across `floor(remaining / N)` concurrent branches. The width is a
-  # runtime-owned budget decision, never author arithmetic, so `width:` accepts only
-  # a `budget_slices(per:)` form.
+  # Legacy `fan_out` syntax lowers directly to the generic fanout core. Its narrow
+  # width grammar remains an authoring compatibility constraint, not a runtime type.
   defp node({:fan_out, _meta, args} = form, address, env, binding_env) do
     with {:ok, opts, block} <- loop_call(args, form, env),
          :ok <- only_keys(opts, [:width, :max_concurrency], form, env),
          {:ok, width} <- fan_out_width(opts, form, env),
-         {:ok, cap} <- fan_out_concurrency(opts, form, env),
-         {:ok, body} <- fan_out_body(block, address, form, env, binding_env) do
-      {:ok, %FanOut{address: address, width: width, body: body, max_concurrency: cap}}
+         {:ok, cap} <- fanout_concurrency(opts, form, env),
+         {:ok, lanes} <- legacy_fanout_lanes(block, width, address, form, env, binding_env) do
+      {:ok,
+       %GenericFanout{
+         address: address,
+         width: width,
+         lanes: lanes,
+         max_concurrency: cap
+       }}
     end
   end
 
@@ -891,7 +901,7 @@ defmodule Workflow.Compiler do
              loop_address,
              0,
              [],
-             MapSet.new(),
+             %{},
              env,
              binding_env,
              mode
@@ -924,7 +934,7 @@ defmodule Workflow.Compiler do
   defp build_body([stmt | rest], loop_address, index, acc, seen, env, binding_env, mode) do
     case body_node(stmt, loop_address ++ [index], env, binding_env, mode) do
       {:ok, %Phase{name: name} = phase} ->
-        if MapSet.member?(seen, name) do
+        if Map.has_key?(seen, name) do
           {:error, Finding.at(env, stmt, "duplicate phase name #{inspect(name)}")}
         else
           build_body(
@@ -932,7 +942,7 @@ defmodule Workflow.Compiler do
             loop_address,
             index + 1,
             [phase | acc],
-            MapSet.put(seen, name),
+            Map.put(seen, name, true),
             env,
             binding_env,
             mode
@@ -2079,7 +2089,7 @@ defmodule Workflow.Compiler do
   defp fanout_body({:lanes, _meta, [lanes]}, width, address, form, env, binding_env) when is_list(lanes) do
     with :ok <- explicit_fanout_width(width, length(lanes), form, env),
          {:ok, lanes} <- explicit_fanout_lanes(lanes, address, form, env, binding_env) do
-      {:ok, lanes, false}
+      {:ok, {:explicit, lanes}}
     end
   end
 
@@ -2096,7 +2106,7 @@ defmodule Workflow.Compiler do
          )}
 
       {:ok, agents} ->
-        {:ok, [agents], true}
+        {:ok, {:repeat, agents}}
 
       {:error, _} = err ->
         err
@@ -2170,29 +2180,16 @@ defmodule Workflow.Compiler do
     end
   end
 
-  defp fan_out_concurrency(opts, form, env) do
-    case Keyword.fetch(opts, :max_concurrency) do
-      :error -> {:ok, nil}
-      {:ok, n} when is_integer(n) and n > 0 -> {:ok, n}
-      {:ok, _} -> {:error, Finding.at(env, form, "`max_concurrency` must be a positive integer")}
-    end
-  end
+  defp legacy_fanout_lanes(block, width, address, form, env, binding_env) do
+    case fanout_body(block, width, address, form, env, binding_env) do
+      {:ok, {:repeat, _lane} = lanes} ->
+        {:ok, lanes}
 
-  # The fan_out body is a lane of agent turns (like a pipeline stage list), parsed at
-  # a placeholder address and re-addressed per branch at runtime.
-  defp fan_out_body(block, address, form, env, binding_env) do
-    case agent_lane(statements(block), address, env, binding_env, "fan_out") do
-      {:ok, []} ->
-        {:error,
-         Finding.at(env, form, "`fan_out` requires at least one body step",
-           hint: "the body is a lane of agent turns, e.g. fan_out width: ... do agent(\"...\") end"
-         )}
+      {:ok, {:explicit, _lanes}} ->
+        {:error, Finding.at(env, form, "`fan_out` does not accept explicit `lanes`")}
 
-      {:ok, agents} ->
-        {:ok, agents}
-
-      {:error, _} = err ->
-        err
+      {:error, _finding} = error ->
+        error
     end
   end
 

@@ -1,5 +1,10 @@
 # Codex Loops runtime artifact distribution options
 
+> **Status: superseded by ADR 0004.** Codex Loops now ships one immutable,
+> versioned runtime bundle with a native Rust control plane, packaged scheduler,
+> and user skill at fixed relative paths. Runtime discovery and plugin-carried
+> binaries discussed below are rejected historical options.
+
 Date: 2026-07-09
 
 Wayfinder ticket: https://github.com/pproenca/codex-loops/issues/102

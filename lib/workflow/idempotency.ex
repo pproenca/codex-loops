@@ -83,6 +83,5 @@ defmodule Workflow.Idempotency do
     end)
   end
 
-  defp same_turn?(left, right),
-    do: left.address == right.address and left.iteration == right.iteration
+  defp same_turn?(left, right), do: left.address == right.address and left.iteration == right.iteration
 end

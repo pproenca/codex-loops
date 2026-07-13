@@ -1,5 +1,10 @@
 # Homebrew bottle, release, and proof gates
 
+> **Status: superseded by ADR 0004 for product packaging.** The current release
+> gate builds, signs, and proves the immutable runtime bundle through `make dist`;
+> the formula/bottle proposal below remains only generic future packaging
+> research.
+
 Date: 2026-07-09
 
 Wayfinder ticket: [Specify Homebrew bottle, release, and proof gates](https://github.com/pproenca/codex-loops/issues/117)

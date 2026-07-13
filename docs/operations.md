@@ -101,8 +101,9 @@ not part of normal CI.
 
 Provider subprocesses have a finite 30-minute default deadline and 16 MiB input
 and stdout limits. Workflow concurrency is capped system-wide at eight tasks and
-fanout width at 64, even when a script asks for more. A limit breach is a typed
-provider or run failure, never an infinite wait or unbounded accumulation.
+fanout width at 64, even when a script asks for more. Agent retries are capped at
+five and loop iterations at 1000. A limit breach is a typed provider or run
+failure, never an infinite wait or unbounded accumulation.
 
 ## Manual CLI Run
 
@@ -261,7 +262,8 @@ workflow_resume  run_id=<id> provider=codex
 `workflow_inspect` is a durable inspection view with `journalEvents` summaries
 and ordered `rawRefs`; it does not expose raw Codex JSONL by default.
 `workflow_open_ui` returns the Phoenix LiveView URL. LiveView refolds the
-journal after post-commit PubSub notifications; it does not maintain a separate
+journal after the post-commit PubSub signal `{:journal_committed, run_id, seq}`;
+the signal carries no event snapshot, and LiveView does not maintain a separate
 transient progress state.
 
 Resume reuses committed turns and continues after settled rejected attempts.

@@ -36,7 +36,7 @@ native-test:
 
 native-quality:
 	$(CARGO) fmt --manifest-path $(NATIVE_MANIFEST) -- --check
-	$(CARGO) clippy --locked --manifest-path $(NATIVE_MANIFEST) -- -D warnings
+	$(CARGO) clippy --locked --all-targets --all-features --manifest-path $(NATIVE_MANIFEST) -- -D warnings
 	$(CARGO) test --locked --manifest-path $(NATIVE_MANIFEST)
 	@find native/codex-loops/src -name '*.rs' \
 		-exec sh -c 'for file do bash .agents/skills/rust-implement/scripts/lint.sh "$$file" || exit 1; done' sh {} +

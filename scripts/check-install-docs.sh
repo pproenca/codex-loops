@@ -15,7 +15,7 @@ files=(
 
 stale='Burrito|plugins/codex-loops/scheduler|copied plugin package|codex-loops-mcp|CODEX_LOOPS_RUNTIME_ROOT|CODEX_LOOPS_SCHEDULER_BIN|package-homebrew-runtime|zig@0\.15'
 
-if rg -n "$stale" "${files[@]}"; then
+if grep -En "$stale" "${files[@]}"; then
   echo "stale bundled-runtime installation guidance found" >&2
   exit 1
 fi

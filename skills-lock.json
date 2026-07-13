@@ -1,11 +1,29 @@
 {
   "version": 1,
   "skills": {
+    "adversarial-beam": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/adversarial-beam/SKILL.md",
+      "computedHash": "a33d9d1eb3e5da93cb03beaf957aa68f66a79072a5317d6dcbcd5d1b29007c97"
+    },
     "adversarial-elixir": {
       "source": "pproenca/dot-skills",
       "sourceType": "github",
       "skillPath": "skills/.experimental/adversarial-elixir/SKILL.md",
-      "computedHash": "c5d9629d776c0437420fa057c100c8ca0364f9e614d0117d9332c0631e8084a6"
+      "computedHash": "1fb1d305a2c4becc7659cc7f95bf476dd303181d26e454cd1582a911784e41eb"
+    },
+    "adversarial-phoenix-liveview": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/adversarial-phoenix-liveview/SKILL.md",
+      "computedHash": "fef731c0baae7089fd03683f20e71e6cce42c3f01d18b4fb61ea08a9e7a8761c"
+    },
+    "adversarial-rust": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/adversarial-rust/SKILL.md",
+      "computedHash": "cde6a9fe3bffe8b1df03822338ae10631df7fae290390adb8175f7021f2e5151"
     },
     "elixir-meta-programming": {
       "source": "pproenca/dot-skills",

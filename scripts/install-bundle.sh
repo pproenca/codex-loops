@@ -16,6 +16,13 @@ validate_bundle() {
     test -f "$root/share/codex-loops/runtime.json"
 }
 
+replace_link() {
+  case $(uname -s) in
+    Linux) mv -fT "$1" "$2" ;;
+    *) mv -fh "$1" "$2" ;;
+  esac
+}
+
 validate_bundle "$source_root" || {
   echo "runtime bundle is incomplete: $source_root" >&2
   exit 1
@@ -36,11 +43,11 @@ fi
 
 next_current="$share_root/.current.$$"
 ln -s "$version" "$next_current"
-mv -fh "$next_current" "$share_root/current"
+replace_link "$next_current" "$share_root/current"
 
 next_command="$bin_root/.codex-loops.$$"
 ln -s "$share_root/current/bin/codex-loops" "$next_command"
-mv -fh "$next_command" "$bin_root/codex-loops"
+replace_link "$next_command" "$bin_root/codex-loops"
 
 printf 'Installed Codex Loops %s at %s\n' "$version" "$destination"
 printf 'Next: %s install --codex /absolute/path/to/codex\n' "$bin_root/codex-loops"

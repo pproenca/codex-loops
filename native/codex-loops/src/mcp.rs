@@ -8,77 +8,81 @@ use rmcp::{
     ErrorData as ProtocolError, RoleServer, ServerHandler, ServiceExt,
     model::{
         CallToolRequestParams, CallToolResult, JsonObject, ListToolsResult, PaginatedRequestParams,
-        ServerCapabilities, ServerInfo, Tool, object,
+        ServerCapabilities, ServerInfo, Tool,
     },
     service::RequestContext,
     transport::stdio,
 };
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
+use schemars::{JsonSchema, Schema, generate::SchemaSettings, transform::RecursiveTransform};
+use serde::{Deserialize, Deserializer};
+use serde_json::{Value, json};
 
 use crate::{
-    cli::{require_shared_filesystem, resolve_script_from},
-    error::{AppError, ErrorContext, McpDomainError, McpResult},
+    cli::{ResolvedWorkflowScript, require_shared_filesystem},
+    error::{AppError, AppResult, ExitStatus},
     lifecycle,
-    scheduler::{ResumeRequest, RunId, SchedulerClient, StartRequest},
+    scheduler::{
+        Provider, ResumeRequest, RunId, SchedulerClient, SchedulerDocument, SchedulerResponse,
+        StartRequest,
+    },
 };
-
-type DomainError = McpDomainError;
-type DomainResult<T> = McpResult<T>;
 
 #[derive(Clone)]
 struct CodexLoopsServer {
     client: SchedulerClient,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-enum Provider {
-    Mock,
-    Codex,
-}
-
-impl Provider {
-    fn as_str(self) -> &'static str {
-        match self {
-            Self::Mock => "mock",
-            Self::Codex => "codex",
-        }
-    }
-}
-
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ValidateArgs {
+    #[schemars(length(min = 1))]
     script_path: PathBuf,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct StartArgs {
+    #[schemars(length(min = 1))]
     script_path: PathBuf,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schemars(with = "RunId")]
     run_id: Option<RunId>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schemars(with = "Provider")]
     provider: Option<Provider>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schemars(with = "u64")]
     budget: Option<u64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct RunArgs {
     run_id: RunId,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 struct ResumeArgs {
     run_id: RunId,
-    #[serde(default, alias = "script", skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        alias = "script",
+        deserialize_with = "deserialize_optional_field"
+    )]
+    #[schemars(with = "PathBuf", length(min = 1))]
     script_path: Option<PathBuf>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_optional_field")]
+    #[schemars(with = "Provider")]
     provider: Option<Provider>,
+}
+
+fn deserialize_optional_field<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug)]
@@ -91,8 +95,27 @@ enum ToolCall {
     OpenUi(RunArgs),
 }
 
+#[derive(Debug)]
+enum ResolvedToolCall {
+    Validate(ResolvedWorkflowScript),
+    Start {
+        script: ResolvedWorkflowScript,
+        run_id: Option<RunId>,
+        provider: Option<Provider>,
+        budget: Option<u64>,
+    },
+    Status(RunId),
+    Inspect(RunId),
+    Resume {
+        run_id: RunId,
+        script: Option<ResolvedWorkflowScript>,
+        provider: Option<Provider>,
+    },
+    OpenUi(RunId),
+}
+
 impl ToolCall {
-    fn parse(name: &str, arguments: JsonObject) -> DomainResult<Self> {
+    fn parse(name: &str, arguments: JsonObject) -> AppResult<Self> {
         let value = Value::Object(arguments);
         let parsed = match name {
             "workflow_validate" => serde_json::from_value(value).map(Self::Validate),
@@ -102,8 +125,8 @@ impl ToolCall {
             "workflow_resume" => serde_json::from_value(value).map(Self::Resume),
             "workflow_open_ui" => serde_json::from_value(value).map(Self::OpenUi),
             unknown => {
-                return Err(DomainError::new(
-                    2,
+                return Err(AppError::new(
+                    ExitStatus::Usage,
                     "unknown_tool",
                     format!("Unknown tool: {unknown}"),
                 ));
@@ -114,7 +137,7 @@ impl ToolCall {
         Ok(parsed)
     }
 
-    fn validate(&self, name: &str) -> DomainResult<()> {
+    fn validate(&self, name: &str) -> AppResult<()> {
         let invalid = match self {
             Self::Validate(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
             Self::Start(args) if args.script_path.as_os_str().is_empty() => Some("script_path"),
@@ -155,107 +178,113 @@ impl ToolCall {
         match self {
             Self::Validate(_) | Self::Start(_) => true,
             Self::Resume(args) => args.script_path.is_some(),
-            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => false,
+            Self::Status(_) | Self::Inspect(_) | Self::OpenUi(_) => false,
         }
     }
 
-    fn resolve_scripts(&mut self, workspace_root: Option<&Path>) -> DomainResult<()> {
+    async fn resolve(self, workspace_root: Option<&Path>) -> AppResult<ResolvedToolCall> {
         match self {
-            Self::Validate(args) => {
-                args.script_path = resolve_script_from(&args.script_path, workspace_root)?;
+            Self::Validate(ValidateArgs { script_path }) => Ok(ResolvedToolCall::Validate(
+                ResolvedWorkflowScript::resolve_from(&script_path, workspace_root).await?,
+            )),
+            Self::Start(StartArgs {
+                script_path,
+                run_id,
+                provider,
+                budget,
+            }) => Ok(ResolvedToolCall::Start {
+                script: ResolvedWorkflowScript::resolve_from(&script_path, workspace_root).await?,
+                run_id,
+                provider,
+                budget,
+            }),
+            Self::Status(RunArgs { run_id }) => Ok(ResolvedToolCall::Status(run_id)),
+            Self::Inspect(RunArgs { run_id }) => Ok(ResolvedToolCall::Inspect(run_id)),
+            Self::Resume(ResumeArgs {
+                run_id,
+                script_path,
+                provider,
+            }) => {
+                let script = match script_path {
+                    Some(path) => {
+                        Some(ResolvedWorkflowScript::resolve_from(&path, workspace_root).await?)
+                    }
+                    None => None,
+                };
+                Ok(ResolvedToolCall::Resume {
+                    run_id,
+                    script,
+                    provider,
+                })
             }
-            Self::Start(args) => {
-                args.script_path = resolve_script_from(&args.script_path, workspace_root)?;
-            }
-            Self::Resume(args) => {
-                args.script_path = args
-                    .script_path
-                    .take()
-                    .map(|path| resolve_script_from(&path, workspace_root))
-                    .transpose()?;
-            }
-            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => {}
+            Self::OpenUi(RunArgs { run_id }) => Ok(ResolvedToolCall::OpenUi(run_id)),
         }
-        Ok(())
     }
 }
 
 impl CodexLoopsServer {
-    fn new() -> DomainResult<Self> {
+    fn new() -> AppResult<Self> {
         Ok(Self {
             client: SchedulerClient::from_env()?,
         })
     }
 
-    async fn execute(&self, call: ToolCall) -> CallToolResult {
-        if call.requires_shared_filesystem()
-            && let Err(error) = require_shared_filesystem(&self.client)
-        {
-            return structured_error(present(error).mcp_envelope());
-        }
+    async fn execute(&self, call: ResolvedToolCall) -> CallToolResult {
         if let Err(error) = lifecycle::ensure_ready(&self.client).await {
-            return structured_error(present(error).mcp_envelope());
+            return CallToolResult::structured_error(error.mcp_envelope());
         }
 
-        let result: DomainResult<Value> = match call {
-            ToolCall::Validate(args) => self
+        let result: AppResult<Value> = match call {
+            ResolvedToolCall::Validate(script) => self
                 .client
-                .validate(&args.script_path.to_string_lossy())
+                .validate(script.as_str())
                 .await
-                .and_then(|response| response.into_wire_value())
-                .map_err(DomainError::from),
-            ToolCall::Start(args) => self
+                .and_then(SchedulerResponse::into_wire_value),
+            ResolvedToolCall::Start {
+                script,
+                run_id,
+                provider,
+                budget,
+            } => self
                 .client
                 .start(&StartRequest {
-                    script_path: args.script_path.to_string_lossy().into_owned(),
-                    run_id: args.run_id,
-                    provider: args.provider.map(|provider| provider.as_str().to_owned()),
-                    budget: args.budget,
+                    script_path: script.into_string(),
+                    run_id,
+                    provider,
+                    budget,
                 })
                 .await
-                .and_then(|response| response.into_wire_value())
-                .map_err(DomainError::from),
-            ToolCall::Status(args) => self
-                .client
-                .status(&args.run_id)
-                .await
-                .and_then(|response| response.into_wire_value())
-                .map(conform_projection)
-                .map_err(DomainError::from),
-            ToolCall::Inspect(args) => self
-                .client
-                .inspect(&args.run_id)
-                .await
-                .and_then(|response| response.into_wire_value())
-                .map(conform_projection)
-                .map_err(DomainError::from),
-            ToolCall::Resume(args) => {
-                let run_id = args.run_id.clone();
-                self.client
-                    .resume(
-                        &run_id,
-                        &ResumeRequest {
-                            script_path: args
-                                .script_path
-                                .map(|path| path.to_string_lossy().into_owned()),
-                            provider: args.provider.map(|provider| provider.as_str().to_owned()),
-                        },
-                    )
-                    .await
-                    .and_then(|response| response.into_wire_value())
-                    .map_err(DomainError::from)
+                .and_then(SchedulerResponse::into_wire_value),
+            ResolvedToolCall::Status(run_id) => {
+                self.client.status(&run_id).await.map(conform_projection)
             }
-            ToolCall::OpenUi(args) => self
+            ResolvedToolCall::Inspect(run_id) => {
+                self.client.inspect(&run_id).await.map(conform_projection)
+            }
+            ResolvedToolCall::Resume {
+                run_id,
+                script,
+                provider,
+            } => self
                 .client
-                .status(&args.run_id)
+                .resume(
+                    &run_id,
+                    &ResumeRequest {
+                        script_path: script.map(ResolvedWorkflowScript::into_string),
+                        provider,
+                    },
+                )
                 .await
-                .and_then(|response| response.into_wire_value())
-                .map(|envelope| open_ui_envelope(envelope, &self.client))
-                .map_err(DomainError::from),
+                .and_then(SchedulerResponse::into_wire_value),
+            ResolvedToolCall::OpenUi(run_id) => self
+                .client
+                .status(&run_id)
+                .await
+                .and_then(|response| open_ui_envelope(response, &self.client)),
         };
         match result {
             Ok(value) => CallToolResult::structured(value),
-            Err(error) => structured_error(present(error).mcp_envelope()),
+            Err(error) => CallToolResult::structured_error(error.mcp_envelope()),
         }
     }
 }
@@ -272,7 +301,12 @@ impl ServerHandler for CodexLoopsServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, ProtocolError> {
-        Ok(ListToolsResult::with_all_items(tools()))
+        tools()
+            .map(ListToolsResult::with_all_items)
+            .map_err(|error| {
+                let report = error.into_report();
+                ProtocolError::internal_error(report.message, Some(report.details))
+            })
     }
 
     async fn call_tool(
@@ -280,141 +314,217 @@ impl ServerHandler for CodexLoopsServer {
         request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
     ) -> Result<CallToolResult, ProtocolError> {
-        let mut call = ToolCall::parse(&request.name, request.arguments.unwrap_or_default())
-            .map_err(|error| {
-                let error = present(error);
-                ProtocolError::invalid_params(
-                    error.message().to_owned(),
-                    Some(error.details().clone()),
-                )
-            })?;
+        let call = ToolCall::parse(&request.name, request.arguments.unwrap_or_default()).map_err(
+            |error| {
+                let report = error.into_report();
+                ProtocolError::invalid_params(report.message, Some(report.details))
+            },
+        )?;
+        let requires_shared_filesystem = call.requires_shared_filesystem();
         let workspace_root = if call.contains_relative_script_path() {
-            workspace_root(&context).await
+            match workspace_root(&context).await {
+                Ok(root) => Some(root),
+                Err(error) => return Ok(CallToolResult::structured_error(error.mcp_envelope())),
+            }
         } else {
             None
         };
-        match call.resolve_scripts(workspace_root.as_deref()) {
-            Ok(()) => {}
-            Err(error) => return Ok(structured_error(present(error).mcp_envelope())),
+        let call = match call.resolve(workspace_root.as_deref()).await {
+            Ok(call) => call,
+            Err(error) => return Ok(CallToolResult::structured_error(error.mcp_envelope())),
+        };
+        if requires_shared_filesystem && let Err(error) = require_shared_filesystem(&self.client) {
+            return Ok(CallToolResult::structured_error(error.mcp_envelope()));
         }
         Ok(self.execute(call).await)
     }
 }
 
-pub async fn run() -> DomainResult<()> {
+pub async fn run() -> AppResult<()> {
     let service = CodexLoopsServer::new()?
         .serve(stdio())
         .await
-        .map_err(|error| DomainError::new(6, "mcp_transport_failed", error.to_string()))?;
-    service
-        .waiting()
-        .await
-        .map_err(|error| DomainError::new(6, "mcp_transport_failed", error.to_string()))?;
+        .map_err(mcp_transport_error)?;
+    service.waiting().await.map_err(mcp_transport_error)?;
     Ok(())
 }
 
+fn mcp_transport_error(error: impl std::fmt::Display) -> AppError {
+    AppError::new(
+        ExitStatus::Runtime,
+        "mcp_transport_failed",
+        error.to_string(),
+    )
+}
+
 #[allow(deprecated)]
-async fn workspace_root(context: &RequestContext<RoleServer>) -> Option<PathBuf> {
-    if let Ok(root) = std::env::var("CODEX_LOOPS_WORKSPACE_ROOT")
-        && !root.is_empty()
-    {
-        return Some(PathBuf::from(root));
+async fn workspace_root(context: &RequestContext<RoleServer>) -> AppResult<PathBuf> {
+    match std::env::var("CODEX_LOOPS_WORKSPACE_ROOT") {
+        Ok(root) if !root.is_empty() => {
+            let root = PathBuf::from(root);
+            if root.is_absolute() {
+                return Ok(root);
+            }
+            return Err(workspace_root_config_error(
+                "CODEX_LOOPS_WORKSPACE_ROOT must be an absolute path.",
+                json!({"workspace_root": root}),
+            ));
+        }
+        Ok(_) | Err(std::env::VarError::NotPresent) => {}
+        Err(std::env::VarError::NotUnicode(root)) => {
+            return Err(workspace_root_config_error(
+                "CODEX_LOOPS_WORKSPACE_ROOT must contain valid Unicode.",
+                json!({"value": root.to_string_lossy()}),
+            ));
+        }
     }
-    let client = context.peer.peer_info()?;
-    client.capabilities.roots.as_ref()?;
+
+    let client = context.peer.peer_info().ok_or_else(|| {
+        workspace_root_error(
+            "The MCP client did not provide initialization information for resolving the relative workflow path.",
+            json!({"source": "client_initialize"}),
+        )
+    })?;
+    client.capabilities.roots.as_ref().ok_or_else(|| {
+        workspace_root_error(
+            "The MCP client does not support workspace roots; set CODEX_LOOPS_WORKSPACE_ROOT to resolve relative workflow paths.",
+            json!({"missing_capability": "roots"}),
+        )
+    })?;
     let roots = tokio::time::timeout(Duration::from_secs(1), context.peer.list_roots())
         .await
-        .ok()?
-        .ok()?;
-    roots.roots.into_iter().find_map(|root| {
-        url::Url::parse(&root.uri)
-            .ok()
-            .and_then(|uri| uri.to_file_path().ok())
-    })
+        .map_err(|_| {
+            workspace_root_error(
+                "Timed out while requesting workspace roots from the MCP client.",
+                json!({"timeout_ms": 1_000}),
+            )
+        })?
+        .map_err(|error| {
+            workspace_root_error(
+                "The MCP client rejected the workspace-roots request.",
+                json!({"reason": error.to_string()}),
+            )
+        })?;
+    roots
+        .roots
+        .iter()
+        .find_map(|root| {
+            url::Url::parse(&root.uri)
+                .ok()
+                .and_then(|uri| uri.to_file_path().ok())
+        })
+        .ok_or_else(|| {
+            workspace_root_error(
+                "The MCP client did not return a local filesystem workspace root; set CODEX_LOOPS_WORKSPACE_ROOT to resolve relative workflow paths.",
+                json!({"roots": roots.roots.iter().map(|root| &root.uri).collect::<Vec<_>>() }),
+            )
+        })
 }
 
-fn invalid_args(tool: &str, message: impl Into<String>) -> DomainError {
-    DomainError::new(2, "invalid_params", message).details(json!({"tool": tool}))
+fn workspace_root_error(message: &str, details: Value) -> AppError {
+    AppError::new(
+        ExitStatus::Prerequisite,
+        "workspace_root_unavailable",
+        message,
+    )
+    .details(details)
 }
 
-fn present(error: impl Into<AppError>) -> AppError {
-    error.into()
+fn workspace_root_config_error(message: &str, details: Value) -> AppError {
+    AppError::new(ExitStatus::Usage, "workspace_root_invalid", message).details(details)
 }
 
-fn tools() -> Vec<Tool> {
-    vec![
-        tool(
+fn invalid_args(tool: &str, message: impl Into<String>) -> AppError {
+    AppError::new(ExitStatus::Usage, "invalid_params", message).details(json!({"tool": tool}))
+}
+
+fn tools() -> AppResult<Vec<Tool>> {
+    Ok(vec![
+        typed_tool::<ValidateArgs>(
             "workflow_validate",
             "Validate a Codex Loops workflow script.",
-            schema(&[("script_path", "string", true)]),
-        ),
-        tool(
-            "workflow_start",
-            "Start a Codex Loops workflow run.",
-            schema(&[
-                ("script_path", "string", true),
-                ("run_id", "string", false),
-                ("provider", "string", false),
-                ("budget", "integer", false),
-            ]),
-        ),
-        tool(
+        )?,
+        typed_tool::<StartArgs>("workflow_start", "Start a Codex Loops workflow run.")?,
+        typed_tool::<RunArgs>(
             "workflow_status",
             "Read the public §7.5 status projection through GET /api/runs/:id.",
-            schema(&[("run_id", "string", true)]),
-        ),
-        tool(
+        )?,
+        typed_tool::<RunArgs>(
             "workflow_inspect",
             "Read the public §7.5 inspect/status projection with ordered rawRefs through GET /api/runs/:id/events.",
-            schema(&[("run_id", "string", true)]),
-        ),
+        )?,
         tool(
             "workflow_resume",
             "Resume an existing scheduler run.",
-            schema(&[
-                ("run_id", "string", true),
-                ("script_path", "string", false),
-                ("script", "string", false),
-                ("provider", "string", false),
-            ]),
+            resume_schema()?,
         ),
-        tool(
+        typed_tool::<RunArgs>(
             "workflow_open_ui",
             "Return the Phoenix LiveView URL for a scheduler run.",
-            schema(&[("run_id", "string", true)]),
-        ),
-    ]
+        )?,
+    ])
+}
+
+fn typed_tool<T: JsonSchema>(name: &'static str, description: &'static str) -> AppResult<Tool> {
+    Ok(tool(name, description, input_schema::<T>()?))
 }
 
 fn tool(name: &'static str, description: &'static str, input_schema: JsonObject) -> Tool {
     Tool::new(name, description, Arc::new(input_schema))
 }
 
-fn schema(fields: &[(&str, &str, bool)]) -> JsonObject {
-    let mut properties = Map::new();
-    let mut required = Vec::new();
-    for (name, kind, is_required) in fields {
-        let mut property = json!({"type": kind});
-        if *kind == "string" {
-            property["minLength"] = json!(1);
-        }
-        if *name == "provider" {
-            property["enum"] = json!(["mock", "codex"]);
-        }
-        if *name == "budget" {
-            property["minimum"] = json!(0);
-        }
-        properties.insert((*name).into(), property);
-        if *is_required {
-            required.push(*name);
-        }
+fn input_schema<T: JsonSchema>() -> AppResult<JsonObject> {
+    let schema = SchemaSettings::default()
+        .with(|settings| {
+            settings.meta_schema = None;
+            settings.inline_subschemas = true;
+        })
+        .with_transform(RecursiveTransform(|schema: &mut Schema| {
+            schema.remove("default");
+        }))
+        .into_generator()
+        .into_root_schema_for::<T>()
+        .to_value();
+    if let Value::Object(schema) = schema {
+        Ok(schema)
+    } else {
+        Err(schema_error(
+            "An MCP argument DTO generated a non-object JSON schema.",
+            schema,
+        ))
     }
-    object(
-        json!({"type": "object", "properties": properties, "required": required, "additionalProperties": false}),
-    )
 }
 
-fn conform_projection(mut envelope: Value) -> Value {
+fn resume_schema() -> AppResult<JsonObject> {
+    let mut schema = input_schema::<ResumeArgs>()?;
+    let Some(script_path_schema) = schema
+        .get("properties")
+        .and_then(Value::as_object)
+        .and_then(|properties| properties.get("script_path"))
+        .cloned()
+    else {
+        return Err(schema_error(
+            "The workflow_resume schema omitted script_path.",
+            Value::Object(schema),
+        ));
+    };
+    let Some(properties) = schema.get_mut("properties").and_then(Value::as_object_mut) else {
+        return Err(schema_error(
+            "The workflow_resume schema omitted its properties object.",
+            Value::Object(schema),
+        ));
+    };
+    // The legacy wire alias intentionally has the same schema as its canonical field.
+    properties.insert("script".into(), script_path_schema);
+    Ok(schema)
+}
+
+fn schema_error(message: &str, schema: Value) -> AppError {
+    AppError::new(ExitStatus::Runtime, "mcp_schema_invalid", message)
+        .details(json!({"schema": schema}))
+}
+
+fn conform_projection(response: SchedulerResponse<SchedulerDocument>) -> Value {
     const FIELDS: &[&str] = &[
         "runId",
         "state",
@@ -435,42 +545,69 @@ fn conform_projection(mut envelope: Value) -> Value {
         "journalEvents",
         "rawRefs",
     ];
-    if let Some(data) = envelope.get_mut("data").and_then(Value::as_object_mut) {
-        data.retain(|key, _| FIELDS.contains(&key.as_str()));
-    }
-    envelope
+    let SchedulerResponse {
+        api_version,
+        data: SchedulerDocument { mut fields },
+    } = response;
+    fields.retain(|key, _| FIELDS.contains(&key.as_str()));
+    json!({"api_version": api_version, "data": fields})
 }
 
-fn open_ui_envelope(envelope: Value, client: &SchedulerClient) -> Value {
-    let mut data = envelope.get("data").cloned().unwrap_or_else(|| json!({}));
-    if let Some(data) = data.as_object_mut() {
-        let path = data
-            .get("uiUrl")
-            .or_else(|| data.get("uiPath"))
-            .and_then(Value::as_str)
-            .unwrap_or("/");
-        let open_url = format!(
-            "{}{}{}",
-            client.base_url().as_str().trim_end_matches('/'),
-            if path.starts_with('/') { "" } else { "/" },
-            path
-        );
-        data.insert("open_url".into(), Value::String(open_url));
-    }
-    json!({"api_version": "codex-loops.mcp.v1", "data": data})
-}
-
-fn structured_error(value: Value) -> CallToolResult {
-    CallToolResult::structured_error(value)
+fn open_ui_envelope(
+    response: SchedulerResponse<SchedulerDocument>,
+    client: &SchedulerClient,
+) -> AppResult<Value> {
+    let SchedulerResponse {
+        data: SchedulerDocument { mut fields },
+        ..
+    } = response;
+    let path = fields
+        .get("uiUrl")
+        .or_else(|| fields.get("uiPath"))
+        .and_then(Value::as_str)
+        .filter(|path| !path.is_empty())
+        .ok_or_else(|| {
+            AppError::scheduler(
+                ExitStatus::Runtime,
+                "scheduler_response",
+                "Scheduler status data did not contain a non-empty uiUrl or uiPath.",
+            )
+            .details(json!({"data": &fields}))
+        })?;
+    let open_url = client.base_url().join(path).map_err(|error| {
+        AppError::scheduler(
+            ExitStatus::Runtime,
+            "scheduler_response",
+            "Scheduler status data contained an invalid UI path.",
+        )
+        .details(json!({"ui_path": path, "reason": error.to_string()}))
+    })?;
+    fields.insert("open_url".into(), Value::String(open_url.to_string()));
+    Ok(json!({"api_version": "codex-loops.mcp.v1", "data": fields}))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn arguments(value: Value) -> JsonObject {
+        rmcp::model::object(value)
+    }
+
+    fn scheduler_response(data: Value) -> SchedulerResponse<SchedulerDocument> {
+        serde_json::from_value(json!({"api_version": "scheduler.v1", "data": data})).unwrap()
+    }
+
+    fn schema_property<'a>(tool: &'a Tool, name: &str) -> Option<&'a Value> {
+        tool.input_schema
+            .get("properties")
+            .and_then(Value::as_object)
+            .and_then(|properties| properties.get(name))
+    }
+
     #[test]
     fn tool_catalog_is_complete_and_has_strict_schemas() {
-        let tools = tools();
+        let tools = tools().unwrap();
         let names: Vec<_> = tools.iter().map(|tool| tool.name.as_ref()).collect();
         assert_eq!(
             names,
@@ -489,6 +626,36 @@ mod tests {
                 .all(|tool| tool.input_schema.get("additionalProperties")
                     == Some(&Value::Bool(false)))
         );
+
+        let start = tools
+            .iter()
+            .find(|tool| tool.name == "workflow_start")
+            .unwrap();
+        assert_eq!(
+            schema_property(start, "provider").and_then(|schema| schema.get("enum")),
+            Some(&json!(["mock", "codex"]))
+        );
+        assert_eq!(
+            schema_property(start, "budget").and_then(|schema| schema.get("minimum")),
+            Some(&json!(0))
+        );
+        assert!(
+            schema_property(start, "budget")
+                .and_then(|schema| schema.get("default"))
+                .is_none()
+        );
+        let resume = tools
+            .iter()
+            .find(|tool| tool.name == "workflow_resume")
+            .unwrap();
+        assert_eq!(
+            schema_property(resume, "script"),
+            schema_property(resume, "script_path")
+        );
+        assert_eq!(
+            schema_property(resume, "script_path").and_then(|schema| schema.get("minLength")),
+            Some(&json!(1))
+        );
     }
 
     #[test]
@@ -497,7 +664,19 @@ mod tests {
         assert_eq!(error.code(), "invalid_params");
         let error = ToolCall::parse(
             "workflow_start",
-            object(json!({"script_path": "/missing", "unexpected": true})),
+            arguments(json!({"script_path": "/missing", "unexpected": true})),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_params");
+        let error = ToolCall::parse(
+            "workflow_start",
+            arguments(json!({"script_path": "/missing", "provider": null})),
+        )
+        .unwrap_err();
+        assert_eq!(error.code(), "invalid_params");
+        let error = ToolCall::parse(
+            "workflow_resume",
+            arguments(json!({"run_id": "run-1", "script": null})),
         )
         .unwrap_err();
         assert_eq!(error.code(), "invalid_params");
@@ -529,10 +708,11 @@ mod tests {
 
     #[test]
     fn public_projection_hides_scheduler_only_fields() {
-        let envelope = conform_projection(json!({
-            "api_version": "scheduler.v1",
-            "data": {"runId": "run-1", "state": "running", "lifecycleAction": {"action": "none"}}
-        }));
+        let envelope = conform_projection(scheduler_response(json!({
+            "runId": "run-1",
+            "state": "running",
+            "lifecycleAction": {"action": "none"}
+        })));
         assert_eq!(
             envelope.pointer("/data/runId").and_then(Value::as_str),
             Some("run-1")
@@ -546,14 +726,14 @@ mod tests {
         assert!(
             !ToolCall::parse(
                 "workflow_resume",
-                object(json!({"run_id": "run-1", "provider": "mock"}))
+                arguments(json!({"run_id": "run-1", "provider": "mock"}))
             )
             .unwrap()
             .requires_shared_filesystem()
         );
         let call = ToolCall::parse(
             "workflow_resume",
-            object(json!({"run_id": "run-1", "script_path": "/shared/workflow.exs"})),
+            arguments(json!({"run_id": "run-1", "script_path": "/shared/workflow.exs"})),
         )
         .unwrap();
         let error = if call.requires_shared_filesystem() {
@@ -562,5 +742,33 @@ mod tests {
             panic!("resume with a script must require a shared filesystem")
         };
         assert_eq!(error.code(), "remote_scheduler_requires_shared_filesystem");
+    }
+
+    #[test]
+    fn open_ui_requires_a_scheduler_ui_path() {
+        let client = SchedulerClient::new("http://127.0.0.1:47125").unwrap();
+        let error = open_ui_envelope(
+            scheduler_response(json!({"runId": "run-1", "state": "running"})),
+            &client,
+        )
+        .unwrap_err();
+
+        assert_eq!(error.code(), "scheduler_response");
+        assert_eq!(error.mcp_envelope()["api_version"], "scheduler.v1");
+    }
+
+    #[test]
+    fn open_ui_joins_the_typed_scheduler_path() {
+        let client = SchedulerClient::new("http://127.0.0.1:47125").unwrap();
+        let envelope = open_ui_envelope(
+            scheduler_response(json!({"runId": "run-1", "uiUrl": "/runs/run-1"})),
+            &client,
+        )
+        .unwrap();
+
+        assert_eq!(
+            envelope["data"]["open_url"],
+            "http://127.0.0.1:47125/runs/run-1"
+        );
     }
 }

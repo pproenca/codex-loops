@@ -316,21 +316,24 @@ impl Bundle {
         self.root.join(SKILL)
     }
 
-    /// Prefer the OS-reported lexical invocation path when it resolves back to
-    /// this exact immutable bundle. This preserves installer-owned stable links
-    /// (including Homebrew's `bin/codex-loops`) without PATH or prefix discovery.
+    /// Prefer absolute `argv[0]` when it resolves back to this exact immutable
+    /// bundle. Unlike `current_exe`, this preserves installer-owned stable links
+    /// on Linux without PATH or prefix discovery.
     pub fn integration_command(&self) -> PathBuf {
-        let Ok(invoked) = std::env::current_exe() else {
-            return self.control_plane();
+        let invoked = std::env::args_os().next().map(PathBuf::from);
+        self.integration_command_for(invoked.as_deref())
+    }
+
+    fn integration_command_for(&self, invoked: Option<&Path>) -> PathBuf {
+        let control_plane = self.control_plane();
+        let Some(invoked) = invoked.filter(|path| path.is_absolute()) else {
+            return control_plane;
         };
-        match (
-            fs::canonicalize(&invoked),
-            fs::canonicalize(self.control_plane()),
-        ) {
-            (Ok(stable_target), Ok(bundle_target)) if stable_target == bundle_target => invoked,
-            (Ok(_), Ok(_)) | (Ok(_), Err(_)) | (Err(_), Ok(_)) | (Err(_), Err(_)) => {
-                self.control_plane()
+        match (fs::canonicalize(invoked), fs::canonicalize(&control_plane)) {
+            (Ok(stable_target), Ok(bundle_target)) if stable_target == bundle_target => {
+                invoked.to_path_buf()
             }
+            (Ok(_), Ok(_)) | (Ok(_), Err(_)) | (Err(_), Ok(_)) | (Err(_), Err(_)) => control_plane,
         }
     }
 
@@ -405,6 +408,40 @@ mod tests {
         assert_eq!(bundle.scheduler(), scheduler);
         assert_eq!(bundle.skill(), skill.parent().unwrap());
         assert_eq!(bundle.scheduler_root(), root.join("libexec/scheduler"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn integration_command_preserves_only_a_verified_absolute_launch_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("bundle");
+        let control_plane = root.join("bin/codex-loops");
+        let scheduler = root.join("libexec/scheduler/bin/agent_loops");
+        let skill = root.join("share/skills/codex-loops/SKILL.md");
+        for path in [&control_plane, &scheduler, &skill] {
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, "fixture").unwrap();
+        }
+        let stable_command = temp.path().join("bin/codex-loops");
+        fs::create_dir_all(stable_command.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink(&control_plane, &stable_command).unwrap();
+        let unrelated = temp.path().join("unrelated");
+        fs::write(&unrelated, "fixture").unwrap();
+        let bundle = Bundle::open(&root).unwrap();
+
+        assert_eq!(
+            bundle.integration_command_for(Some(&stable_command)),
+            stable_command
+        );
+        assert_eq!(
+            bundle.integration_command_for(Some(Path::new("codex-loops"))),
+            control_plane
+        );
+        assert_eq!(
+            bundle.integration_command_for(Some(&unrelated)),
+            control_plane
+        );
+        assert_eq!(bundle.integration_command_for(None), control_plane);
     }
 
     #[test]

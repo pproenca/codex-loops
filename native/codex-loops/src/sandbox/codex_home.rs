@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::error::{AppError, AppResult, ExitStatus};
 
+#[derive(Debug)]
 pub(super) enum Authentication {
     NotRequired,
     File(PathBuf),
@@ -172,7 +173,8 @@ fn invalid_source_auth(source: &Path, reason: impl Into<String>) -> AppError {
     .details(json!({"source": source, "reason": reason.into()}))
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
+#[cfg(unix)]
 mod tests {
     use super::*;
 
@@ -258,13 +260,13 @@ mod tests {
         tokio::fs::remove_file(source_home.join("auth.json"))
             .await
             .unwrap();
-        tokio::fs::symlink(root.path().join("missing.json"), source_home.join("auth.json"))
-            .await
-            .unwrap();
-        let error = Authentication::required(&source_home)
-            .await
-            .err()
-            .unwrap();
+        tokio::fs::symlink(
+            root.path().join("missing.json"),
+            source_home.join("auth.json"),
+        )
+        .await
+        .unwrap();
+        let error = Authentication::required(&source_home).await.err().unwrap();
 
         assert_eq!(error.code(), "sandbox_auth_invalid");
     }
@@ -277,10 +279,7 @@ mod tests {
             .await
             .unwrap();
 
-        let error = Authentication::required(&source_home)
-            .await
-            .err()
-            .unwrap();
+        let error = Authentication::required(&source_home).await.err().unwrap();
 
         assert_eq!(error.code(), "sandbox_auth_invalid");
     }
@@ -334,5 +333,17 @@ mod tests {
             .unwrap_err();
 
         assert_eq!(error.code(), "sandbox_auth_unavailable");
+        assert!(
+            error
+                .next_steps_ref()
+                .iter()
+                .any(|step| step.contains("CODEX_ACCESS_TOKEN"))
+        );
+        assert!(
+            error
+                .next_steps_ref()
+                .iter()
+                .any(|step| step.contains("Keyring-only"))
+        );
     }
 }

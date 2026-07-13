@@ -85,10 +85,12 @@ pub async fn run(options: RunOptions) -> AppResult<RunOutput> {
     };
     let runtime = Runtime::installed()?;
     let original_home = home_dir()?;
-    let source_codex_home = source_codex_home(&original_home)?;
     let authentication = match options.provider {
         Provider::Mock => Authentication::NotRequired,
-        Provider::Codex => Authentication::required(&source_codex_home).await?,
+        Provider::Codex => {
+            let source_codex_home = source_codex_home(&original_home)?;
+            Authentication::required(&source_codex_home).await?
+        }
     };
     let layout = prepare_layout(options.output_dir.as_deref(), &run_id, &original_home).await?;
     persist_binding(&runtime.codex, &layout.home)?;

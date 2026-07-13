@@ -60,7 +60,7 @@ defmodule ProofMCPLive do
         temp_root,
         entrypoint,
         repo_root,
-        mcp_env(port, journal_path, temp_root),
+        mcp_env(port, temp_root),
         fn client ->
           {initialize, client} =
             request!(client, 1, "initialize", %{
@@ -125,18 +125,19 @@ defmodule ProofMCPLive do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path, temp_root) do
-    codex_home = System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex")
-
+  defp mcp_env(port, temp_root) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
-      {~c"CODEX_LOOPS_RUNTIME_DIR", String.to_charlist(Path.join(Path.dirname(journal_path), "runtime"))},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
-      {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
-      {~c"CODEX_HOME", String.to_charlist(Path.expand(codex_home))},
-      {~c"HOME", String.to_charlist(Path.join(temp_root, "home"))},
-      {~c"PATH", String.to_charlist(System.get_env("PATH") || "")}
+      {~c"CODEX_HOME", false},
+      {~c"CODEX_ACCESS_TOKEN", false},
+      {~c"CODEX_LOOPS_RUNTIME_DIR", false},
+      {~c"CODEX_LOOPS_JOURNAL_PATH", false},
+      {~c"CODEX_LOOPS_CODEX_SANDBOX", false},
+      {~c"CODEX_LOOPS_CODEX_WORKDIR", false},
+      {~c"CODEX_LOOPS_CODEX_MODEL", false},
+      {~c"HOME", String.to_charlist(Path.join(temp_root, "home"))}
     ]
   end
 

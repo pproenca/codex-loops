@@ -82,6 +82,7 @@ defmodule ProofSandbox do
       assert!(serve["state"] == "running", "sandbox scheduler should be ready before MCP starts")
       assert!(status["data"]["state"] == "completed", "status artifact should record completion")
       assert!(length(transcript) >= 10, "MCP transcript should include the workflow tool calls")
+
       assert!(
         not File.exists?(isolated_auth),
         "mock sandbox must not inspect or expose source authentication"

@@ -226,15 +226,20 @@ summaries plus raw refs; neither MCP tool is a realtime stream.
 `sandbox-run` is the inspectable end-to-end MCP surface. It creates a detached
 worktree from the repository's current `HEAD`, so the workflow script must be
 committed. The run uses its own home, scheduler owner/runtime directory, journal,
-and reserved loopback port. It also points the scheduler and MCP process at a
-config-isolated `CODEX_HOME` under the retained artifact. On Unix, when the
-source `CODEX_HOME/auth.json` is a regular file or a symlink to one, the sandbox
-home exposes only that credential file through a symlink; it does not expose or
-copy user `config.toml`, plugins, or instruction files. Environment-based
-`CODEX_ACCESS_TOKEN` authentication remains inherited when no file credential
-exists. Codex namespaces keyring credentials by the canonical `CODEX_HOME`, so
-an existing source-home keyring entry is not visible from the isolated home;
-use file authentication or `CODEX_ACCESS_TOKEN` for a config-isolated sandbox.
+and reserved loopback port. The scheduler receives a config-isolated
+`CODEX_HOME` under the retained artifact; the MCP subprocess receives neither a
+Codex home nor provider authentication. With `provider=mock`, the isolated home
+stays empty and the source Codex home is not inspected. With `provider=codex` on
+Unix, a non-empty inherited `CODEX_ACCESS_TOKEN` takes precedence. Otherwise,
+when the source `CODEX_HOME/auth.json` is a regular file or a symlink to one, the
+isolated home exposes only that credential file through a symlink; it does not
+expose or copy user `config.toml`, plugins, or instruction files. This is a live
+read/write capability, not a credential copy: a Codex credential refresh through
+the isolated path can update the source `auth.json`, and deleting the retained
+artifact removes only the link, not the source credential. Codex namespaces
+keyring credentials by the canonical `CODEX_HOME`, so a keyring-only source
+credential is not visible from the isolated home; use file authentication or
+`CODEX_ACCESS_TOKEN` for a config-isolated sandbox.
 For `provider=codex`, the isolated scheduler's app-server uses an ephemeral
 thread, a workspace-write policy, and the detached worktree as its explicit
 working directory.

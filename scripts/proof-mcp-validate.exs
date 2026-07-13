@@ -74,7 +74,7 @@ defmodule ProofMCPValidate do
         temp_root,
         entrypoint,
         repo_root,
-        mcp_env(port, journal_path, temp_root),
+        mcp_env(port, temp_root),
         fn client ->
           {initialize, client} =
             request!(client, 1, "initialize", %{
@@ -109,11 +109,6 @@ defmodule ProofMCPValidate do
           assert!(
             unavailable_payload["error"]["code"] == "scheduler_unavailable",
             "MCP should report that an explicitly managed scheduler is unavailable"
-          )
-
-          assert!(
-            not File.exists?(runtime_dir),
-            "MCP must not create lifecycle state when the scheduler is unavailable"
           )
 
           start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root)
@@ -257,13 +252,18 @@ defmodule ProofMCPValidate do
     Integer.to_string(port)
   end
 
-  defp mcp_env(port, journal_path, temp_root) do
+  defp mcp_env(port, temp_root) do
     [
       {~c"CODEX_LOOPS_SCHEDULER_URL", false},
-      {~c"CODEX_LOOPS_RUNTIME_DIR", String.to_charlist(Path.join(Path.dirname(journal_path), "runtime"))},
       {~c"CODEX_LOOPS_SCHEDULER_HOST", ~c"127.0.0.1"},
       {~c"CODEX_LOOPS_SCHEDULER_PORT", String.to_charlist(port)},
-      {~c"CODEX_LOOPS_JOURNAL_PATH", String.to_charlist(journal_path)},
+      {~c"CODEX_HOME", false},
+      {~c"CODEX_ACCESS_TOKEN", false},
+      {~c"CODEX_LOOPS_RUNTIME_DIR", false},
+      {~c"CODEX_LOOPS_JOURNAL_PATH", false},
+      {~c"CODEX_LOOPS_CODEX_SANDBOX", false},
+      {~c"CODEX_LOOPS_CODEX_WORKDIR", false},
+      {~c"CODEX_LOOPS_CODEX_MODEL", false},
       {~c"HOME", String.to_charlist(Path.join(temp_root, "home"))}
     ]
   end

@@ -8,6 +8,7 @@ defmodule Workflow.Refine.Result do
   """
 
   alias Workflow.Event
+  alias Workflow.Event.Payload, as: P
   alias Workflow.Journal
   alias Workflow.JSONValue
   alias Workflow.Provider.Activity
@@ -16,6 +17,7 @@ defmodule Workflow.Refine.Result do
   alias Workflow.Refine.OpenFinding
   alias Workflow.Refine.ReviewerDecision
   alias Workflow.Refine.RoleFailure
+  alias Workflow.Refine.TerminalProjection
 
   @type result :: {:ok, map()} | {:error, {:unbound, Workflow.Node.binding_ref()}}
 
@@ -33,35 +35,35 @@ defmodule Workflow.Refine.Result do
     end
   end
 
-  @spec public(map(), [Event.t()], String.t() | nil, Workflow.Node.address() | nil) :: map()
-  def public(attrs, events \\ [], run_id \\ nil, address \\ nil) do
-    final_round = Map.get(attrs, :final_round)
-    final_decision = final_decision(events, address, final_round)
-    open_findings = Enum.map(Map.get(attrs, :open_findings, []), &OpenFinding.from_payload/1)
-    role_failures = Enum.map(Map.get(attrs, :role_failures, []), &RoleFailure.from_payload/1)
-    failed_reviewers = Map.get(attrs, :failed_reviewers, failed_reviewers(role_failures))
+  @spec public(
+          TerminalProjection.t() | P.RefineCompleted.t(),
+          [Event.t()],
+          String.t() | nil,
+          Workflow.Node.address() | nil
+        ) ::
+          map()
+  def public(attrs, events \\ [], run_id \\ nil, address \\ nil)
 
-    report_snippets =
-      Map.get(attrs, :report_snippets, decision_field(final_decision, :report_snippets, []))
+  def public(%TerminalProjection{} = attrs, events, run_id, address),
+    do: public_projection(attrs, events, run_id, address)
 
+  def public(%P.RefineCompleted{} = attrs, events, run_id, address), do: public_projection(attrs, events, run_id, address)
+
+  defp public_projection(attrs, events, run_id, address) do
     %{
-      "artifact" => Map.fetch!(attrs, :artifact),
-      "converged" => Map.fetch!(attrs, :converged),
-      "rounds" => Map.fetch!(attrs, :rounds),
-      "finalRound" => final_round,
-      "openFindings" => Enum.map(open_findings, &open_finding_json/1),
+      "artifact" => attrs.artifact,
+      "converged" => attrs.converged,
+      "rounds" => attrs.rounds,
+      "finalRound" => attrs.final_round,
+      "openFindings" => Enum.map(attrs.open_findings, &open_finding_json/1),
       "finalOpenDefects" =>
-        Enum.map(open_findings, &open_finding_json/1) ++
-          role_failures_as_defects(role_failures),
-      "roleFailures" => Enum.map(role_failures, &role_failure_json/1),
-      "failedReviewers" => Enum.map(failed_reviewers, &atom_string/1),
-      "reviewerDecisions" =>
-        attrs
-        |> Map.get(:reviewer_decisions, decision_field(final_decision, :reviewer_decisions, []))
-        |> Enum.map(&ReviewerDecision.from_payload/1)
-        |> Enum.map(&reviewer_decision_json/1),
-      "coldRead" => attrs |> Map.get(:cold_read) |> normalize_cold_read() |> cold_read_json(),
-      "reportSnippets" => report_snippets,
+        Enum.map(attrs.open_findings, &open_finding_json/1) ++
+          role_failures_as_defects(attrs.role_failures),
+      "roleFailures" => Enum.map(attrs.role_failures, &role_failure_json/1),
+      "failedReviewers" => Enum.map(attrs.failed_reviewers, &JSONValue.stringify/1),
+      "reviewerDecisions" => Enum.map(attrs.reviewer_decisions, &reviewer_decision_json/1),
+      "coldRead" => cold_read_json(attrs.cold_read),
+      "reportSnippets" => attrs.report_snippets,
       "rawRefs" => %{"journal" => raw_refs(events, run_id, address)}
     }
   end
@@ -69,25 +71,15 @@ defmodule Workflow.Refine.Result do
   defp projection(events, run_id, address, completed), do: public(completed.payload, events, run_id, address)
 
   defp completed_event(events, address) do
-    Enum.find(
-      events,
-      &(&1.type == :refine_completed and Map.get(&1.payload, :address) == address)
-    )
+    Enum.find(events, fn
+      %Event{payload: %P.RefineCompleted{address: ^address}} -> true
+      %Event{} -> false
+    end)
   end
-
-  defp final_decision(events, address, final_round) do
-    events
-    |> Enum.filter(&(&1.type == :refine_round_decision and Map.get(&1.payload, :address) == address))
-    |> Enum.find(&(Map.get(&1.payload, :round) == final_round))
-  end
-
-  defp decision_field(nil, _field, default), do: default
-
-  defp decision_field(%Event{payload: payload}, field, default), do: Map.get(payload, field, default)
 
   defp open_finding_json(%OpenFinding{} = finding) do
     %{
-      "reviewer" => atom_string(finding.reviewer),
+      "reviewer" => JSONValue.stringify(finding.reviewer),
       "reviewerIndex" => finding.reviewer_index,
       "id" => finding.id,
       "issue" => finding.issue,
@@ -97,21 +89,21 @@ defmodule Workflow.Refine.Result do
 
   defp reviewer_decision_json(%ReviewerDecision{} = decision) do
     %{
-      "reviewer" => atom_string(decision.reviewer),
+      "reviewer" => JSONValue.stringify(decision.reviewer),
       "reviewerIndex" => decision.reviewer_index,
       "approved" => ReviewerDecision.approved?(decision),
       "clear" => ReviewerDecision.clear?(decision),
-      "adapter" => atom_string(decision.adapter),
-      "status" => atom_string(ReviewerDecision.status(decision))
+      "adapter" => JSONValue.stringify(decision.adapter),
+      "status" => JSONValue.stringify(ReviewerDecision.status(decision))
     }
   end
 
   defp role_failure_json(%RoleFailure{} = failure) do
     %{
-      "role" => atom_string(failure.role),
+      "role" => JSONValue.stringify(failure.role),
       "roleAddress" => failure.role_address,
       "round" => failure.round,
-      "reviewer" => maybe_atom_string(failure.reviewer),
+      "reviewer" => JSONValue.stringify(failure.reviewer),
       "reviewerIndex" => failure.reviewer_index,
       "attempts" => failure.attempts,
       "reason" => reason_json(failure.reason),
@@ -123,38 +115,23 @@ defmodule Workflow.Refine.Result do
 
   defp cold_read_json(nil), do: nil
 
-  defp cold_read_json(%{state: :completed} = cold_read) do
+  defp cold_read_json(%ColdRead{state: :completed} = cold_read) do
     %{
       "state" => "completed",
-      "openFindings" =>
-        cold_read
-        |> Map.get(:open_findings, [])
-        |> Enum.map(&OpenFinding.from_payload/1)
-        |> Enum.map(&open_finding_json/1),
-      "reviewerDecision" =>
-        cold_read
-        |> Map.fetch!(:reviewer_decision)
-        |> ReviewerDecision.from_payload()
-        |> reviewer_decision_json(),
-      "reportSnippets" => Map.get(cold_read, :report_snippets, []),
+      "openFindings" => Enum.map(cold_read.open_findings, &open_finding_json/1),
+      "reviewerDecision" => reviewer_decision_json(cold_read.reviewer_decision),
+      "reportSnippets" => cold_read.report_snippets,
       "repaired" => ColdRead.repaired?(cold_read)
     }
   end
 
-  defp cold_read_json(%{state: :failed} = cold_read) do
+  defp cold_read_json(%ColdRead{state: :failed} = cold_read) do
     %{
       "state" => "failed",
-      "roleFailure" =>
-        cold_read
-        |> Map.fetch!(:role_failure)
-        |> RoleFailure.from_payload()
-        |> role_failure_json(),
+      "roleFailure" => role_failure_json(cold_read.role_failure),
       "repaired" => ColdRead.repaired?(cold_read)
     }
   end
-
-  defp normalize_cold_read(nil), do: nil
-  defp normalize_cold_read(cold_read), do: ColdRead.from_payload(cold_read)
 
   defp role_failures_as_defects(role_failures) do
     role_failures
@@ -176,24 +153,12 @@ defmodule Workflow.Refine.Result do
     end)
   end
 
-  defp reason_json({:provider_failure, kind, detail}) do
-    %{"code" => "provider_failure", "kind" => atom_string(kind), "detail" => detail}
+  defp reason_json(reason) do
+    RoleFailure.reason_map(reason,
+      provider_detail: &Function.identity/1,
+      diagnostic_detail: &diagnostic_string/1
+    )
   end
-
-  defp reason_json({:malformed_output, detail}),
-    do: %{"code" => "malformed_output", "detail" => diagnostic_string(detail)}
-
-  defp reason_json({:reviewer_timeout, timeout_ms}), do: %{"code" => "reviewer_timeout", "timeoutMs" => timeout_ms}
-
-  defp reason_json({:cold_read_timeout, timeout_ms}), do: %{"code" => "cold_read_timeout", "timeoutMs" => timeout_ms}
-
-  defp reason_json({:reviewer_crashed, detail}),
-    do: %{"code" => "reviewer_crashed", "detail" => diagnostic_string(detail)}
-
-  defp reason_json({:cold_read_crashed, detail}),
-    do: %{"code" => "cold_read_crashed", "detail" => diagnostic_string(detail)}
-
-  defp reason_json({:repair_failed, detail}), do: %{"code" => "repair_failed", "detail" => diagnostic_string(detail)}
 
   defp role_failure_detail_json(nil), do: nil
   defp role_failure_detail_json(detail) when is_binary(detail), do: detail
@@ -214,19 +179,6 @@ defmodule Workflow.Refine.Result do
 
   defp activity_entry_json(%Activity{} = entry), do: Activity.to_public_map(entry)
 
-  defp activity_entry_json(entry) when is_map(entry) do
-    Map.new(entry, fn {key, value} -> {activity_key(key), activity_value(value)} end)
-  end
-
-  defp activity_key(key) when is_atom(key), do: Atom.to_string(key)
-  defp activity_key(key) when is_binary(key), do: key
-  defp activity_key(key), do: diagnostic_string(key)
-
-  defp activity_value(value) when is_map(value), do: activity_entry_json(value)
-  defp activity_value(value) when is_list(value), do: Enum.map(value, &activity_value/1)
-  defp activity_value(value) when is_atom(value), do: Atom.to_string(value)
-  defp activity_value(value), do: value
-
   defp raw_refs(events, run_id, address) do
     events
     |> Enum.filter(&refine_result_ref?(&1, address))
@@ -236,40 +188,40 @@ defmodule Workflow.Refine.Result do
         "runId" => event.run_id || run_id,
         "seq" => event.seq,
         "type" => Atom.to_string(event.type),
-        "address" => Map.get(event.payload, :address)
+        "address" => event.payload.address
       }
     end)
   end
 
-  defp refine_result_ref?(%Event{payload: %{address: address}, type: type}, address)
-       when type in [
-              :refine_completed,
-              :refine_non_converged,
-              :refine_round_decision,
-              :refine_role_failed,
-              :refine_gate_evaluated
-            ], do: true
+  defp refine_result_ref?(%Event{payload: %P.RefineCompleted{address: address}}, address), do: true
+  defp refine_result_ref?(%Event{payload: %P.RefineNonConverged{address: address}}, address), do: true
+  defp refine_result_ref?(%Event{payload: %P.RefineRoundDecision{address: address}}, address), do: true
+  defp refine_result_ref?(%Event{payload: %P.RefineRoleFailed{address: address}}, address), do: true
+  defp refine_result_ref?(%Event{payload: %P.RefineGateEvaluated{address: address}}, address), do: true
 
-  defp refine_result_ref?(%Event{payload: %{address: role_address}, type: type}, address)
-       when type in [:agent_activity, :agent_committed, :agent_attempt_rejected, :agent_failed],
-       do: role_address in [address ++ [3], address ++ [4]]
+  defp refine_result_ref?(%Event{payload: %P.AgentActivity{address: role_address}}, address),
+    do: gate_role_address?(role_address, address)
+
+  defp refine_result_ref?(%Event{payload: %P.AgentCommitted{address: role_address}}, address),
+    do: gate_role_address?(role_address, address)
+
+  defp refine_result_ref?(%Event{payload: %P.AgentAttemptRejected{address: role_address}}, address),
+    do: gate_role_address?(role_address, address)
+
+  defp refine_result_ref?(%Event{payload: %P.AgentFailed{address: role_address}}, address),
+    do: gate_role_address?(role_address, address)
 
   defp refine_result_ref?(%Event{}, _address), do: false
 
-  defp failed_reviewers(role_failures) do
-    role_failures
-    |> Enum.map(& &1.reviewer)
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
-  end
+  defp gate_role_address?(role_address, address), do: role_address in [address ++ [3], address ++ [4]]
 
   defp address_path(address), do: "/" <> Enum.map_join(address, "/", &Integer.to_string/1)
 
   defp render_json_detail(nil), do: ""
   defp render_json_detail(detail) when is_binary(detail), do: detail
-  defp render_json_detail(detail), do: deterministic_json_encode(detail)
+  defp render_json_detail(detail), do: JSONValue.deterministic_encode(detail)
 
-  defp diagnostic_string(term), do: term |> diagnostic_value() |> deterministic_json_encode()
+  defp diagnostic_string(term), do: term |> diagnostic_value() |> JSONValue.deterministic_encode()
 
   defp diagnostic_value(value) when is_nil(value) or is_boolean(value) or is_integer(value) or is_binary(value), do: value
 
@@ -285,37 +237,10 @@ defmodule Workflow.Refine.Result do
       |> Enum.map(fn {key, nested} ->
         %{"key" => diagnostic_value(key), "value" => diagnostic_value(nested)}
       end)
-      |> Enum.sort_by(fn entry -> deterministic_json_encode(entry["key"]) end)
+      |> Enum.sort_by(fn entry -> JSONValue.deterministic_encode(entry["key"]) end)
 
     %{"map" => entries}
   end
 
   defp diagnostic_value(_value), do: %{"opaque" => "unsupported"}
-
-  defp deterministic_json_encode(nil), do: "null"
-  defp deterministic_json_encode(true), do: "true"
-  defp deterministic_json_encode(false), do: "false"
-  defp deterministic_json_encode(value) when is_integer(value), do: Integer.to_string(value)
-  defp deterministic_json_encode(value) when is_binary(value), do: Jason.encode!(value)
-
-  defp deterministic_json_encode(value) when is_list(value) do
-    "[" <> Enum.map_join(value, ",", &deterministic_json_encode/1) <> "]"
-  end
-
-  defp deterministic_json_encode(value) when is_map(value) do
-    encoded =
-      value
-      |> Enum.sort_by(fn {key, _nested} -> key end)
-      |> Enum.map_join(",", fn {key, nested} ->
-        deterministic_json_encode(key) <> ":" <> deterministic_json_encode(nested)
-      end)
-
-    "{" <> encoded <> "}"
-  end
-
-  defp atom_string(value) when is_atom(value), do: Atom.to_string(value)
-  defp atom_string(value) when is_binary(value), do: value
-
-  defp maybe_atom_string(nil), do: nil
-  defp maybe_atom_string(value), do: atom_string(value)
 end

@@ -5,7 +5,12 @@ defmodule Workflow.RefineCompilerTest do
   alias Workflow.Compiler.Finding
   alias Workflow.Node.Agent
   alias Workflow.Node.Refine
+  alias Workflow.Node.Refine.ColdReadGate
+  alias Workflow.Node.Refine.Gates
+  alias Workflow.Node.Refine.HaltGate
+  alias Workflow.Node.Refine.RepairGate
   alias Workflow.Node.Return
+  alias Workflow.Schema
 
   defp env, do: %{__ENV__ | file: "workflows/refine.ex", line: 1}
   defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
@@ -33,7 +38,7 @@ defmodule Workflow.RefineCompilerTest do
                   %Agent{
                     address: [0, 0],
                     prompt: "Draft.",
-                    schema: %{"required" => ["artifact"]}
+                    schema: artifact_schema
                   }},
                reviewers: [
                  %{index: 0, name: :spec, prompt: "Find spec gaps.", agent: %Agent{} = spec},
@@ -47,7 +52,7 @@ defmodule Workflow.RefineCompilerTest do
                reviser: %Agent{
                  address: [0, 2],
                  prompt: "Fix.",
-                 schema: %{"required" => ["artifact"]}
+                 schema: reviser_schema
                },
                until: :unanimous,
                max_rounds: 3,
@@ -60,10 +65,15 @@ defmodule Workflow.RefineCompilerTest do
     assert runtime.address == [0, 1, 1]
     assert spec.retries == 0
     assert runtime.retries == 0
-    assert spec.schema["additionalProperties"] == false
-    assert spec.schema["required"] == ["approved", "findings"]
-    assert spec.schema["properties"]["findings"]["items"]["additionalProperties"] == false
-    assert runtime.schema["properties"]["findings"]["type"] == "array"
+    assert Schema.to_map(artifact_schema)["required"] == ["artifact"]
+    assert Schema.to_map(reviser_schema)["required"] == ["artifact"]
+
+    spec_schema = Schema.to_map(spec.schema)
+    runtime_schema = Schema.to_map(runtime.schema)
+    assert spec_schema["additionalProperties"] == false
+    assert spec_schema["required"] == ["approved", "findings"]
+    assert spec_schema["properties"]["findings"]["items"]["additionalProperties"] == false
+    assert runtime_schema["properties"]["findings"]["type"] == "array"
   end
 
   test "compiles reviewer adapters into metadata and adapter-owned schemas" do
@@ -92,7 +102,7 @@ defmodule Workflow.RefineCompilerTest do
              {:concerns, :concerns_v1}
            ]
 
-    [findings, defects, violations, concerns] = Enum.map(reviewers, & &1.agent.schema)
+    [findings, defects, violations, concerns] = Enum.map(reviewers, &Schema.to_map(&1.agent.schema))
 
     assert findings["required"] == ["approved", "findings"]
 
@@ -155,8 +165,8 @@ defmodule Workflow.RefineCompilerTest do
 
     assert [
              %Refine{
-               gates: %{
-                 cold_read: %{
+               gates: %Gates{
+                 cold_read: %ColdReadGate{
                    predicate: {:path_non_empty, "/openFindings"},
                    reviewer: %{
                      name: :cold,
@@ -164,11 +174,11 @@ defmodule Workflow.RefineCompilerTest do
                      agent: %Agent{address: [0, 3], prompt: "Cold read."}
                    }
                  },
-                 repair: %{
+                 repair: %RepairGate{
                    predicate: {:path_non_empty, "/coldRead/openFindings"},
                    agent: %Agent{address: [0, 4], prompt: "Fix."}
                  },
-                 halt: %{predicate: {:path_count, "/finalOpenDefects", :>, 0}}
+                 halt: %HaltGate{predicate: {:path_count, "/finalOpenDefects", :>, 0}}
                }
              },
              %Return{}

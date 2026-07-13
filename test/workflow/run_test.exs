@@ -16,6 +16,7 @@ defmodule Workflow.RunTest do
   alias Workflow.Run
   alias Workflow.Scheduler.RunProjection
   alias Workflow.Status
+  alias Workflow.Status.ProviderFailure
   alias Workflow.Test.EchoProvider
   alias Workflow.Test.ExplodingProvider
   alias Workflow.Test.GateProvider
@@ -366,7 +367,7 @@ defmodule Workflow.RunTest do
     assert agent.status == :failed
     assert agent.usage == usage
     assert agent.activity == failed.payload.activity
-    assert agent.provider_failure == %{kind: :timeout, detail: detail}
+    assert agent.provider_failure == %ProviderFailure{kind: :timeout, detail: detail}
 
     public_projection =
       status
@@ -426,7 +427,7 @@ defmodule Workflow.RunTest do
     assert [:run_started, :phase_entered, :log_emitted, :agent_started, :run_failed] =
              id |> Journal.fold() |> Enum.map(& &1.type)
 
-    attempt = %{address: [2], iteration: 0, attempt: 0}
+    attempt = %IdempotencyKey{run_id: id, node_path: [2], iteration: 0, attempt: 0}
     assert %{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
   end
 
@@ -475,7 +476,7 @@ defmodule Workflow.RunTest do
              :run_failed
            ] = id |> Journal.fold() |> Enum.map(& &1.type)
 
-    attempt = %{address: [1], iteration: 0, attempt: 0}
+    attempt = %IdempotencyKey{run_id: id, node_path: [1], iteration: 0, attempt: 0}
     assert %{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
   end
 

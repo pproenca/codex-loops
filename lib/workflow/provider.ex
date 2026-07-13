@@ -1,7 +1,7 @@
 defmodule Workflow.Provider do
   @moduledoc """
-  The contract an agent backend must satisfy. `schema` is the raw JSON-schema map
-  the caller wants the output to conform to, or `nil` for a schemaless turn — a
+  The contract an agent backend must satisfy. `schema` is the normalized JSON-schema
+  variant the caller wants the output to conform to, or `nil` for a schemaless turn — a
   real backend uses it to request structured output; the runner independently
   validates and, on failure, retries or fails the node (the provider never sees
   retry policy). Every call reports `Usage` so the budget ledger can fold over
@@ -41,7 +41,7 @@ defmodule Workflow.Provider do
 
   @callback run_agent(
               prompt :: String.t(),
-              schema :: map() | nil,
+              schema :: Workflow.Schema.t() | nil,
               key :: Workflow.IdempotencyKey.t(),
               opts :: term()
             ) ::

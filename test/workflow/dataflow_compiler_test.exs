@@ -33,7 +33,7 @@ defmodule Workflow.DataflowCompilerTest do
                  address: [1],
                  template: %Template{
                    segments: ["Final draft: ", ""],
-                   holes: [%Hole{op: :identity, assign: "draft", args: %{}}],
+                   holes: [%Hole{assign: "draft", formatter: :identity}],
                    assigns: ["draft"]
                  },
                  bindings: %{draft: {:node, [0]}}
@@ -60,7 +60,7 @@ defmodule Workflow.DataflowCompilerTest do
                  address: [1],
                  template: %Template{
                    segments: ["Summary: ", ""],
-                   holes: [%Hole{op: :identity, assign: "summary", args: %{}}],
+                   holes: [%Hole{assign: "summary", formatter: :identity}],
                    assigns: ["summary"]
                  },
                  bindings: %{summary: {:node, [0]}}
@@ -112,7 +112,7 @@ defmodule Workflow.DataflowCompilerTest do
                  address: [1],
                  prompt: %Template{
                    segments: ["Improve this draft: ", ""],
-                   holes: [%Hole{op: :identity, assign: "draft", args: %{}}],
+                   holes: [%Hole{assign: "draft", formatter: :identity}],
                    assigns: ["draft"]
                  },
                  bindings: %{draft: {:node, [0]}}
@@ -214,23 +214,11 @@ defmodule Workflow.DataflowCompilerTest do
                      ""
                    ],
                    holes: [
-                     %Hole{
-                       op: :path,
-                       assign: "review",
-                       args: %{pointer: "/items/0/id"}
-                     },
-                     %Hole{op: :count, assign: "review", args: %{pointer: ""}},
-                     %Hole{
-                       op: :flatten,
-                       assign: "review",
-                       args: %{pointer: "/groups"}
-                     },
-                     %Hole{
-                       op: :numbered_findings,
-                       assign: "review",
-                       args: %{pointer: "/items"}
-                     },
-                     %Hole{op: :truncate, assign: "draft", args: %{max_bytes: 5}}
+                     %Hole{assign: "review", formatter: {:path, "/items/0/id"}},
+                     %Hole{assign: "review", formatter: {:count, ""}},
+                     %Hole{assign: "review", formatter: {:flatten, "/groups"}},
+                     %Hole{assign: "review", formatter: {:numbered_findings, "/items"}},
+                     %Hole{assign: "draft", formatter: {:truncate, 5}}
                    ],
                    assigns: ["review", "review", "review", "review", "draft"]
                  },
@@ -390,8 +378,8 @@ defmodule Workflow.DataflowCompilerTest do
                %Emit{
                  template: %Template{
                    holes: [
-                     %Hole{op: :truncate, args: %{max_bytes: 1000}},
-                     %Hole{op: :truncate, args: %{max_bytes: 16}}
+                     %Hole{formatter: {:truncate, 1000}},
+                     %Hole{formatter: {:truncate, 16}}
                    ]
                  }
                }

@@ -74,8 +74,8 @@ defmodule Workflow.Node.Agent do
   before the paid effect. The stable `(run_id, address, iteration, attempt)` key is
   journaled before dispatch so that attempt is never redelivered.
 
-  `schema` is an inert, raw JSON-schema **map** (or `nil` for a schemaless turn),
-  materialized from a literal map in the workflow source. When present the turn is
+  `schema` is an inert typed JSON-schema variant (or `nil` for a schemaless turn),
+  normalized from a literal map at the compiler boundary. When present the turn is
   **fail-closed**:
   the provider's output is validated against the schema, invalid output is retried
   on-thread up to `retries` times, and exhausting the budget fails the node.
@@ -90,7 +90,7 @@ defmodule Workflow.Node.Agent do
           prompt: String.t() | Workflow.Template.t(),
           label: String.t() | nil,
           bindings: %{atom() => Workflow.Node.binding_ref()},
-          schema: map() | nil,
+          schema: Workflow.Schema.t() | nil,
           retries: non_neg_integer()
         }
 end
@@ -230,6 +230,58 @@ defmodule Workflow.Node.Verify do
         }
 end
 
+defmodule Workflow.Node.Refine.ColdReadGate do
+  @moduledoc "A typed final cold-read gate for a refine node."
+
+  @enforce_keys [:predicate, :reviewer]
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{
+          predicate: Workflow.Refine.Gate.predicate(),
+          reviewer: Workflow.Refine.Reviewer.t()
+        }
+end
+
+defmodule Workflow.Node.Refine.RepairGate do
+  @moduledoc "A typed conditional repair gate for a refine node."
+
+  @enforce_keys [:predicate, :agent]
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{
+          predicate: Workflow.Refine.Gate.predicate(),
+          agent: Workflow.Node.Agent.t()
+        }
+end
+
+defmodule Workflow.Node.Refine.HaltGate do
+  @moduledoc "A typed terminal halt gate for a refine node."
+
+  @enforce_keys [:predicate]
+  defstruct @enforce_keys
+
+  @type t :: %__MODULE__{predicate: Workflow.Refine.Gate.predicate()}
+end
+
+defmodule Workflow.Node.Refine.Gates do
+  @moduledoc "The fixed collection of optional gates attached to a refine node."
+
+  defstruct cold_read: nil, repair: nil, halt: nil
+
+  @type t(cold_read, repair, halt) :: %__MODULE__{
+          cold_read: cold_read | nil,
+          repair: repair | nil,
+          halt: halt | nil
+        }
+
+  @type t ::
+          t(
+            Workflow.Node.Refine.ColdReadGate.t(),
+            Workflow.Node.Refine.RepairGate.t(),
+            Workflow.Node.Refine.HaltGate.t()
+          )
+end
+
 defmodule Workflow.Node.Refine do
   @moduledoc """
   Bounded adversarial refinement. V1 is intentionally narrow: an inline producer
@@ -237,6 +289,10 @@ defmodule Workflow.Node.Refine do
   reviser handles blocking findings, and a terminal refine event commits or
   fails the result.
   """
+  alias Workflow.Node.Refine.ColdReadGate
+  alias Workflow.Node.Refine.Gates
+  alias Workflow.Node.Refine.HaltGate
+  alias Workflow.Node.Refine.RepairGate
   alias Workflow.Refine.Reviewer
 
   @enforce_keys [:address, :input, :reviewers, :reviser, :until, :max_rounds]
@@ -250,18 +306,8 @@ defmodule Workflow.Node.Refine do
     on_non_convergence: :fail,
     max_concurrency: nil,
     reviewer_timeout_ms: nil,
-    gates: %{}
+    gates: %Gates{}
   ]
-
-  @type gate_predicate :: Workflow.Refine.Gate.predicate()
-
-  @type cold_read_gate :: %{
-          predicate: gate_predicate(),
-          reviewer: Reviewer.t()
-        }
-
-  @type repair_gate :: %{predicate: gate_predicate(), agent: Workflow.Node.Agent.t()}
-  @type halt_gate :: %{predicate: gate_predicate()}
 
   @type t :: %__MODULE__{
           address: Workflow.Node.address(),
@@ -275,11 +321,7 @@ defmodule Workflow.Node.Refine do
           on_non_convergence: :fail | :accept_current,
           max_concurrency: pos_integer() | nil,
           reviewer_timeout_ms: pos_integer() | nil,
-          gates: %{
-            optional(:cold_read) => cold_read_gate(),
-            optional(:repair) => repair_gate(),
-            optional(:halt) => halt_gate()
-          }
+          gates: Gates.t(ColdReadGate.t(), RepairGate.t(), HaltGate.t())
         }
 end
 

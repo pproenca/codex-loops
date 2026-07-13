@@ -17,6 +17,7 @@ defmodule Workflow.FanoutCompilerTest do
   alias Workflow.Node.PathCount
   alias Workflow.Node.Pipeline
   alias Workflow.Node.Return
+  alias Workflow.Schema
 
   defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
   defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
@@ -130,8 +131,8 @@ defmodule Workflow.FanoutCompilerTest do
       assert {:ok, tree} = Compiler.compile("test", body, env())
       assert [%Pipeline{lanes: [[stage]]}, %Return{}] = tree.nodes
 
-      assert %Agent{address: [0, 0, 0], schema: %{"type" => "object", "required" => ["label"]}} =
-               stage
+      assert %Agent{address: [0, 0, 0], schema: schema} = stage
+      assert Schema.to_map(schema) == %{"type" => "object", "required" => ["label"]}
 
       refute contains_function?(tree)
     end

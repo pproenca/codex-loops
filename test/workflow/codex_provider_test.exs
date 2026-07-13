@@ -24,7 +24,9 @@ defmodule Workflow.CodexProviderTest do
   alias Workflow.Provider.Mock
   alias Workflow.Provider.Usage
   alias Workflow.Run
+  alias Workflow.Schema
   alias Workflow.Status
+  alias Workflow.Status.ProviderFailure
 
   # A hermetic stub `codex exec --json`: read the prompt on stdin, emit
   # the real JSONL event stream, exit 0. Output is chosen by argv mode. The `retry`
@@ -401,7 +403,7 @@ defmodule Workflow.CodexProviderTest do
     assert agent.status == :failed
     assert agent.usage == %Usage{}
     assert agent.activity == []
-    assert agent.provider_failure == %{kind: :timeout, detail: detail}
+    assert agent.provider_failure == %ProviderFailure{kind: :timeout, detail: detail}
   end
 
   test "a schema-backed turn against the real provider honours fail-closed retry", ctx do
@@ -494,11 +496,11 @@ defmodule Workflow.CodexProviderTest do
   end
 
   test "the schema reaches the backend so the schema map is respected" do
-    # Sanity: the compiled inert tree carries the raw schema map unchanged, and the
+    # Sanity: the compiled inert tree carries the normalized schema unchanged, and the
     # provider forwards it as `--output-schema` — the writer, not the provider,
     # decides validity.
     assert [%Workflow.Node.Agent{schema: schema} | _] = SchemaWorkflow.tree().nodes
-    assert schema == @bugs_schema
+    assert Schema.to_map(schema) == @bugs_schema
   end
 
   test "schemas handed to --output-schema are strict object schemas", ctx do

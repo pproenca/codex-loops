@@ -14,11 +14,18 @@ defmodule Workflow.Template do
   defmodule Hole do
     @moduledoc "A parsed, inert template hole."
 
-    @enforce_keys [:op, :assign, :args]
-    defstruct [:op, :assign, :args]
+    @enforce_keys [:assign, :formatter]
+    defstruct [:assign, :formatter]
 
-    @type op :: :identity | :path | :flatten | :count | :numbered_findings | :truncate
-    @type t :: %__MODULE__{op: op(), assign: String.t(), args: map()}
+    @type formatter ::
+            :identity
+            | {:path, String.t()}
+            | {:flatten, String.t()}
+            | {:count, String.t()}
+            | {:numbered_findings, String.t()}
+            | {:truncate, non_neg_integer()}
+
+    @type t :: %__MODULE__{assign: String.t(), formatter: formatter()}
   end
 
   @enforce_keys [:segments, :holes, :assigns]
@@ -112,7 +119,7 @@ defmodule Workflow.Template do
   defp parse_hole(hole, env) do
     case Regex.run(~r/^@([a-zA-Z_][a-zA-Z0-9_]*)$/, hole) do
       [_, assign] ->
-        {:ok, %Hole{op: :identity, assign: assign, args: %{}}}
+        {:ok, %Hole{assign: assign, formatter: :identity}}
 
       _ ->
         parse_formatter_hole(hole, env)
@@ -135,38 +142,38 @@ defmodule Workflow.Template do
 
   defp formatter_hole("path", assign, arg, env) when is_binary(arg) do
     with {:ok, pointer} <- pointer_arg(arg, env) do
-      {:ok, %Hole{op: :path, assign: assign, args: %{pointer: pointer}}}
+      {:ok, %Hole{assign: assign, formatter: {:path, pointer}}}
     end
   end
 
-  defp formatter_hole("flatten", assign, nil, _env), do: {:ok, %Hole{op: :flatten, assign: assign, args: %{pointer: ""}}}
+  defp formatter_hole("flatten", assign, nil, _env), do: {:ok, %Hole{assign: assign, formatter: {:flatten, ""}}}
 
   defp formatter_hole("flatten", assign, arg, env) when is_binary(arg) do
     with {:ok, pointer} <- pointer_arg(arg, env) do
-      {:ok, %Hole{op: :flatten, assign: assign, args: %{pointer: pointer}}}
+      {:ok, %Hole{assign: assign, formatter: {:flatten, pointer}}}
     end
   end
 
-  defp formatter_hole("count", assign, nil, _env), do: {:ok, %Hole{op: :count, assign: assign, args: %{pointer: ""}}}
+  defp formatter_hole("count", assign, nil, _env), do: {:ok, %Hole{assign: assign, formatter: {:count, ""}}}
 
   defp formatter_hole("count", assign, arg, env) when is_binary(arg) do
     with {:ok, pointer} <- pointer_arg(arg, env) do
-      {:ok, %Hole{op: :count, assign: assign, args: %{pointer: pointer}}}
+      {:ok, %Hole{assign: assign, formatter: {:count, pointer}}}
     end
   end
 
   defp formatter_hole("numbered_findings", assign, nil, _env),
-    do: {:ok, %Hole{op: :numbered_findings, assign: assign, args: %{pointer: ""}}}
+    do: {:ok, %Hole{assign: assign, formatter: {:numbered_findings, ""}}}
 
   defp formatter_hole("numbered_findings", assign, arg, env) when is_binary(arg) do
     with {:ok, pointer} <- pointer_arg(arg, env) do
-      {:ok, %Hole{op: :numbered_findings, assign: assign, args: %{pointer: pointer}}}
+      {:ok, %Hole{assign: assign, formatter: {:numbered_findings, pointer}}}
     end
   end
 
   defp formatter_hole("truncate", assign, arg, env) when is_binary(arg) do
     with {:ok, max_bytes} <- non_negative_integer_arg(arg, env) do
-      {:ok, %Hole{op: :truncate, assign: assign, args: %{max_bytes: max_bytes}}}
+      {:ok, %Hole{assign: assign, formatter: {:truncate, max_bytes}}}
     end
   end
 
@@ -273,14 +280,16 @@ defmodule Workflow.Template do
   defp binding_part({:map, _address} = ref), do: {:bound_list, ref}
   defp binding_part({:fanout, _address, _scope} = ref), do: {:bound_list, ref}
 
-  defp hole_part(%Hole{op: :identity}, value_part), do: value_part
+  defp hole_part(%Hole{formatter: :identity}, value_part), do: value_part
   defp hole_part(%Hole{} = hole, value_part), do: {:formatter, hole, value_part}
 
-  defp retain_hole(%Hole{assign: assign, args: %{pointer: pointer}} = hole) do
-    %{hole | assign: :binary.copy(assign), args: %{pointer: :binary.copy(pointer)}}
-  end
+  defp retain_hole(%Hole{assign: assign, formatter: formatter} = hole),
+    do: %{hole | assign: :binary.copy(assign), formatter: retain_formatter(formatter)}
 
-  defp retain_hole(%Hole{assign: assign} = hole), do: %{hole | assign: :binary.copy(assign)}
+  defp retain_formatter({kind, pointer}) when kind in [:path, :flatten, :count, :numbered_findings],
+    do: {kind, :binary.copy(pointer)}
+
+  defp retain_formatter(formatter), do: formatter
 
   defp retain_template(segments, holes) do
     holes = holes |> Enum.reverse() |> Enum.map(&retain_hole/1)

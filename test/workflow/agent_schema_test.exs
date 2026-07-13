@@ -299,7 +299,13 @@ defmodule Workflow.AgentSchemaTest do
            ]
 
     attempt = %{address: [0], iteration: 0, attempt: 2}
-    assert %{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
+
+    assert %{
+             state: :failed,
+             failure: %{
+               reason: {:outcome_unknown, %IdempotencyKey{run_id: ^id, node_path: [0], iteration: 0, attempt: 2}}
+             }
+           } = Status.of(id)
 
     # Reusing the run returns the journaled terminal result and never risks
     # charging the unknown provider attempt a second time.

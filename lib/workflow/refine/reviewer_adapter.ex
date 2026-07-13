@@ -3,6 +3,9 @@ defmodule Workflow.Refine.ReviewerAdapter do
   Closed reviewer adapter schemas and normalizers for refine V1.
   """
 
+  alias Workflow.Refine.Review
+  alias Workflow.Refine.ReviewFinding
+
   @adapters [:findings_v1, :defects_v1, :violations_v1, :concerns_v1]
 
   @type t :: :findings_v1 | :defects_v1 | :violations_v1 | :concerns_v1
@@ -26,14 +29,14 @@ defmodule Workflow.Refine.ReviewerAdapter do
     |> schema_for()
   end
 
-  @spec normalize(t(), map()) :: {:ok, map()} | {:error, term()}
+  @spec normalize(t(), term()) :: {:ok, Review.t()} | {:error, term()}
   def normalize(adapter, output) when is_map(output) do
     with {:ok, config} <- fetch_config(adapter),
          :ok <- allowed_keys(output, top_level_keys(config), :review_object_unexpected_shape),
          {:ok, approved} <- normalize_approval(output, config),
-         {:ok, findings} <- normalize_items(Map.fetch!(output, config.array_field), config),
+         {:ok, findings} <- normalize_findings(output, config),
          {:ok, snippets} <- report_snippets(output) do
-      {:ok, %{"approved" => approved, "findings" => findings, "report_snippets" => snippets}}
+      {:ok, %Review{approved: approved, findings: findings, report_snippets: snippets}}
     end
   end
 
@@ -48,53 +51,45 @@ defmodule Workflow.Refine.ReviewerAdapter do
 
   defp config(:findings_v1) do
     %{
-      adapter: :findings_v1,
       approval_field: "approved",
       approval_kind: :boolean,
       array_field: "findings",
       issue_field: "issue",
       fix_field: "fix",
-      require_blocking: true,
-      allow_severity: false
+      item_mode: :blocking_required
     }
   end
 
   defp config(:defects_v1) do
     %{
-      adapter: :defects_v1,
       approval_field: "pass",
       approval_kind: :boolean,
       array_field: "defects",
       issue_field: "issue",
       fix_field: "fix",
-      require_blocking: true,
-      allow_severity: false
+      item_mode: :blocking_required
     }
   end
 
   defp config(:violations_v1) do
     %{
-      adapter: :violations_v1,
       approval_field: "pass",
       approval_kind: :boolean,
       array_field: "violations",
       issue_field: "issue",
       fix_field: "fix",
-      require_blocking: false,
-      allow_severity: true
+      item_mode: :severity_fallback
     }
   end
 
   defp config(:concerns_v1) do
     %{
-      adapter: :concerns_v1,
       approval_field: "verdict",
       approval_kind: :verdict,
       array_field: "concerns",
       issue_field: "concern",
       fix_field: "recommendation",
-      require_blocking: true,
-      allow_severity: false
+      item_mode: :blocking_required
     }
   end
 
@@ -130,9 +125,10 @@ defmodule Workflow.Refine.ReviewerAdapter do
     }
   end
 
-  defp item_required(%{require_blocking: true} = config), do: ["id", "blocking", config.issue_field, config.fix_field]
+  defp item_required(%{item_mode: :blocking_required} = config),
+    do: ["id", "blocking", config.issue_field, config.fix_field]
 
-  defp item_required(config), do: ["id", config.issue_field, config.fix_field]
+  defp item_required(%{item_mode: :severity_fallback} = config), do: ["id", config.issue_field, config.fix_field]
 
   defp item_properties(config) do
     properties = %{
@@ -142,12 +138,11 @@ defmodule Workflow.Refine.ReviewerAdapter do
       config.fix_field => %{"type" => "string"}
     }
 
-    if config.allow_severity do
-      Map.put(properties, "severity", %{"type" => "string"})
-    else
-      properties
-    end
+    include_severity(properties, config.item_mode)
   end
+
+  defp include_severity(properties, :blocking_required), do: properties
+  defp include_severity(properties, :severity_fallback), do: Map.put(properties, "severity", %{"type" => "string"})
 
   defp top_level_keys(config), do: [config.approval_field, config.array_field, "cross_expert_note", "report_snippet"]
 
@@ -158,7 +153,8 @@ defmodule Workflow.Refine.ReviewerAdapter do
   defp normalize_approval(output, %{approval_kind: :boolean, approval_field: field}) do
     case Map.fetch(output, field) do
       {:ok, value} when is_boolean(value) -> {:ok, value}
-      _other -> {:error, :review_approval_unexpected_shape}
+      {:ok, _value} -> {:error, :review_approval_unexpected_shape}
+      :error -> {:error, {:missing_required, field}}
     end
   end
 
@@ -166,7 +162,15 @@ defmodule Workflow.Refine.ReviewerAdapter do
     case Map.fetch(output, field) do
       {:ok, "approve"} -> {:ok, true}
       {:ok, "changes"} -> {:ok, false}
-      _other -> {:error, :review_approval_unexpected_shape}
+      {:ok, _value} -> {:error, :review_approval_unexpected_shape}
+      :error -> {:error, {:missing_required, field}}
+    end
+  end
+
+  defp normalize_findings(output, %{array_field: field} = config) do
+    case Map.fetch(output, field) do
+      {:ok, items} -> normalize_items(items, config)
+      :error -> {:error, {:missing_required, field}}
     end
   end
 
@@ -192,7 +196,7 @@ defmodule Workflow.Refine.ReviewerAdapter do
          {:ok, issue} <- non_empty_string(item, config.issue_field, :review_finding_invalid_text),
          {:ok, fix} <- non_empty_string(item, config.fix_field, :review_finding_invalid_text),
          {:ok, blocking} <- normalize_blocking(item, config) do
-      {:ok, %{"id" => id, "blocking" => blocking, "issue" => issue, "fix" => fix}}
+      {:ok, %ReviewFinding{id: id, blocking: blocking, issue: issue, fix: fix}}
     end
   end
 
@@ -200,26 +204,41 @@ defmodule Workflow.Refine.ReviewerAdapter do
 
   defp item_keys(config) do
     keys = ["id", "blocking", config.issue_field, config.fix_field]
-    if config.allow_severity, do: ["severity" | keys], else: keys
+    include_severity_key(keys, config.item_mode)
   end
 
-  defp normalize_blocking(item, %{require_blocking: true}) do
+  defp include_severity_key(keys, :blocking_required), do: keys
+  defp include_severity_key(keys, :severity_fallback), do: ["severity" | keys]
+
+  defp normalize_blocking(item, %{item_mode: :blocking_required}) do
     case Map.fetch(item, "blocking") do
       {:ok, value} when is_boolean(value) -> {:ok, value}
       _other -> {:error, :review_finding_unexpected_shape}
     end
   end
 
-  defp normalize_blocking(item, %{allow_severity: true}) do
-    case Map.fetch(item, "blocking") do
-      {:ok, value} when is_boolean(value) ->
-        {:ok, value}
+  defp normalize_blocking(item, %{item_mode: :severity_fallback}) do
+    with {:ok, severity} <- optional_severity(item) do
+      case Map.fetch(item, "blocking") do
+        {:ok, value} when is_boolean(value) -> {:ok, value}
+        :error -> {:ok, severity_blocking?(severity)}
+        _other -> {:error, :review_finding_unexpected_shape}
+      end
+    end
+  end
+
+  defp optional_severity(item) do
+    case Map.fetch(item, "severity") do
+      {:ok, severity} when is_binary(severity) ->
+        if String.valid?(severity),
+          do: {:ok, severity},
+          else: {:error, :review_finding_unexpected_shape}
+
+      {:ok, _severity} ->
+        {:error, :review_finding_unexpected_shape}
 
       :error ->
-        {:ok, severity_blocking?(Map.get(item, "severity"))}
-
-      _other ->
-        {:error, :review_finding_unexpected_shape}
+        {:ok, nil}
     end
   end
 

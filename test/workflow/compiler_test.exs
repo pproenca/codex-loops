@@ -13,6 +13,7 @@ defmodule Workflow.CompilerTest do
   alias Workflow.Node.Log
   alias Workflow.Node.Phase
   alias Workflow.Node.Return
+  alias Workflow.Schema
 
   # An env whose file we control, so located messages are readable and asserted.
   defp env, do: %{__ENV__ | file: "workflows/demo.ex", line: 1}
@@ -70,11 +71,13 @@ defmodule Workflow.CompilerTest do
                %Agent{
                  prompt: "go",
                  label: "gate:consensus",
-                 schema: %{"type" => "object"},
+                 schema: schema,
                  retries: 2
                },
                %Return{}
              ] = tree.nodes
+
+      assert Schema.to_map(schema) == %{"type" => "object"}
     end
   end
 
@@ -98,8 +101,8 @@ defmodule Workflow.CompilerTest do
       assert [%Agent{address: [0], prompt: "classify", schema: schema, retries: 2}, %Return{}] =
                tree.nodes
 
-      # The stored schema is a real map, not a fragment of AST, and holds no closures.
-      assert schema == %{
+      # The stored schema is a typed inert value, not a fragment of AST.
+      assert Schema.to_map(schema) == %{
                "type" => "object",
                "required" => ["label"],
                "properties" => %{"label" => %{"type" => "string"}}

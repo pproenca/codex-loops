@@ -964,9 +964,9 @@ defmodule Workflow.Web.RunLiveTest do
         provider: {StreamingGateProvider, sink: self()}
       )
 
-    assert_receive {:at_agent, first_turn}
+    assert_receive {:at_agent, first_turn}, 1_000
     send(first_turn, :proceed)
-    assert_receive {:at_agent, second_turn}
+    assert_receive {:at_agent, second_turn}, 1_000
 
     {:ok, view, _html} = live_run(id)
     wait_for_render(view, "ship")

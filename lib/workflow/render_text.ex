@@ -79,19 +79,18 @@ defmodule Workflow.RenderText do
   defp materialize_part({:bound_value, ref}, events), do: BoundValue.fold(events, ref)
   defp materialize_part({:bound_list, ref}, events), do: BoundList.fold(events, ref)
 
-  defp apply_formatter(%Template.Hole{op: :path, args: %{pointer: pointer}}, value),
-    do: {:ok, pointer_value(value, pointer)}
+  defp apply_formatter(%Template.Hole{formatter: {:path, pointer}}, value), do: {:ok, pointer_value(value, pointer)}
 
-  defp apply_formatter(%Template.Hole{op: :flatten, args: %{pointer: pointer}}, value),
+  defp apply_formatter(%Template.Hole{formatter: {:flatten, pointer}}, value),
     do: {:ok, value |> pointer_value(pointer) |> flatten_value()}
 
-  defp apply_formatter(%Template.Hole{op: :count, args: %{pointer: pointer}}, value),
+  defp apply_formatter(%Template.Hole{formatter: {:count, pointer}}, value),
     do: {:ok, value |> pointer_value(pointer) |> JSONValue.count()}
 
-  defp apply_formatter(%Template.Hole{op: :numbered_findings, args: %{pointer: pointer}}, value),
+  defp apply_formatter(%Template.Hole{formatter: {:numbered_findings, pointer}}, value),
     do: {:ok, value |> pointer_value(pointer) |> numbered_findings()}
 
-  defp apply_formatter(%Template.Hole{op: :truncate, args: %{max_bytes: max_bytes}}, value),
+  defp apply_formatter(%Template.Hole{formatter: {:truncate, max_bytes}}, value),
     do: {:ok, value |> to_text() |> truncate_utf8(max_bytes)}
 
   defp to_text(text) when is_binary(text), do: text

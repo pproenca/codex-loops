@@ -9,6 +9,7 @@ defmodule Workflow.BoundValue do
   """
 
   alias Workflow.Event
+  alias Workflow.Event.Payload
   alias Workflow.Journal
 
   @type result :: {:ok, term()} | {:error, {:unbound, Workflow.Node.binding_ref()}}
@@ -34,16 +35,12 @@ defmodule Workflow.BoundValue do
   def fold(_events, {:map, _address} = ref), do: {:error, {:unbound, ref}}
   def fold(_events, {:fanout, _address, _scope} = ref), do: {:error, {:unbound, ref}}
 
-  defp apply_event(%Event{type: :agent_committed, payload: %{address: address, result: result}}, _acc, address),
-    do: result
+  defp apply_event(%Event{payload: %Payload.AgentCommitted{address: address, result: result}}, _acc, address), do: result
 
   defp apply_event(%Event{}, acc, _address), do: acc
 
-  defp apply_refine_event(
-         %Event{type: :refine_completed, payload: %{address: address, artifact: artifact}},
-         _acc,
-         address
-       ), do: artifact
+  defp apply_refine_event(%Event{payload: %Payload.RefineCompleted{address: address, artifact: artifact}}, _acc, address),
+    do: artifact
 
   defp apply_refine_event(%Event{}, acc, _address), do: acc
 end

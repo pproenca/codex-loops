@@ -333,24 +333,24 @@ Short: <%= truncate(@draft, 5) %>|)
   test "JSON pointer list tokens are unsigned decimal indices" do
     assert {:ok, "second"} =
              RenderText.fold([], [
-               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/1"}}, {:literal, ["first", "second"]}}
+               {:formatter, %Hole{assign: "xs", formatter: {:path, "/1"}}, {:literal, ["first", "second"]}}
              ])
 
     assert {:ok, "nil"} =
              RenderText.fold([], [
-               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/+1"}}, {:literal, ["first", "second"]}}
+               {:formatter, %Hole{assign: "xs", formatter: {:path, "/+1"}}, {:literal, ["first", "second"]}}
              ])
 
     assert {:ok, "nil"} =
              RenderText.fold([], [
-               {:formatter, %Hole{op: :path, assign: "xs", args: %{pointer: "/-0"}}, {:literal, ["first", "second"]}}
+               {:formatter, %Hole{assign: "xs", formatter: {:path, "/-0"}}, {:literal, ["first", "second"]}}
              ])
   end
 
   test "numbered_findings atom fallback preserves falsey field values" do
     assert {:ok, "1. [false] nil\n   Fix: 0"} =
              RenderText.fold([], [
-               {:formatter, %Hole{op: :numbered_findings, assign: "findings", args: %{pointer: ""}},
+               {:formatter, %Hole{assign: "findings", formatter: {:numbered_findings, ""}},
                 {:literal, [%{id: false, issue: nil, fix: 0}]}}
              ])
   end

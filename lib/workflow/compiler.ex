@@ -30,6 +30,7 @@ defmodule Workflow.Compiler do
   """
 
   alias Workflow.Compiler.Finding
+  alias Workflow.JSONValue
   alias Workflow.Node.Agent
   alias Workflow.Node.BudgetSlices
   alias Workflow.Node.Collect
@@ -44,15 +45,21 @@ defmodule Workflow.Compiler do
   alias Workflow.Node.Phase
   alias Workflow.Node.Pipeline
   alias Workflow.Node.Refine
+  alias Workflow.Node.Refine.ColdReadGate
+  alias Workflow.Node.Refine.Gates
+  alias Workflow.Node.Refine.HaltGate
+  alias Workflow.Node.Refine.RepairGate
   alias Workflow.Node.Return
   alias Workflow.Node.Synthesize
   alias Workflow.Node.Until
   alias Workflow.Node.Verify
   alias Workflow.Predicate
+  alias Workflow.Refine.Artifact
   alias Workflow.Refine.Gate
   alias Workflow.Refine.Reviewer
   alias Workflow.Refine.ReviewerAdapter
   alias Workflow.RenderText
+  alias Workflow.Schema
   alias Workflow.Template
   alias Workflow.Tree
 
@@ -93,13 +100,6 @@ defmodule Workflow.Compiler do
     "type" => "object",
     "properties" => %{"score" => %{"type" => "number"}},
     "required" => ["score"]
-  }
-
-  @artifact_schema %{
-    "type" => "object",
-    "additionalProperties" => false,
-    "properties" => %{"artifact" => %{"type" => "string"}},
-    "required" => ["artifact"]
   }
 
   @refine_required_options [:reviewers, :revise_with, :until, :max_rounds]
@@ -675,7 +675,7 @@ defmodule Workflow.Compiler do
     case Keyword.fetch(kw, :schema) do
       {:ok, {:%{}, _, _} = ast} ->
         if Macro.quoted_literal?(ast) do
-          {:ok, materialize(ast)}
+          {:ok, ast |> materialize() |> Schema.new()}
         else
           {:error, schema_finding(form, env)}
         end
@@ -1274,7 +1274,7 @@ defmodule Workflow.Compiler do
       %Agent{
         address: address ++ [i],
         prompt: verify_prompt(subject, nil),
-        schema: @verdict_schema,
+        schema: verdict_schema(),
         retries: 0
       }
     end)
@@ -1285,7 +1285,7 @@ defmodule Workflow.Compiler do
       %Agent{
         address: address ++ [i],
         prompt: verify_prompt(subject, lens),
-        schema: @verdict_schema,
+        schema: verdict_schema(),
         retries: 0
       }
     end)
@@ -1381,7 +1381,7 @@ defmodule Workflow.Compiler do
         %Agent{
           address: address,
           prompt: prompt,
-          schema: @artifact_schema,
+          schema: Schema.new(Artifact.schema()),
           retries: @default_retries
         }}}
     end
@@ -1476,7 +1476,7 @@ defmodule Workflow.Compiler do
         address: agent_address,
         prompt: prompt,
         label: Atom.to_string(name),
-        schema: ReviewerAdapter.schema(adapter),
+        schema: adapter |> ReviewerAdapter.schema() |> Schema.new(),
         retries: 0
       }
 
@@ -1547,7 +1547,7 @@ defmodule Workflow.Compiler do
            %Agent{
              address: address,
              prompt: prompt,
-             schema: @artifact_schema,
+             schema: Schema.new(Artifact.schema()),
              retries: @default_retries
            }}
         end
@@ -1618,7 +1618,7 @@ defmodule Workflow.Compiler do
   defp refine_gates(opts, address, %Agent{} = reviser, form, env) do
     case Keyword.fetch(opts, :gates) do
       :error ->
-        {:ok, %{}}
+        {:ok, %Gates{}}
 
       {:ok, gates} ->
         cond do
@@ -1650,11 +1650,11 @@ defmodule Workflow.Compiler do
   defp maybe_cold_read_gate(gates, address, form, env) do
     case Keyword.fetch(gates, :cold_read) do
       :error ->
-        {:ok, %{}}
+        {:ok, %Gates{}}
 
       {:ok, opts} ->
         with {:ok, gate} <- cold_read_gate(opts, address, form, env) do
-          {:ok, %{cold_read: gate}}
+          {:ok, %Gates{cold_read: gate}}
         end
     end
   end
@@ -1683,7 +1683,7 @@ defmodule Workflow.Compiler do
         with {:ok, reviewer} <-
                cold_read_reviewer(Keyword.fetch!(opts, :reviewer), address ++ [3], env),
              {:ok, predicate} <- gate_predicate(Keyword.fetch!(opts, :when), form, env) do
-          {:ok, %{predicate: predicate, reviewer: reviewer}}
+          {:ok, %ColdReadGate{predicate: predicate, reviewer: reviewer}}
         end
     end
   end
@@ -1708,30 +1708,31 @@ defmodule Workflow.Compiler do
      )}
   end
 
-  defp maybe_repair_gate(gates, address, %Agent{} = reviser, acc, form, env) do
+  defp maybe_repair_gate(gates, address, %Agent{} = reviser, %Gates{} = acc, form, env) do
     case Keyword.fetch(gates, :repair_when) do
       :error ->
         {:ok, acc}
 
       {:ok, predicate_ast} ->
         with {:ok, predicate} <- gate_predicate(predicate_ast, form, env) do
-          {:ok,
-           Map.put(acc, :repair, %{
-             predicate: predicate,
-             agent: %{reviser | address: address ++ [4]}
-           })}
+          gate = %RepairGate{
+            predicate: predicate,
+            agent: %{reviser | address: address ++ [4]}
+          }
+
+          {:ok, %{acc | repair: gate}}
         end
     end
   end
 
-  defp maybe_halt_gate(gates, acc, form, env) do
+  defp maybe_halt_gate(gates, %Gates{} = acc, form, env) do
     case Keyword.fetch(gates, :halt_when) do
       :error ->
         {:ok, acc}
 
       {:ok, predicate_ast} ->
         with {:ok, predicate} <- gate_predicate(predicate_ast, form, env) do
-          {:ok, Map.put(acc, :halt, %{predicate: predicate})}
+          {:ok, %{acc | halt: %HaltGate{predicate: predicate}}}
         end
     end
   end
@@ -1791,57 +1792,20 @@ defmodule Workflow.Compiler do
     {:error, Finding.at(env, form, "gate JSON pointer must be a literal string")}
   end
 
-  defp gate_literal_to_json(nil, _form, _env), do: {:ok, nil}
-  defp gate_literal_to_json(value, _form, _env) when is_boolean(value), do: {:ok, value}
-  defp gate_literal_to_json(value, _form, _env) when is_integer(value), do: {:ok, value}
-  defp gate_literal_to_json(value, _form, _env) when is_binary(value), do: {:ok, value}
+  defp gate_literal_to_json(value, form, env) do
+    case JSONValue.from_literal(value, :integers_only) do
+      {:ok, _value} = result ->
+        result
 
-  defp gate_literal_to_json(value, _form, _env) when is_atom(value), do: {:ok, Atom.to_string(value)}
+      {:error, :duplicate_key} ->
+        {:error, Finding.at(env, form, "gate literal has duplicate object key")}
 
-  defp gate_literal_to_json(values, form, env) when is_list(values) do
-    values
-    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
-      case gate_literal_to_json(value, form, env) do
-        {:ok, json} -> {:cont, {:ok, [json | acc]}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, acc} -> {:ok, Enum.reverse(acc)}
-      {:error, _} = err -> err
+      {:error, :invalid_key} ->
+        {:error, Finding.at(env, form, "gate literal object keys must be strings or atoms")}
+
+      {:error, _reason} ->
+        {:error, Finding.at(env, form, "`path_equals` gate literal is not JSON-encodable")}
     end
-  end
-
-  defp gate_literal_to_json({:%{}, _meta, pairs}, form, env) do
-    pairs
-    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key_ast, value_ast}, {:ok, acc, seen} ->
-      with {:ok, key} <- gate_literal_key(key_ast, form, env),
-           false <- MapSet.member?(seen, key),
-           {:ok, value} <- gate_literal_to_json(value_ast, form, env) do
-        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
-      else
-        true ->
-          {:halt, {:error, Finding.at(env, form, "gate literal has duplicate object key")}}
-
-        {:error, _} = err ->
-          {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, acc, _seen} -> {:ok, acc}
-      {:error, _} = err -> err
-    end
-  end
-
-  defp gate_literal_to_json(_value, form, env) do
-    {:error, Finding.at(env, form, "`path_equals` gate literal is not JSON-encodable")}
-  end
-
-  defp gate_literal_key(key, _form, _env) when is_binary(key), do: {:ok, key}
-  defp gate_literal_key(key, _form, _env) when is_atom(key), do: {:ok, Atom.to_string(key)}
-
-  defp gate_literal_key(_key, form, env) do
-    {:error, Finding.at(env, form, "gate literal object keys must be strings or atoms")}
   end
 
   defp judge_candidates(candidates, form, env) do
@@ -1902,7 +1866,7 @@ defmodule Workflow.Compiler do
         %Agent{
           address: address ++ [c, k],
           prompt: score_prompt(candidate, criterion),
-          schema: @score_schema,
+          schema: score_schema(),
           retries: 0
         }
       end)
@@ -1915,6 +1879,9 @@ defmodule Workflow.Compiler do
         {:text, "Score this candidate on #{criterion}, answering with a numeric score: "},
         {:literal, candidate}
       ])
+
+  defp verdict_schema, do: Schema.new(@verdict_schema)
+  defp score_schema, do: Schema.new(@score_schema)
 
   defp fanout_width(opts, form, env, binding_env) do
     case Keyword.fetch(opts, :width) do

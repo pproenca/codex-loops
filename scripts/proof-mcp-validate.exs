@@ -11,7 +11,7 @@ defmodule ProofMCPValidate do
       name: "conformance-core",
       result: :ok,
       events:
-        ~w(parallel_started pipeline_started verify_started judge_started loop_decision accumulate fanout_started fan_out_started run_completed)
+        ~w(parallel_started pipeline_started verify_started judge_started loop_decision accumulate fanout_started run_completed)
     },
     %{
       file: "conformance_dataflow.exs",
@@ -496,7 +496,10 @@ defmodule ProofMCPValidate do
         {client, payload}
 
       state in ["failed", "killed"] ->
-        raise("run #{run_id} reached terminal state #{state}: #{inspect(payload)}")
+        raise(
+          "run #{run_id} reached terminal state #{state}: " <>
+            inspect(get_in(payload, ["data", "failure"]), limit: :infinity)
+        )
 
       true ->
         Process.sleep(@poll_interval_ms)
@@ -544,7 +547,7 @@ defmodule ProofMCPValidate do
   defp invalid_workflow_source do
     """
     workflow "mcp-invalid-proof" do
-      frobnicate "nope"
+      raise "nope"
     end
     """
   end
@@ -838,7 +841,7 @@ defmodule ProofMCPValidate do
     )
 
     assert!(
-      payload["error"]["details"]["reason"] =~ "unknown combinator `frobnicate`",
+      payload["error"]["details"]["reason"] =~ "unknown combinator `raise`",
       "invalid resume script should preserve validation details"
     )
   end

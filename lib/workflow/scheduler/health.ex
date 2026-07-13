@@ -12,8 +12,7 @@ defmodule Workflow.Scheduler.Health do
           checks: %{
             otp_app: availability(),
             journal: availability(),
-            pubsub: availability(),
-            endpoint: availability()
+            pubsub: availability()
           }
         }
 

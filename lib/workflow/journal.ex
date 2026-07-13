@@ -6,10 +6,12 @@ defmodule Workflow.Journal do
 
   Backed by SQLite at `~/.codex/workflows/runs_1.sqlite` by default, or
   `CODEX_LOOPS_JOURNAL_PATH` when supplied. Events are keyed by `{run_id, seq}` and
-  store the full `%Workflow.Event{}` as an Erlang term blob so folds reconstruct the
-  exact in-memory event without lossy JSON conversion. Writes are serialised per run
-  by the single live writer (one per run via the run registry), so `seq` needs no
-  global counter and ordered iteration yields events in commit order.
+  store the full `%Workflow.Event{}` envelope as an Erlang term blob so folds
+  reconstruct the exact in-memory event without lossy JSON conversion. Payload
+  structs are flattened to their version-one maps on write and restored at this
+  boundary on read. Writes are serialised per run by the single live writer (one
+  per run via the run registry), so `seq` needs no global counter and ordered
+  iteration yields events in commit order.
 
   A `runs` table is a lightweight **run index**: `run_id -> creation order`
   (SQLite's autoincrementing row id). It is not run *state* — every authoritative
@@ -34,6 +36,7 @@ defmodule Workflow.Journal do
 
   alias Exqlite.Sqlite3
   alias Workflow.Event
+  alias Workflow.Event.Payload, as: P
 
   @max_event_blob_bytes 16 * 1024 * 1024
   @metadata_table __MODULE__
@@ -176,16 +179,18 @@ defmodule Workflow.Journal do
     VALUES (?, ?, ?, ?, ?)
     """
 
+    persisted_event = %{event | payload: Event.payload_map(event)}
+
     exec(db, sql, [
       run_id,
       seq,
       event.schema,
       Atom.to_string(event.type),
-      {:blob, :erlang.term_to_binary(event)}
+      {:blob, :erlang.term_to_binary(persisted_event)}
     ])
   end
 
-  defp prepare_event(run_id, %Event{type: :agent_started, payload: payload} = event, owner, cursors) do
+  defp prepare_event(run_id, %Event{payload: %P.AgentStarted{} = payload} = event, owner, cursors) do
     key = activity_key(run_id, payload.address, payload.iteration, payload.attempt)
 
     case Map.fetch(cursors, key) do
@@ -197,7 +202,7 @@ defmodule Workflow.Journal do
     end
   end
 
-  defp prepare_event(run_id, %Event{type: :agent_activity, payload: payload} = event, _owner, cursors) do
+  defp prepare_event(run_id, %Event{payload: %P.AgentActivity{} = payload} = event, _owner, cursors) do
     key = activity_key(run_id, payload.address, payload.iteration, payload.attempt)
 
     case {payload.activity_index, Map.fetch(cursors, key)} do
@@ -219,21 +224,21 @@ defmodule Workflow.Journal do
     end
   end
 
-  defp prepare_event(run_id, %Event{type: :agent_committed, payload: payload} = event, _owner, cursors) do
+  defp prepare_event(run_id, %Event{payload: %P.AgentCommitted{} = payload} = event, _owner, cursors) do
     attempt = payload.idempotency_key.attempt
     {event, drop_activity_cursor(cursors, activity_key(run_id, payload.address, payload.iteration, attempt))}
   end
 
-  defp prepare_event(run_id, %Event{type: :agent_attempt_rejected, payload: payload} = event, _owner, cursors) do
+  defp prepare_event(run_id, %Event{payload: %P.AgentAttemptRejected{} = payload} = event, _owner, cursors) do
     {event, drop_activity_cursor(cursors, activity_key(run_id, payload.address, payload.iteration, payload.attempt))}
   end
 
-  defp prepare_event(run_id, %Event{type: :agent_failed, payload: payload} = event, _owner, cursors) do
+  defp prepare_event(run_id, %Event{payload: %P.AgentFailed{} = payload} = event, _owner, cursors) do
     key = activity_key(run_id, payload.address, payload.iteration, max(payload.attempts - 1, 0))
     {event, drop_activity_cursor(cursors, key)}
   end
 
-  defp prepare_event(run_id, %Event{type: :refine_role_failed, payload: payload} = event, _owner, cursors) do
+  defp prepare_event(run_id, %Event{payload: %P.RefineRoleFailed{} = payload} = event, _owner, cursors) do
     attempt = max(payload.attempts - 1, 0)
 
     cursors =
@@ -250,14 +255,19 @@ defmodule Workflow.Journal do
     {event, cursors}
   end
 
-  defp prepare_event(run_id, %Event{type: type} = event, _owner, cursors) when type in [:run_completed, :run_failed] do
+  defp prepare_event(run_id, %Event{payload: %P.RunCompleted{}} = event, _owner, cursors) do
+    {event,
+     drop_activity_cursors(cursors, fn {cursor_run_id, _address, _iteration, _attempt} -> cursor_run_id == run_id end)}
+  end
+
+  defp prepare_event(run_id, %Event{payload: %P.RunFailed{}} = event, _owner, cursors) do
     {event,
      drop_activity_cursors(cursors, fn {cursor_run_id, _address, _iteration, _attempt} -> cursor_run_id == run_id end)}
   end
 
   defp prepare_event(_run_id, %Event{} = event, _owner, cursors), do: {event, cursors}
 
-  defp inactive_activity?(run_id, %Event{type: :agent_activity, payload: %{activity_index: nil} = payload}, cursors) do
+  defp inactive_activity?(run_id, %Event{payload: %P.AgentActivity{activity_index: nil} = payload}, cursors) do
     key = activity_key(run_id, payload.address, payload.iteration, payload.attempt)
     not Map.has_key?(cursors, key)
   end
@@ -278,12 +288,12 @@ defmodule Workflow.Journal do
   end
 
   defp drop_activity_cursors(cursors, matches?) do
-    Enum.reduce(cursors, %{}, fn {key, {_next_index, ref} = cursor}, kept ->
+    Map.reject(cursors, fn {key, {_next_index, ref}} ->
       if matches?.(key) do
         demonitor(ref)
-        kept
+        true
       else
-        Map.put(kept, key, cursor)
+        false
       end
     end)
   end
@@ -296,7 +306,9 @@ defmodule Workflow.Journal do
     case :erlang.binary_to_term(blob, [:safe]) do
       %Event{} = event ->
         if data_only?(event) do
-          copy_data(event)
+          event
+          |> copy_data()
+          |> Event.normalize()
         else
           raise ArgumentError, "journal event contains a runtime-only term"
         end

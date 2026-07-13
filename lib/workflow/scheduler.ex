@@ -7,15 +7,19 @@ defmodule Workflow.Scheduler do
   unexpected process failures are left to crash under supervision.
   """
 
+  alias Workflow.Event
+  alias Workflow.Event.Payload
   alias Workflow.Journal
   alias Workflow.PackageVersion
   alias Workflow.Provider.Mock
   alias Workflow.Run
+  alias Workflow.Run.Options, as: RunOptions
   alias Workflow.Scheduler.Error
   alias Workflow.Scheduler.Health
   alias Workflow.Scheduler.RunEventsProjection
   alias Workflow.Scheduler.RunProjection
   alias Workflow.Scheduler.RunStart
+  alias Workflow.Scheduler.Snapshot
   alias Workflow.Scheduler.Validation
   alias Workflow.Script
   alias Workflow.Status
@@ -45,9 +49,14 @@ defmodule Workflow.Scheduler do
          {:ok, provider} <- run_provider(params),
          {:ok, budget} <- run_budget(params),
          {:ok, tree} <- Script.load_tree(path) do
-      opts = put_run_id([provider: provider, budget: budget, script_path: Path.expand(path)], run_id)
+      options = %RunOptions{
+        run_id: run_id,
+        provider: provider,
+        budget: budget,
+        script_path: Path.expand(path)
+      }
 
-      case Run.start(tree, opts) do
+      case Run.start(tree, options) do
         {:ok, started_run_id, _pid} ->
           {:ok, RunStart.accepted(started_run_id)}
 
@@ -74,11 +83,14 @@ defmodule Workflow.Scheduler do
          {:ok, provider} <- run_provider(params),
          {:ok, path} <- resume_script_path(run_id, params),
          {:ok, tree} <- Script.load_tree(path) do
-      case Run.start(tree,
-             run_id: run_id,
-             provider: provider,
-             script_path: Path.expand(path)
-           ) do
+      options = %RunOptions{
+        run_id: run_id,
+        provider: provider,
+        budget: nil,
+        script_path: Path.expand(path)
+      }
+
+      case Run.start(tree, options) do
         {:ok, ^run_id, _pid} ->
           {:ok, RunStart.accepted(run_id)}
 
@@ -107,15 +119,13 @@ defmodule Workflow.Scheduler do
 
   def get_run(_run_id), do: {:error, Error.invalid_run_id()}
 
-  @type run_snapshot :: %{status: Status.t(), run_projection: RunProjection.t()}
-
   @doc """
   Returns the complete scheduler-owned read model for one render.
 
   The journal is folded once, then both the workflow status body and lifecycle
   projection are derived from those events plus the current runtime lease fact.
   """
-  @spec get_run_snapshot(String.t()) :: {:ok, run_snapshot()} | {:error, Error.t()}
+  @spec get_run_snapshot(String.t()) :: {:ok, Snapshot.t()} | {:error, Error.t()}
   def get_run_snapshot(run_id) when is_binary(run_id) and byte_size(run_id) > 0 do
     if Journal.run_exists?(run_id) do
       {:ok, run_snapshot(run_id)}
@@ -179,8 +189,12 @@ defmodule Workflow.Scheduler do
   end
 
   defp journaled_script_path(run_id) do
-    case Enum.find(Journal.fold(run_id), &(&1.type == :run_started)) do
-      %{payload: %{script_path: path}} when is_binary(path) and byte_size(path) > 0 ->
+    case Enum.find(Journal.fold(run_id), fn
+           %Event{payload: %Payload.RunStarted{}} -> true
+           %Event{} -> false
+         end) do
+      %Event{payload: %Payload.RunStarted{script_path: path}}
+      when is_binary(path) and byte_size(path) > 0 ->
         {:ok, path}
 
       _missing_or_unrecorded ->
@@ -190,7 +204,7 @@ defmodule Workflow.Scheduler do
 
   defp run_id(params) do
     case fetch_param(params, :run_id, "run_id") do
-      :missing -> {:ok, nil}
+      :missing -> {:ok, RunOptions.generate_run_id()}
       {:ok, id} when is_binary(id) and byte_size(id) > 0 -> route_safe_run_id(id)
       {:ok, _invalid} -> {:error, Error.invalid_run_id()}
     end
@@ -213,7 +227,7 @@ defmodule Workflow.Scheduler do
   end
 
   defp run_projection(run_id) do
-    %{run_projection: run_projection} = run_snapshot(run_id)
+    %Snapshot{run_projection: run_projection} = run_snapshot(run_id)
     run_projection
   end
 
@@ -227,7 +241,7 @@ defmodule Workflow.Scheduler do
         running?: run_running?(run_id)
       )
 
-    %{status: status, run_projection: run_projection}
+    %Snapshot{status: status, run_projection: run_projection}
   end
 
   defp run_running?(run_id) do
@@ -261,9 +275,6 @@ defmodule Workflow.Scheduler do
       true -> :missing
     end
   end
-
-  defp put_run_id(opts, nil), do: opts
-  defp put_run_id(opts, run_id), do: Keyword.put(opts, :run_id, run_id)
 
   defp validate_workflow_path(path) do
     case Script.load_tree(path) do

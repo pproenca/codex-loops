@@ -7,6 +7,10 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
   alias Workflow.Node.Parallel
   alias Workflow.Node.Pipeline
   alias Workflow.Node.Refine
+  alias Workflow.Node.Refine.ColdReadGate
+  alias Workflow.Node.Refine.Gates
+  alias Workflow.Node.Refine.HaltGate
+  alias Workflow.Node.Refine.RepairGate
   alias Workflow.Script
   alias Workflow.Tree
 
@@ -108,7 +112,13 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
              &match?(%Agent{prompt: %Workflow.Template{assigns: ["cold_read"]}}, &1)
            )
 
-    assert %Refine{gates: %{cold_read: cold_read, repair: repair, halt: halt}} =
+    assert %Refine{
+             gates: %Gates{
+               cold_read: %ColdReadGate{} = cold_read,
+               repair: %RepairGate{} = repair,
+               halt: %HaltGate{} = halt
+             }
+           } =
              Enum.find(tree.nodes, &match?(%Refine{}, &1))
 
     assert cold_read.reviewer.agent.label == "cold_read"
@@ -225,8 +235,9 @@ defmodule Workflow.WorkflowDslSpecScriptTest do
 
   defp refine_gate_agents(gates) do
     gates
-    |> Map.values()
+    |> then(&[&1.cold_read, &1.repair, &1.halt])
     |> Enum.flat_map(fn
+      nil -> []
       %{reviewer: %{agent: agent}} -> [agent]
       %{agent: agent} -> [agent]
       _gate -> []

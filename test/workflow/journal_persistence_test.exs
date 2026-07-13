@@ -1,7 +1,9 @@
 defmodule Workflow.JournalPersistenceTest do
   use ExUnit.Case, async: false
 
+  alias Exqlite.Sqlite3
   alias Workflow.Event
+  alias Workflow.Event.Payload, as: P
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
   alias Workflow.Node.Agent
@@ -59,6 +61,25 @@ defmodule Workflow.JournalPersistenceTest do
     )
   end
 
+  defp stored_event(run_id) do
+    journal_path = :sys.get_state(Journal).path
+    {:ok, db} = Sqlite3.open(journal_path, mode: :readonly)
+
+    try do
+      {:ok, statement} = Sqlite3.prepare(db, "SELECT event_blob FROM events WHERE run_id = ?")
+
+      try do
+        :ok = Sqlite3.bind(statement, [run_id])
+        {:ok, [[blob]]} = Sqlite3.fetch_all(db, statement)
+        :erlang.binary_to_term(blob, [:safe])
+      after
+        Sqlite3.release(db, statement)
+      end
+    after
+      Sqlite3.close(db)
+    end
+  end
+
   test "events and run index survive a journal process restart" do
     run_id = "run_journal_persist_#{System.unique_integer([:positive])}"
     first = Event.run_started(%Tree{nodes: []}, 25, "/tmp/workflow.exs")
@@ -77,6 +98,36 @@ defmodule Workflow.JournalPersistenceTest do
     assert run_id |> Journal.fold() |> Enum.map(& &1.type) == [:run_started, :run_completed]
     assert run_id in Journal.run_ids()
     assert Journal.latest_run_id() == run_id
+  end
+
+  test "payload variants retain the version-one map shape on disk" do
+    run_id = "run_journal_payload_shape_#{System.unique_integer([:positive])}"
+    event = Event.run_completed(%{"answer" => "ok"})
+
+    assert :ok = Journal.register_run(run_id)
+    assert {:ok, %{seq: 0}} = Journal.append_next(run_id, event)
+
+    assert %Event{payload: %{value: %{"answer" => "ok"}} = stored_payload} = stored_event(run_id)
+    refute is_struct(stored_payload)
+
+    assert [%Event{payload: %P.RunCompleted{value: %{"answer" => "ok"}}}] =
+             Journal.fold(run_id)
+  end
+
+  test "additive payload keys survive persistence and typed hydration" do
+    run_id = "run_journal_additive_payload_#{System.unique_integer([:positive])}"
+    event = Event.run_completed(:ok)
+    event = %{event | payload: Map.put(event.payload, :future_payload_key, "preserved")}
+
+    assert :ok = Journal.register_run(run_id)
+    assert {:ok, %{seq: 0}} = Journal.append_next(run_id, event)
+
+    assert %Event{payload: stored_payload} = stored_event(run_id)
+    refute is_struct(stored_payload)
+    assert Map.fetch!(stored_payload, :future_payload_key) == "preserved"
+
+    assert [%Event{payload: %P.RunCompleted{value: :ok} = payload}] = Journal.fold(run_id)
+    assert Map.fetch!(payload, :future_payload_key) == "preserved"
   end
 
   test "restarting the journal rebuilds every later dependent child" do
@@ -157,6 +208,10 @@ defmodule Workflow.JournalPersistenceTest do
 
     assert status == 0, output
     assert String.ends_with?(output, "decoded-events:1")
+
+    assert %Event{payload: %{activity: [stored_activity]}} = stored_event(run_id)
+    refute is_struct(stored_activity)
+    assert stored_activity.status == :completed
 
     assert [
              %Event{

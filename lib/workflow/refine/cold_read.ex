@@ -55,9 +55,7 @@ defmodule Workflow.Refine.ColdRead do
   def repaired?(%__MODULE__{repair: :completed}), do: true
   def repaired?(%__MODULE__{repair: :not_run}), do: false
 
-  @spec from_payload(t() | map()) :: t()
-  def from_payload(%__MODULE__{} = cold_read), do: cold_read
-
+  @spec from_payload(map()) :: t()
   def from_payload(%{state: :completed} = payload) do
     payload
     |> Map.get(:open_findings, [])

@@ -33,7 +33,7 @@ defmodule Workflow.BindingResolutionTest do
     assert Code.ensure_loaded?(Workflow.BoundValue)
 
     events = [
-      %Event{
+      Event.normalize(%Event{
         type: :refine_completed,
         payload: %{
           address: [2],
@@ -43,7 +43,7 @@ defmodule Workflow.BindingResolutionTest do
           artifact: "accepted spec",
           open_findings: []
         }
-      }
+      })
     ]
 
     assert {:ok, "accepted spec"} = Workflow.BoundValue.fold(events, {:refine, [2]})

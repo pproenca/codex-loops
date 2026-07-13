@@ -8,6 +8,7 @@ defmodule Workflow.BoundList do
   """
 
   alias Workflow.Event
+  alias Workflow.Event.Payload
   alias Workflow.Journal
 
   @type result :: {:ok, [term()]} | {:error, {:unbound, Workflow.Node.binding_ref()}}
@@ -19,7 +20,7 @@ defmodule Workflow.BoundList do
   def fold(events, {:map, address} = ref) do
     lanes =
       Enum.reduce(events, %{}, fn
-        %Event{type: :agent_committed, payload: %{address: lane_address, result: result}}, acc ->
+        %Event{payload: %Payload.AgentCommitted{address: lane_address, result: result}}, acc ->
           case lane_index(address, lane_address) do
             {:ok, lane} -> Map.put(acc, lane, result)
             :error -> acc
@@ -71,14 +72,14 @@ defmodule Workflow.BoundList do
 
   defp fanout_width(events, address, iteration, ref) do
     case Enum.find(events, fn
-           %Event{type: :fanout_started, payload: payload} ->
-             payload.address == address and Map.get(payload, :iteration) == iteration
+           %Event{payload: %Payload.FanoutStarted{} = payload} ->
+             payload.address == address and payload.iteration == iteration
 
            %Event{} ->
              false
          end) do
       nil -> {:error, {:unbound, ref}}
-      %Event{payload: %{width: width}} -> {:ok, width}
+      %Event{payload: %Payload.FanoutStarted{width: width}} -> {:ok, width}
     end
   end
 
@@ -87,7 +88,7 @@ defmodule Workflow.BoundList do
 
     events
     |> Enum.filter(fn
-      %Event{type: :agent_committed, payload: payload} ->
+      %Event{payload: %Payload.AgentCommitted{} = payload} ->
         payload.iteration == iteration and List.starts_with?(payload.address, lane_prefix)
 
       %Event{} ->
@@ -96,7 +97,7 @@ defmodule Workflow.BoundList do
     |> Enum.sort_by(& &1.payload.address)
     |> List.last()
     |> case do
-      %Event{payload: %{result: result}} -> {:ok, result}
+      %Event{payload: %Payload.AgentCommitted{result: result}} -> {:ok, result}
       nil -> :error
     end
   end

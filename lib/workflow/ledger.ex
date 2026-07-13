@@ -22,6 +22,7 @@ defmodule Workflow.Ledger do
   """
 
   alias Workflow.Event
+  alias Workflow.Event.Payload
   alias Workflow.Journal
   alias Workflow.Provider.Usage
 
@@ -46,14 +47,27 @@ defmodule Workflow.Ledger do
   def remaining(%__MODULE__{total: total, spent: spent}), do: total - spent
 
   # The run's target is declared once, at start; `nil` means unbounded.
-  defp apply_event(%Event{type: :run_started, payload: %{budget: budget}}, ledger), do: %{ledger | total: budget}
+  defp apply_event(%Event{payload: %Payload.RunStarted{budget: budget}}, ledger) do
+    %{ledger | total: budget}
+  end
 
   # Committed turns, rejected fail-closed attempts, and expected provider failures
   # with non-nil usage are paid provider effects, so each counts against the budget.
-  defp apply_event(%Event{type: type, payload: %{usage: %Usage{} = usage}}, ledger)
-       when type in [:agent_committed, :agent_attempt_rejected, :agent_failed, :refine_role_failed],
-       do: %{ledger | spent: ledger.spent + usage.total_tokens}
+  defp apply_event(%Event{payload: %Payload.AgentCommitted{usage: %Usage{} = usage}}, ledger),
+    do: add_usage(ledger, usage)
+
+  defp apply_event(%Event{payload: %Payload.AgentAttemptRejected{usage: %Usage{} = usage}}, ledger),
+    do: add_usage(ledger, usage)
+
+  defp apply_event(%Event{payload: %Payload.AgentFailed{usage: %Usage{} = usage}}, ledger), do: add_usage(ledger, usage)
+
+  defp apply_event(%Event{payload: %Payload.RefineRoleFailed{usage: %Usage{} = usage}}, ledger),
+    do: add_usage(ledger, usage)
 
   # Structural markers, logs, terminal failure, completion: no budget movement.
   defp apply_event(%Event{}, ledger), do: ledger
+
+  defp add_usage(%__MODULE__{} = ledger, %Usage{} = usage) do
+    %{ledger | spent: ledger.spent + usage.total_tokens}
+  end
 end

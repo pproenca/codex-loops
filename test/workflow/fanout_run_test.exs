@@ -9,6 +9,7 @@ defmodule Workflow.FanoutRunTest do
   use ExUnit.Case, async: true
 
   alias Workflow.Event
+  alias Workflow.Event.Payload.FanoutStarted
   alias Workflow.Idempotency
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
@@ -16,6 +17,7 @@ defmodule Workflow.FanoutRunTest do
   alias Workflow.Provider.Usage
   alias Workflow.Run
   alias Workflow.Status
+  alias Workflow.Status.Failure
   alias Workflow.Test.EchoProvider
   alias Workflow.Test.ExplodingProvider
   alias Workflow.Test.GateProvider
@@ -540,13 +542,13 @@ defmodule Workflow.FanoutRunTest do
                :run_completed
              ]
 
-    assert event(id, :fanout_started).payload == %{
+    assert %FanoutStarted{
              address: [0],
              iteration: nil,
              width_expr: 3,
              width: 3,
              bind: nil
-           }
+           } = event(id, :fanout_started).payload
 
     assert committed_addresses(id) == [
              [0, 0, 0],
@@ -568,7 +570,10 @@ defmodule Workflow.FanoutRunTest do
 
     assert types(id) == [:run_started, :fanout_started, :fanout_completed, :run_completed]
     assert event(id, :fanout_started).payload.width == 0
-    assert event(id, :fanout_completed).payload == %{address: [0], iteration: nil}
+
+    assert %Workflow.Event.Payload.FanoutCompleted{address: [0], iteration: nil} =
+             event(id, :fanout_completed).payload
+
     assert committed_addresses(id) == []
     assert Status.of(id).state == :completed
   end
@@ -583,16 +588,16 @@ defmodule Workflow.FanoutRunTest do
 
     assert types(id) == [:run_started, :fanout_started, :fanout_failed]
 
-    assert event(id, :fanout_failed).payload == %{
+    assert %Workflow.Event.Payload.FanoutFailed{
              address: [0],
              iteration: nil,
              reason: :zero_width
-           }
+           } = event(id, :fanout_failed).payload
 
     status = Status.of(id)
     assert status.state == :failed
 
-    assert status.failure == %{
+    assert status.failure == %Failure{
              address: [0],
              iteration: nil,
              attempts: 0,
@@ -613,13 +618,13 @@ defmodule Workflow.FanoutRunTest do
     for _ <- 1..3, do: assert_received({:agent_called, "work"})
     refute_received {:agent_called, _}
 
-    assert event(id, :fanout_started).payload == %{
+    assert %FanoutStarted{
              address: [0],
              iteration: nil,
              width_expr: %BudgetSlices{per: 10, max: 3},
              width: 3,
              bind: nil
-           }
+           } = event(id, :fanout_started).payload
 
     assert committed_addresses(id) == [[0, 0, 0], [0, 1, 0], [0, 2, 0]]
   end

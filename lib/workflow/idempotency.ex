@@ -19,30 +19,37 @@ defmodule Workflow.Idempotency do
   fails that run instead of redelivering a possibly-paid effect.
   """
 
+  alias Workflow.Event
+  alias Workflow.Event.Payload
+  alias Workflow.IdempotencyKey
+
   @type outcome ::
           {:committed, Workflow.Provider.result(), Workflow.Provider.Usage.t()}
           | {:failed, term()}
           | {:resume, pos_integer()}
           | :none
 
-  @spec resolve([Workflow.Event.t()], Workflow.Node.address(), non_neg_integer()) :: outcome()
+  @spec resolve([Event.t()], Workflow.Node.address(), non_neg_integer()) :: outcome()
   def resolve(events, node_path, iteration) do
     # Only agent events carry both `address` and `iteration`, so this keys the fold
     # to exactly this turn's paid effects — phases/logs/run markers are excluded.
     turn =
       Enum.filter(events, fn
-        %{payload: %{address: ^node_path, iteration: ^iteration}} -> true
-        _event -> false
+        %Event{payload: %Payload.AgentStarted{address: ^node_path, iteration: ^iteration}} -> true
+        %Event{payload: %Payload.AgentCommitted{address: ^node_path, iteration: ^iteration}} -> true
+        %Event{payload: %Payload.AgentAttemptRejected{address: ^node_path, iteration: ^iteration}} -> true
+        %Event{payload: %Payload.AgentFailed{address: ^node_path, iteration: ^iteration}} -> true
+        %Event{} -> false
       end)
 
     cond do
-      committed = Enum.find(turn, &(&1.type == :agent_committed)) ->
+      committed = Enum.find(turn, &match?(%Event{payload: %Payload.AgentCommitted{}}, &1)) ->
         {:committed, committed.payload.result, committed.payload.usage}
 
-      failed = Enum.find(turn, &(&1.type == :agent_failed)) ->
+      failed = Enum.find(turn, &match?(%Event{payload: %Payload.AgentFailed{}}, &1)) ->
         {:failed, failed.payload.reason}
 
-      (rejected = Enum.count(turn, &(&1.type == :agent_attempt_rejected))) > 0 ->
+      (rejected = Enum.count(turn, &match?(%Event{payload: %Payload.AgentAttemptRejected{}}, &1))) > 0 ->
         {:resume, rejected}
 
       true ->
@@ -50,35 +57,29 @@ defmodule Workflow.Idempotency do
     end
   end
 
-  @type unsettled_attempt :: %{
-          address: Workflow.Node.address(),
-          iteration: non_neg_integer(),
-          attempt: non_neg_integer()
-        }
-
-  @spec unsettled_attempt([Workflow.Event.t()]) :: {:ok, unsettled_attempt()} | :none
+  @spec unsettled_attempt([Event.t()]) :: {:ok, IdempotencyKey.t()} | :none
   def unsettled_attempt(events) do
     Enum.find_value(events, :none, fn
-      %{type: :agent_started, payload: payload} ->
-        if settled_attempt?(events, payload), do: false, else: {:ok, Map.take(payload, [:address, :iteration, :attempt])}
+      %Event{payload: %Payload.AgentStarted{idempotency_key: %IdempotencyKey{} = key} = payload} ->
+        if settled_attempt?(events, payload), do: false, else: {:ok, key}
 
-      _event ->
+      %Event{} ->
         false
     end)
   end
 
   defp settled_attempt?(events, started) do
     Enum.any?(events, fn
-      %{type: :agent_committed, payload: payload} ->
+      %Event{payload: %Payload.AgentCommitted{} = payload} ->
         same_turn?(payload, started) and payload.idempotency_key.attempt == started.attempt
 
-      %{type: :agent_attempt_rejected, payload: payload} ->
+      %Event{payload: %Payload.AgentAttemptRejected{} = payload} ->
         same_turn?(payload, started) and payload.attempt == started.attempt
 
-      %{type: :agent_failed, payload: payload} ->
+      %Event{payload: %Payload.AgentFailed{} = payload} ->
         same_turn?(payload, started) and payload.attempts > started.attempt
 
-      _event ->
+      %Event{} ->
         false
     end)
   end

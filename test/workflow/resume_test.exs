@@ -156,7 +156,9 @@ defmodule Workflow.ResumeTest do
 
     status = Status.of(id)
     assert status.state == :failed
-    assert status.failure.reason == {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}
+
+    assert status.failure.reason ==
+             {:outcome_unknown, %IdempotencyKey{run_id: id, node_path: [1], iteration: 0, attempt: 0}}
 
     # The already-settled first turn remains one committed journal result.
     committed = Enum.filter(Journal.fold(id), &(&1.type == :agent_committed))
@@ -261,7 +263,10 @@ defmodule Workflow.ResumeTest do
 
     status = Status.of(id)
     assert status.state == :failed
-    assert status.failure.reason == {:outcome_unknown, %{address: [0], iteration: 0, attempt: 0}}
+
+    assert status.failure.reason ==
+             {:outcome_unknown, %IdempotencyKey{run_id: id, node_path: [0], iteration: 0, attempt: 0}}
+
     assert Ledger.of(id).spent == 0
   end
 

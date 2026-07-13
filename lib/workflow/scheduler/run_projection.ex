@@ -7,6 +7,8 @@ defmodule Workflow.Scheduler.RunProjection do
   reads and LiveView renders use the same scheduler snapshot.
   """
 
+  alias Workflow.Event
+  alias Workflow.Event.Payload
   alias Workflow.Idempotency
   alias Workflow.JSONValue
   alias Workflow.Provider.Activity
@@ -15,7 +17,20 @@ defmodule Workflow.Scheduler.RunProjection do
   alias Workflow.Refine.OpenFinding
   alias Workflow.Refine.ReviewerDecision
   alias Workflow.Refine.RoleFailure
+  alias Workflow.Scheduler.LifecycleAction
   alias Workflow.Status
+  alias Workflow.Status.Agent
+  alias Workflow.Status.Failure
+  alias Workflow.Status.Judgment
+  alias Workflow.Status.ProviderFailure
+  alias Workflow.Status.RawRef
+  alias Workflow.Status.RawRefs
+  alias Workflow.Status.Refine
+  alias Workflow.Status.RefineRefs
+  alias Workflow.Status.Rejection
+  alias Workflow.Status.RoleFailureDefect
+  alias Workflow.Status.ToolActivity
+  alias Workflow.Status.Verification
 
   @enforce_keys [
     :run_id,
@@ -75,15 +90,15 @@ defmodule Workflow.Scheduler.RunProjection do
           event_count: non_neg_integer(),
           usage: Usage.t(),
           result: term(),
-          failure: map() | nil,
-          agents: [map()],
-          rejected: [map()],
-          verifications: [map()],
-          judgments: [map()],
-          refines: [map()],
-          tool_activity: [map()],
-          raw_refs: map(),
-          lifecycle_action: map(),
+          failure: Failure.t() | nil,
+          agents: [Agent.t()],
+          rejected: [Rejection.t()],
+          verifications: [Verification.t()],
+          judgments: [Judgment.t()],
+          refines: [Refine.t()],
+          tool_activity: [ToolActivity.t()],
+          raw_refs: RawRefs.t(),
+          lifecycle_action: LifecycleAction.t(),
           ui_path: String.t(),
           ui_url: String.t()
         }
@@ -118,7 +133,8 @@ defmodule Workflow.Scheduler.RunProjection do
     }
   end
 
-  @spec lifecycle_action(Status.t(), keyword()) :: map()
+  @spec lifecycle_action(Status.t()) :: LifecycleAction.t()
+  @spec lifecycle_action(Status.t(), keyword()) :: LifecycleAction.t()
   def lifecycle_action(%Status{} = status, opts \\ []) do
     events = Keyword.get(opts, :events, [])
     running? = Keyword.get(opts, :running?, false)
@@ -136,7 +152,7 @@ defmodule Workflow.Scheduler.RunProjection do
         )
 
       recoverable?(status, events, known?) ->
-        %{
+        %LifecycleAction{
           action: :resume,
           label: "Resume",
           enabled: true,
@@ -167,7 +183,7 @@ defmodule Workflow.Scheduler.RunProjection do
   def to_map(%__MODULE__{} = projection) do
     %{
       "runId" => projection.run_id,
-      "state" => atom_string(projection.state),
+      "state" => JSONValue.stringify(projection.state),
       "treeName" => projection.tree_name,
       "phase" => projection.phase,
       "logs" => projection.logs,
@@ -205,7 +221,7 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp journaled_script_path?(events) do
     Enum.any?(events, fn
-      %{type: :run_started, payload: %{script_path: path}} when is_binary(path) and path != "" ->
+      %Event{payload: %Payload.RunStarted{script_path: path}} when is_binary(path) and path != "" ->
         true
 
       _event ->
@@ -214,7 +230,7 @@ defmodule Workflow.Scheduler.RunProjection do
   end
 
   defp unavailable(action, label, reason) do
-    %{
+    %LifecycleAction{
       action: action,
       label: label,
       enabled: false,
@@ -224,9 +240,9 @@ defmodule Workflow.Scheduler.RunProjection do
     }
   end
 
-  defp lifecycle_action_map(action) do
+  defp lifecycle_action_map(%LifecycleAction{} = action) do
     %{
-      "action" => atom_string(action.action),
+      "action" => JSONValue.stringify(action.action),
       "label" => action.label,
       "enabled" => action.enabled,
       "reason" => action.reason,
@@ -235,68 +251,68 @@ defmodule Workflow.Scheduler.RunProjection do
     }
   end
 
-  defp agent_map(agent) do
+  defp agent_map(%Agent{} = agent) do
     %{
       "address" => agent.address,
       "iteration" => agent.iteration,
-      "label" => Map.get(agent, :label),
+      "label" => agent.label,
       "prompt" => agent.prompt,
       "result" => JSONValue.public(agent.result),
       "usage" => usage_map(agent.usage),
       "idempotencyKey" => idempotency_key_map(agent.idempotency_key),
-      "status" => atom_string(agent.status),
+      "status" => JSONValue.stringify(agent.status),
       "activity" => Enum.map(agent.activity, &activity_map/1),
-      "phaseId" => Map.get(agent, :phase_id),
-      "phaseName" => Map.get(agent, :phase_name)
+      "phaseId" => agent.phase_id,
+      "phaseName" => agent.phase_name
     }
-    |> put_present("attempt", Map.get(agent, :attempt))
-    |> put_present("providerFailure", provider_failure_map(Map.get(agent, :provider_failure)))
+    |> put_present("attempt", agent.attempt)
+    |> put_present("providerFailure", provider_failure_map(agent.provider_failure))
   end
 
-  defp rejected_map(rejection) do
+  defp rejected_map(%Rejection{} = rejection) do
     %{
       "address" => rejection.address,
       "iteration" => rejection.iteration,
       "attempt" => rejection.attempt,
-      "label" => Map.get(rejection, :label),
+      "label" => rejection.label,
       "prompt" => rejection.prompt,
       "output" => JSONValue.public(rejection.output),
       "reason" => inspect(rejection.reason),
       "activity" => Enum.map(rejection.activity, &activity_map/1),
-      "phaseId" => Map.get(rejection, :phase_id),
-      "phaseName" => Map.get(rejection, :phase_name)
+      "phaseId" => rejection.phase_id,
+      "phaseName" => rejection.phase_name
     }
   end
 
-  defp verification_map(verification) do
+  defp verification_map(%Verification{} = verification) do
     %{
       "address" => verification.address,
       "confirmations" => verification.confirmations,
       "total" => verification.total,
-      "threshold" => atom_string(verification.threshold),
+      "threshold" => JSONValue.stringify(verification.threshold),
       "survived" => verification.survived
     }
   end
 
-  defp judgment_map(judgment) do
+  defp judgment_map(%Judgment{} = judgment) do
     %{
       "address" => judgment.address,
       "scores" => JSONValue.public(judgment.scores),
-      "pick" => atom_string(judgment.pick),
+      "pick" => JSONValue.stringify(judgment.pick),
       "winner" => JSONValue.public(judgment.winner)
     }
   end
 
-  defp refine_map(refine) do
+  defp refine_map(%Refine{} = refine) do
     %{
       "address" => refine.address,
-      "state" => atom_string(refine.state),
+      "state" => JSONValue.stringify(refine.state),
       "converged" => refine.converged,
       "rounds" => refine.rounds,
       "finalRound" => refine.final_round,
       "openFindings" => Enum.map(refine.open_findings, &open_finding_map/1),
       "finalOpenDefects" => Enum.map(refine.final_open_defects, &final_open_defect_map/1),
-      "failedReviewers" => Enum.map(refine.failed_reviewers, &atom_string/1),
+      "failedReviewers" => Enum.map(refine.failed_reviewers, &JSONValue.stringify/1),
       "roleFailures" => Enum.map(refine.role_failures, &role_failure_map/1),
       "artifactPreview" => refine.artifact_preview,
       "reviewerDecisions" => Enum.map(refine.reviewer_decisions, &reviewer_decision_map/1),
@@ -308,7 +324,7 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp open_finding_map(%OpenFinding{} = finding) do
     %{
-      "reviewer" => atom_string(finding.reviewer),
+      "reviewer" => JSONValue.stringify(finding.reviewer),
       "reviewerIndex" => finding.reviewer_index,
       "id" => finding.id,
       "issue" => finding.issue,
@@ -316,12 +332,12 @@ defmodule Workflow.Scheduler.RunProjection do
     }
   end
 
-  defp final_open_defect_map(%{kind: :role_failure} = defect) do
+  defp final_open_defect_map(%RoleFailureDefect{} = defect) do
     %{
       "kind" => "role_failure",
-      "role" => atom_string(defect.role),
+      "role" => JSONValue.stringify(defect.role),
       "roleAddress" => defect.role_address,
-      "reviewer" => maybe_atom_string(defect.reviewer),
+      "reviewer" => JSONValue.stringify(defect.reviewer),
       "reviewerIndex" => defect.reviewer_index,
       "id" => defect.id,
       "issue" => defect.issue,
@@ -334,10 +350,10 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp role_failure_map(%RoleFailure{} = failure) do
     %{
-      "role" => atom_string(failure.role),
+      "role" => JSONValue.stringify(failure.role),
       "roleAddress" => failure.role_address,
       "round" => failure.round,
-      "reviewer" => maybe_atom_string(failure.reviewer),
+      "reviewer" => JSONValue.stringify(failure.reviewer),
       "reviewerIndex" => failure.reviewer_index,
       "attempts" => failure.attempts,
       "reason" => reason_json(failure.reason),
@@ -349,36 +365,36 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp reviewer_decision_map(%ReviewerDecision{} = decision) do
     %{
-      "reviewer" => atom_string(decision.reviewer),
+      "reviewer" => JSONValue.stringify(decision.reviewer),
       "reviewerIndex" => decision.reviewer_index,
       "approved" => ReviewerDecision.approved?(decision),
       "clear" => ReviewerDecision.clear?(decision),
-      "adapter" => atom_string(decision.adapter),
-      "status" => atom_string(ReviewerDecision.status(decision))
+      "adapter" => JSONValue.stringify(decision.adapter),
+      "status" => JSONValue.stringify(ReviewerDecision.status(decision))
     }
   end
 
   defp cold_read_map(nil), do: nil
 
-  defp cold_read_map(%{state: :completed} = cold_read) do
+  defp cold_read_map(%ColdRead{state: :completed} = cold_read) do
     %{
       "state" => "completed",
-      "openFindings" => Enum.map(Map.get(cold_read, :open_findings, []), &open_finding_map/1),
-      "reviewerDecision" => reviewer_decision_map(Map.fetch!(cold_read, :reviewer_decision)),
-      "reportSnippets" => Map.get(cold_read, :report_snippets, []),
+      "openFindings" => Enum.map(cold_read.open_findings, &open_finding_map/1),
+      "reviewerDecision" => reviewer_decision_map(cold_read.reviewer_decision),
+      "reportSnippets" => cold_read.report_snippets,
       "repaired" => ColdRead.repaired?(cold_read)
     }
   end
 
-  defp cold_read_map(%{state: :failed} = cold_read) do
+  defp cold_read_map(%ColdRead{state: :failed} = cold_read) do
     %{
       "state" => "failed",
-      "roleFailure" => role_failure_map(Map.fetch!(cold_read, :role_failure)),
+      "roleFailure" => role_failure_map(cold_read.role_failure),
       "repaired" => ColdRead.repaired?(cold_read)
     }
   end
 
-  defp tool_activity_map(activity) do
+  defp tool_activity_map(%ToolActivity{} = activity) do
     %{
       "entry" => activity_map(activity.entry),
       "rawRef" => raw_ref_map(activity.raw_ref)
@@ -386,9 +402,8 @@ defmodule Workflow.Scheduler.RunProjection do
   end
 
   defp activity_map(%Activity{} = activity), do: Activity.to_public_map(activity)
-  defp activity_map(activity), do: JSONValue.public(activity)
 
-  defp refine_raw_refs_map(raw_refs) do
+  defp refine_raw_refs_map(%RefineRefs{} = raw_refs) do
     %{
       "started" => raw_ref_map(raw_refs.started),
       "rounds" => Enum.map(raw_refs.rounds, &raw_ref_map/1),
@@ -401,14 +416,14 @@ defmodule Workflow.Scheduler.RunProjection do
     }
   end
 
-  defp raw_refs_map(raw_refs) do
-    %{"journal" => Enum.map(Map.get(raw_refs, :journal, []), &raw_ref_map/1)}
+  defp raw_refs_map(%RawRefs{} = raw_refs) do
+    %{"journal" => Enum.map(raw_refs.journal, &raw_ref_map/1)}
   end
 
   defp raw_ref_map(nil), do: nil
 
-  defp raw_ref_map(ref) do
-    put_present(%{"runId" => ref.run_id, "seq" => ref.seq, "type" => ref.type}, "address", Map.get(ref, :address))
+  defp raw_ref_map(%RawRef{} = ref) do
+    put_present(%{"runId" => ref.run_id, "seq" => ref.seq, "type" => ref.type}, "address", ref.address)
   end
 
   defp usage_map(%Usage{} = usage) do
@@ -423,7 +438,7 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp encode_failure(nil), do: nil
 
-  defp encode_failure(%{address: address, attempts: attempts, reason: reason}) do
+  defp encode_failure(%Failure{address: address, attempts: attempts, reason: reason}) do
     %{
       "address" => address,
       "attempts" => attempts,
@@ -433,7 +448,7 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp idempotency_key_map(nil), do: nil
 
-  defp idempotency_key_map(key) do
+  defp idempotency_key_map(%Workflow.IdempotencyKey{} = key) do
     %{
       "runId" => key.run_id,
       "nodePath" => key.node_path,
@@ -444,35 +459,16 @@ defmodule Workflow.Scheduler.RunProjection do
 
   defp provider_failure_map(nil), do: nil
 
-  defp provider_failure_map(%{kind: kind, detail: detail}) do
-    %{"kind" => atom_string(kind), "detail" => JSONValue.public(detail)}
+  defp provider_failure_map(%ProviderFailure{kind: kind, detail: detail}) do
+    %{"kind" => JSONValue.stringify(kind), "detail" => JSONValue.public(detail)}
   end
 
-  defp reason_json({:provider_failure, kind, detail}),
-    do: %{"code" => "provider_failure", "kind" => atom_string(kind), "detail" => JSONValue.public(detail)}
-
-  defp reason_json({:malformed_output, detail}), do: %{"code" => "malformed_output", "detail" => inspect(detail)}
-
-  defp reason_json({:reviewer_timeout, timeout}), do: %{"code" => "reviewer_timeout", "timeoutMs" => timeout}
-
-  defp reason_json({:cold_read_timeout, timeout}), do: %{"code" => "cold_read_timeout", "timeoutMs" => timeout}
-
-  defp reason_json({:reviewer_crashed, detail}), do: %{"code" => "reviewer_crashed", "detail" => inspect(detail)}
-
-  defp reason_json({:cold_read_crashed, detail}), do: %{"code" => "cold_read_crashed", "detail" => inspect(detail)}
-
-  defp reason_json({:repair_failed, detail}), do: %{"code" => "repair_failed", "detail" => inspect(detail)}
-
-  defp reason_json(reason) when is_atom(reason), do: %{"code" => Atom.to_string(reason)}
-  defp reason_json(reason), do: %{"code" => "unknown", "detail" => inspect(reason)}
-
-  defp atom_string(nil), do: nil
-  defp atom_string(value) when is_atom(value), do: Atom.to_string(value)
-  defp atom_string(value) when is_binary(value), do: value
-  defp atom_string(value), do: inspect(value)
-
-  defp maybe_atom_string(nil), do: nil
-  defp maybe_atom_string(value), do: atom_string(value)
+  defp reason_json(reason) do
+    RoleFailure.reason_map(reason,
+      provider_detail: &JSONValue.public/1,
+      diagnostic_detail: &inspect/1
+    )
+  end
 
   defp put_present(map, _key, nil), do: map
   defp put_present(map, key, value), do: Map.put(map, key, value)

@@ -21,10 +21,16 @@ defmodule Workflow.Web.RunLive do
   """
   use Phoenix.LiveView
 
+  alias Workflow.Provider.Activity
   alias Workflow.Run.Stream, as: RunStream
   alias Workflow.Scheduler
   alias Workflow.Scheduler.RunProjection
+  alias Workflow.Scheduler.Snapshot
   alias Workflow.Status
+  alias Workflow.Status.Agent
+  alias Workflow.Status.Failure
+  alias Workflow.Status.Phase
+  alias Workflow.Status.Rejection
 
   @refresh_ms 1_000
 
@@ -37,10 +43,8 @@ defmodule Workflow.Web.RunLive do
       socket
       |> assign_projection(run_id, status, RunProjection.from_status(status))
       |> assign(
-        refresh_in_flight: false,
-        refresh_pending: false,
-        refresh_timer: nil,
-        refresh_error: false
+        refresh_state: :idle,
+        refresh_timer: nil
       )
 
     # Subscribe before scheduling the first fold so no commit slips through the
@@ -67,18 +71,18 @@ defmodule Workflow.Web.RunLive do
   end
 
   @impl true
-  def handle_async(:run_snapshot, {:ok, {:ok, %{status: status, run_projection: projection}}}, socket) do
+  def handle_async(:run_snapshot, {:ok, {:ok, %Snapshot{status: status, run_projection: projection}}}, socket) do
     socket = assign_projection(socket, socket.assigns.run_id, status, projection)
     {:noreply, finish_refresh(socket)}
   end
 
   def handle_async(:run_snapshot, {:ok, {:error, _error}}, socket) do
-    socket = assign(socket, refresh_in_flight: false, refresh_pending: false, refresh_error: true)
+    socket = assign(socket, refresh_state: :error)
     {:noreply, schedule_refresh(socket, true)}
   end
 
   def handle_async(:run_snapshot, {:exit, _reason}, socket) do
-    socket = assign(socket, refresh_in_flight: false, refresh_pending: false, refresh_error: true)
+    socket = assign(socket, refresh_state: :error)
     {:noreply, schedule_refresh(socket, true)}
   end
 
@@ -119,10 +123,10 @@ defmodule Workflow.Web.RunLive do
 
   defp scheduler_snapshot(run_id), do: Scheduler.get_run_snapshot(run_id)
 
-  defp request_refresh(%{assigns: %{refresh_in_flight: true}} = socket) do
+  defp request_refresh(%{assigns: %{refresh_state: state}} = socket) when state in [:loading, :pending] do
     socket
     |> cancel_refresh_timer()
-    |> assign(refresh_pending: true)
+    |> assign(refresh_state: :pending)
   end
 
   defp request_refresh(socket) do
@@ -130,22 +134,14 @@ defmodule Workflow.Web.RunLive do
 
     socket
     |> cancel_refresh_timer()
-    |> assign(refresh_in_flight: true, refresh_pending: false)
+    |> assign(refresh_state: :loading)
     |> start_async(:run_snapshot, fn -> scheduler_snapshot(run_id) end, supervisor: Workflow.TaskSupervisor)
   end
 
-  defp finish_refresh(socket) do
-    pending? = socket.assigns.refresh_pending
+  defp finish_refresh(%{assigns: %{refresh_state: :pending}} = socket),
+    do: socket |> assign(refresh_state: :idle) |> request_refresh()
 
-    socket =
-      assign(socket,
-        refresh_in_flight: false,
-        refresh_pending: false,
-        refresh_error: false
-      )
-
-    if pending?, do: request_refresh(socket), else: schedule_refresh(socket, false)
-  end
+  defp finish_refresh(socket), do: socket |> assign(refresh_state: :idle) |> schedule_refresh(false)
 
   defp schedule_refresh(socket, force?) do
     if force? or socket.assigns.status.state == :running do
@@ -258,7 +254,7 @@ defmodule Workflow.Web.RunLive do
         </section>
       </header>
 
-      <p :if={@refresh_error} data-testid="run-refresh-error" role="alert">
+      <p :if={@refresh_state == :error} data-testid="run-refresh-error" role="alert">
         Run data is temporarily unavailable. Retrying…
       </p>
 
@@ -446,7 +442,7 @@ defmodule Workflow.Web.RunLive do
                 <ol :if={rejection.activity != []}>
                   <li :for={entry <- rejection.activity}>
                     <strong>{activity_label(entry)}</strong>
-                    <span :if={activity_status(entry)}> {activity_status(entry)}</span>
+                    <span> {activity_status(entry)}</span>
                     <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
                   </li>
                 </ol>
@@ -465,7 +461,7 @@ defmodule Workflow.Web.RunLive do
                 <ol :if={rejection.activity != []}>
                   <li :for={entry <- rejection.activity}>
                     <strong>{activity_label(entry)}</strong>
-                    <span :if={activity_status(entry)}> {activity_status(entry)}</span>
+                    <span> {activity_status(entry)}</span>
                     <span :if={activity_summary(entry)}> {activity_summary(entry)}</span>
                   </li>
                 </ol>
@@ -513,7 +509,7 @@ defmodule Workflow.Web.RunLive do
     """
   end
 
-  defp first_phase_id(%Status{phases: [%{id: id} | _]}), do: id
+  defp first_phase_id(%Status{phases: [%Phase{id: id} | _]}), do: id
   defp first_phase_id(%Status{}), do: nil
 
   defp valid_phase_id(%Status{} = status, phase_id) when is_binary(phase_id) do
@@ -524,7 +520,7 @@ defmodule Workflow.Web.RunLive do
 
   defp first_agent_id(%Status{} = status, phase_id) do
     case focused_phase(status, phase_id) do
-      %{agents: [agent | _]} -> agent_id(agent)
+      %Phase{agents: [agent | _]} -> agent_id(agent)
       _phase -> nil
     end
   end
@@ -533,7 +529,7 @@ defmodule Workflow.Web.RunLive do
     status
     |> focused_phase(phase_id)
     |> case do
-      %{agents: agents} ->
+      %Phase{agents: agents} ->
         if Enum.any?(agents, &(agent_id(&1) == agent_id)), do: agent_id
 
       _phase ->
@@ -545,7 +541,8 @@ defmodule Workflow.Web.RunLive do
 
   defp focused_phase(%Status{} = status, phase_id), do: Enum.find(status.phases, &(&1.id == phase_id))
 
-  defp phase_status(%Status{state: :failed, failure: %{address: address}}, phase) do
+  defp phase_status(%Status{state: :failed, failure: %Failure{address: address}}, %Phase{} = phase)
+       when is_list(address) do
     if Enum.any?(phase.agents, &List.starts_with?(address, &1.address)) do
       "failed"
     else
@@ -553,32 +550,32 @@ defmodule Workflow.Web.RunLive do
     end
   end
 
-  defp phase_status(%Status{state: :completed}, phase), do: completed_or_pending_phase(phase)
+  defp phase_status(%Status{state: :completed}, %Phase{} = phase), do: completed_or_pending_phase(phase)
 
-  defp phase_status(%Status{current_phase_id: current_phase_id}, %{id: current_phase_id} = phase) do
-    if Enum.any?(phase.agents, &(Map.get(&1, :status) in [:running, "running"])) do
+  defp phase_status(%Status{current_phase_id: current_phase_id}, %Phase{id: current_phase_id} = phase) do
+    if Enum.any?(phase.agents, &(&1.status == :running)) do
       "running"
     else
       completed_or_pending_phase(phase)
     end
   end
 
-  defp phase_status(_status, phase), do: completed_or_pending_phase(phase)
+  defp phase_status(%Status{}, %Phase{} = phase), do: completed_or_pending_phase(phase)
 
-  defp phase_status_label(status, phase) do
+  defp phase_status_label(%Status{} = status, %Phase{} = phase) do
     status
     |> phase_status(phase)
     |> String.capitalize()
   end
 
-  defp completed_count(phase) do
-    Enum.count(phase.agents, &(Map.get(&1, :status) in [:completed, "completed"]))
+  defp completed_count(%Phase{} = phase) do
+    Enum.count(phase.agents, &(&1.status == :completed))
   end
 
-  defp completed_or_pending_phase(%{agents: []}), do: "pending"
+  defp completed_or_pending_phase(%Phase{agents: []}), do: "pending"
 
-  defp completed_or_pending_phase(%{agents: agents}) do
-    if Enum.all?(agents, &(Map.get(&1, :status) in [:completed, "completed"])) do
+  defp completed_or_pending_phase(%Phase{agents: agents}) do
+    if Enum.all?(agents, &(&1.status == :completed)) do
       "completed"
     else
       "running"
@@ -589,20 +586,20 @@ defmodule Workflow.Web.RunLive do
     status
     |> focused_phase(phase_id)
     |> case do
-      %{agents: agents} -> Enum.find(agents, &(agent_id(&1) == agent_id))
+      %Phase{agents: agents} -> Enum.find(agents, &(agent_id(&1) == agent_id))
       _phase -> nil
     end
   end
 
   defp active_agent(%Status{} = status) do
     status.phases
-    |> Enum.flat_map(&Map.get(&1, :agents, []))
+    |> Enum.flat_map(fn %Phase{agents: agents} -> agents end)
     |> Enum.find(&(agent_status(&1) == "running"))
   end
 
   defp detail_rejections(%Status{} = status, phase_id, agent_id) do
     case selected_agent(status, phase_id, agent_id) do
-      %{address: address, iteration: iteration} ->
+      %Agent{address: address, iteration: iteration} ->
         Enum.filter(status.rejected, &(&1.address == address and &1.iteration == iteration))
 
       nil ->
@@ -612,7 +609,7 @@ defmodule Workflow.Web.RunLive do
 
   defp failed_rejections(%Status{failure: nil}, _visible_rejections), do: []
 
-  defp failed_rejections(%Status{failure: %{address: address, iteration: iteration}} = status, visible_rejections) do
+  defp failed_rejections(%Status{failure: %Failure{address: address, iteration: iteration}} = status, visible_rejections) do
     visible = MapSet.new(Enum.map(visible_rejections, &rejection_id/1))
 
     status.rejected
@@ -620,9 +617,9 @@ defmodule Workflow.Web.RunLive do
     |> Enum.reject(&(rejection_id(&1) in visible))
   end
 
-  defp rejection_id(rejection), do: {rejection.address, rejection.iteration, rejection.attempt}
+  defp rejection_id(%Rejection{} = rejection), do: {rejection.address, rejection.iteration, rejection.attempt}
 
-  defp latest_meaningful_event(%Status{} = status, agent, rejections, failed_rejections) do
+  defp latest_meaningful_event(%Status{} = status, %Agent{} = agent, rejections, failed_rejections) do
     cond do
       agent_failed?(status, agent) ->
         "Failed: " <> inspect(status.failure.reason)
@@ -647,21 +644,17 @@ defmodule Workflow.Web.RunLive do
     end
   end
 
-  defp agent_failed?(%Status{failure: %{address: address, iteration: iteration}}, %{
+  defp agent_failed?(%Status{failure: %Failure{address: address, iteration: iteration}}, %Agent{
          address: address,
          iteration: iteration
        }), do: true
 
   defp agent_failed?(%Status{}, _agent), do: false
 
-  defp last_activity(agent) do
-    agent
-    |> Map.get(:activity, [])
-    |> List.last()
-  end
+  defp last_activity(%Agent{} = agent), do: List.last(agent.activity)
 
-  defp rejection_event_line(rejection) do
-    case List.last(Map.get(rejection, :activity, [])) do
+  defp rejection_event_line(%Rejection{} = rejection) do
+    case List.last(rejection.activity) do
       nil -> "Rejected attempt #{rejection.attempt}: " <> inspect(rejection.reason)
       activity -> activity_line(activity)
     end
@@ -683,7 +676,7 @@ defmodule Workflow.Web.RunLive do
   defp attempt_count_text(0, _kind), do: nil
   defp attempt_count_text(count, kind), do: plural_count(count, "#{kind} attempt")
 
-  defp final_outcome_text(agent) do
+  defp final_outcome_text(%Agent{} = agent) do
     cond do
       agent_has_result?(agent) ->
         outcome_preview(agent)
@@ -696,11 +689,12 @@ defmodule Workflow.Web.RunLive do
     end
   end
 
-  defp agent_has_result?(agent), do: Map.has_key?(agent, :result) and not is_nil(Map.get(agent, :result))
+  defp agent_has_result?(%Agent{result: result}), do: not is_nil(result)
 
-  defp agent_id(agent), do: "agent-" <> Enum.map_join(agent.address, "-", &to_string/1) <> "-i#{agent_iteration(agent)}"
+  defp agent_id(%Agent{} = agent),
+    do: "agent-" <> Enum.map_join(agent.address, "-", &to_string/1) <> "-i#{agent.iteration}"
 
-  defp agent_slug(agent) do
+  defp agent_slug(%Agent{} = agent) do
     slug =
       agent
       |> agent_title()
@@ -710,11 +704,9 @@ defmodule Workflow.Web.RunLive do
 
     case slug do
       "" -> agent_id(agent)
-      slug -> "#{slug}-i#{agent_iteration(agent)}"
+      slug -> "#{slug}-i#{agent.iteration}"
     end
   end
-
-  defp agent_iteration(agent), do: Map.get(agent, :iteration, 0)
 
   defp phase_label(nil), do: "No phase"
   defp phase_label(""), do: "No phase"
@@ -733,21 +725,20 @@ defmodule Workflow.Web.RunLive do
 
   defp csrf_token, do: Plug.CSRFProtection.get_csrf_token()
 
-  defp agent_title(%{label: label}) when is_binary(label) and label != "", do: label
+  defp agent_title(%Agent{label: label}) when is_binary(label) and label != "", do: label
 
-  defp agent_title(%{prompt: prompt}), do: prompt |> String.split(~r/\s+/, trim: true) |> Enum.take(4) |> Enum.join(" ")
+  defp agent_title(%Agent{prompt: prompt}),
+    do: prompt |> String.split(~r/\s+/, trim: true) |> Enum.take(4) |> Enum.join(" ")
 
-  defp agent_status(%{status: :completed}), do: "completed"
-  defp agent_status(%{status: :running}), do: "running"
-  defp agent_status(%{status: :failed}), do: "failed"
-  defp agent_status(_agent), do: "pending"
+  defp agent_status(%Agent{status: :completed}), do: "completed"
+  defp agent_status(%Agent{status: :running}), do: "running"
+  defp agent_status(%Agent{status: :failed}), do: "failed"
 
-  defp status_label(%{status: :completed}), do: "Completed"
-  defp status_label(%{status: :running}), do: "Running"
-  defp status_label(%{status: :failed}), do: "Failed"
-  defp status_label(_agent), do: "Pending"
+  defp status_label(%Agent{status: :completed}), do: "Completed"
+  defp status_label(%Agent{status: :running}), do: "Running"
+  defp status_label(%Agent{status: :failed}), do: "Failed"
 
-  defp agent_marker(%Status{} = status, agent) do
+  defp agent_marker(%Status{} = status, %Agent{} = agent) do
     case rejection_count(status, agent) do
       count when count > 0 ->
         plural_count(count, "retry")
@@ -757,31 +748,29 @@ defmodule Workflow.Web.RunLive do
     end
   end
 
-  defp rejection_count(%Status{rejected: rejected}, %{address: address, iteration: iteration}) do
+  defp rejection_count(%Status{rejected: rejected}, %Agent{address: address, iteration: iteration}) do
     Enum.count(rejected, &(&1.address == address and &1.iteration == iteration))
   end
 
-  defp agent_outcome_marker(%{status: :completed}), do: "outcome"
-  defp agent_outcome_marker(%{status: :failed}), do: "failed"
-  defp agent_outcome_marker(%{status: :running}), do: "active"
-  defp agent_outcome_marker(_agent), do: "pending"
+  defp agent_outcome_marker(%Agent{status: :completed}), do: "outcome"
+  defp agent_outcome_marker(%Agent{status: :failed}), do: "failed"
+  defp agent_outcome_marker(%Agent{status: :running}), do: "active"
 
-  defp agent_meta(agent) do
+  defp agent_meta(%Agent{} = agent) do
     Enum.join(
-      ["Codex", format_tokens(total_tokens(Map.get(agent, :usage))), plural_count(tool_count(agent), "tool")],
+      ["Codex", format_tokens(total_tokens(agent.usage)), plural_count(tool_count(agent), "tool")],
       " · "
     )
   end
 
-  defp recent_activity(agent), do: agent |> Map.get(:activity, []) |> Enum.take(-4)
+  defp recent_activity(%Agent{} = agent), do: Enum.take(agent.activity, -4)
 
   defp recent_logs(logs), do: Enum.take(logs, -3)
 
-  defp timeline_activity(agent), do: agent |> full_activity_summary() |> line_preview(1, 120)
+  defp timeline_activity(%Agent{} = agent), do: agent |> full_activity_summary() |> line_preview(1, 120)
 
-  defp full_activity_summary(agent) do
-    agent
-    |> Map.get(:activity, [])
+  defp full_activity_summary(%Agent{} = agent) do
+    agent.activity
     |> List.last()
     |> case do
       nil -> "No activity recorded"
@@ -802,17 +791,11 @@ defmodule Workflow.Web.RunLive do
     |> Enum.join(" · ")
   end
 
-  defp activity_label(entry), do: Map.get(entry, :label) || Map.get(entry, "label") || "Activity"
+  defp activity_label(%Activity{label: label}), do: label
 
-  defp activity_status(entry) do
-    case Map.get(entry, :status) || Map.get(entry, "status") do
-      nil -> nil
-      status when is_atom(status) -> Atom.to_string(status)
-      status when is_binary(status) -> status
-    end
-  end
+  defp activity_status(%Activity{status: status}), do: Atom.to_string(status)
 
-  defp activity_summary(entry), do: Map.get(entry, :summary) || Map.get(entry, "summary")
+  defp activity_summary(%Activity{summary: summary}), do: summary
 
   defp formatted_tool_call(entry) do
     label = activity_label(entry)
@@ -858,10 +841,10 @@ defmodule Workflow.Web.RunLive do
 
   defp prompt_preview(prompt), do: line_preview(prompt, 2, 220)
 
-  defp outcome_preview(%{result: %{"echo" => echo}}) when is_binary(echo), do: line_preview(echo, 8, 260)
-  defp outcome_preview(%{result: result}) when is_binary(result), do: line_preview(result, 8, 260)
+  defp outcome_preview(%Agent{result: %{"echo" => echo}}) when is_binary(echo), do: line_preview(echo, 8, 260)
+  defp outcome_preview(%Agent{result: result}) when is_binary(result), do: line_preview(result, 8, 260)
 
-  defp outcome_preview(%{result: result}) do
+  defp outcome_preview(%Agent{result: result}) do
     result
     |> Jason.encode(pretty: true)
     |> case do
@@ -870,8 +853,6 @@ defmodule Workflow.Web.RunLive do
     end
     |> line_preview(8, 260)
   end
-
-  defp outcome_preview(_agent), do: "pending"
 
   defp run_result_text(:ok), do: "Completed successfully"
   defp run_result_text(result) when is_binary(result), do: result
@@ -903,14 +884,9 @@ defmodule Workflow.Web.RunLive do
   defp total_tokens(%{"total_tokens" => total}) when is_integer(total), do: total
   defp total_tokens(_usage), do: 0
 
-  defp tool_count(agent) do
-    agent
-    |> Map.get(:activity, [])
-    |> Enum.count(&tool_activity?/1)
-  end
+  defp tool_count(%Agent{} = agent), do: Enum.count(agent.activity, &tool_activity?/1)
 
-  defp tool_activity?(entry) do
-    kind = Map.get(entry, :kind) || Map.get(entry, "kind")
+  defp tool_activity?(%Activity{kind: kind} = entry) do
     label = activity_label(entry)
 
     kind == "tool" or

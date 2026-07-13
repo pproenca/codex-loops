@@ -13,9 +13,13 @@ defmodule Workflow.QualityRunTest do
   """
   use ExUnit.Case, async: true
 
+  alias Workflow.Event.Payload.VerifySettled
   alias Workflow.Journal
+  alias Workflow.Refine.ReviewerDecision
   alias Workflow.Run
   alias Workflow.Status
+  alias Workflow.Status.Judgment
+  alias Workflow.Status.Verification
   alias Workflow.Test.EchoProvider
   alias Workflow.Test.ExplodingProvider
   alias Workflow.Test.PanelProvider
@@ -136,19 +140,19 @@ defmodule Workflow.QualityRunTest do
 
     settled = event(id, :verify_settled).payload
 
-    assert settled == %{
+    assert %VerifySettled{
              address: [0],
              confirmations: 2,
              total: 3,
              threshold: :majority,
              survived: true
-           }
+           } = settled
 
     status = Status.of(id)
     assert status.state == :completed
 
     assert status.verifications == [
-             %{address: [0], confirmations: 2, total: 3, threshold: :majority, survived: true}
+             %Verification{address: [0], confirmations: 2, total: 3, threshold: :majority, survived: true}
            ]
   end
 
@@ -166,7 +170,7 @@ defmodule Workflow.QualityRunTest do
     assert settled.survived == false
 
     assert Status.of(id).verifications == [
-             %{address: [0], confirmations: 1, total: 3, threshold: :majority, survived: false}
+             %Verification{address: [0], confirmations: 1, total: 3, threshold: :majority, survived: false}
            ]
   end
 
@@ -184,13 +188,13 @@ defmodule Workflow.QualityRunTest do
 
     settled = event(id, :verify_settled).payload
 
-    assert settled == %{
+    assert %VerifySettled{
              address: [0],
              confirmations: 2,
              total: 3,
              threshold: :majority,
              survived: true
-           }
+           } = settled
 
     assert Status.of(id).state == :completed
   end
@@ -354,13 +358,13 @@ defmodule Workflow.QualityRunTest do
     assert decision.open_findings == []
 
     assert decision.reviewer_decisions == [
-             %{
+             %ReviewerDecision{
                reviewer: :spec,
                reviewer_index: 0,
                adapter: :findings_v1,
                outcome: :clear
              },
-             %{
+             %ReviewerDecision{
                reviewer: :runtime,
                reviewer_index: 1,
                adapter: :findings_v1,
@@ -437,7 +441,7 @@ defmodule Workflow.QualityRunTest do
              ~s(Write up the winning plan.\n\nInputs: ["plan A", "plan B", "plan C"])
 
     assert status.judgments == [
-             %{
+             %Judgment{
                address: [0],
                scores: %{"plan A" => 2, "plan B" => 10, "plan C" => 6},
                pick: :max_score,
@@ -478,13 +482,13 @@ defmodule Workflow.QualityRunTest do
 
     started = event(id, :fanout_started).payload
 
-    assert started == %{
+    assert %Workflow.Event.Payload.FanoutStarted{
              address: [0],
              iteration: nil,
              width_expr: %Workflow.Node.BudgetSlices{per: 10},
              width: 4,
              bind: nil
-           }
+           } = started
 
     assert :fanout_completed in types(id)
 

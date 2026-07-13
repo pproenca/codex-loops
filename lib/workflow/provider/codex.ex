@@ -35,6 +35,7 @@ defmodule Workflow.Provider.Codex do
 
   alias Workflow.Containment
   alias Workflow.Provider.Codex.StreamAccumulator
+  alias Workflow.Schema
 
   @base_exec_args [
     "exec",
@@ -48,6 +49,8 @@ defmodule Workflow.Provider.Codex do
 
   @impl true
   def run_agent(prompt, schema, _key, opts) do
+    schema = schema && Schema.new(schema)
+
     case command(opts, schema) do
       {:ok, {command, schema_file}} ->
         accumulator = new_accumulator(schema, Keyword.get(opts, :activity_sink))
@@ -198,27 +201,9 @@ defmodule Workflow.Provider.Codex do
 
   defp write_schema(schema) do
     path = Path.join(System.tmp_dir!(), "codex_schema_#{System.unique_integer([:positive])}.json")
-    File.write!(path, JSON.encode!(strict_schema(schema)))
+    File.write!(path, JSON.encode!(Schema.strict_map(schema)))
     path
   end
-
-  defp strict_schema(%{"type" => "object"} = schema) do
-    schema
-    |> Map.update("properties", %{}, &strict_schema/1)
-    |> Map.put("additionalProperties", false)
-  end
-
-  defp strict_schema(%{"type" => "array"} = schema) do
-    Map.update(schema, "items", %{}, &strict_schema/1)
-  end
-
-  defp strict_schema(schema) when is_map(schema) do
-    Map.new(schema, fn {key, value} -> {key, strict_schema(value)} end)
-  end
-
-  defp strict_schema([head | tail]), do: [strict_schema(head) | strict_schema(tail)]
-  defp strict_schema([]), do: []
-  defp strict_schema(value), do: value
 
   defp truncate(text, limit) do
     if String.length(text) <= limit, do: text, else: String.slice(text, 0, limit) <> "..."

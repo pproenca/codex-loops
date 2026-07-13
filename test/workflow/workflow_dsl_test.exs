@@ -136,7 +136,7 @@ defmodule Workflow.PathFirstCompilerTest do
     assert {:error, %Script.Error{kind: :syntax, message: message}} = Script.load_tree(path)
     after_load = :erlang.system_info(:atom_count)
 
-    assert message =~ "unknown static atom"
+    assert message =~ "unsafe atom does not exist"
     assert after_load == before
   end
 

@@ -18,6 +18,7 @@ defmodule Workflow.QualityCompilerTest do
   alias Workflow.Node.Return
   alias Workflow.Node.Synthesize
   alias Workflow.Node.Verify
+  alias Workflow.Schema
 
   defp env, do: %{__ENV__ | file: "workflows/quality.ex", line: 1}
   defp parse(source), do: Compiler.compile("test", Code.string_to_quoted!(source), env())
@@ -36,7 +37,7 @@ defmodule Workflow.QualityCompilerTest do
                    %Agent{
                      address: [0, 0],
                      prompt: "Confirm or refute this finding, answering with a boolean verdict: finding",
-                     schema: %{"required" => ["verdict"]} = schema,
+                     schema: schema,
                      retries: 0
                    },
                    %Agent{address: [0, 1]},
@@ -47,7 +48,7 @@ defmodule Workflow.QualityCompilerTest do
              ] = tree.nodes
 
       # Every vote carries the same verdict schema (fail-closed, no retries).
-      assert schema["properties"]["verdict"] == %{"type" => "boolean"}
+      assert Schema.to_map(schema)["properties"]["verdict"] == %{"type" => "boolean"}
       refute contains_function?(tree)
     end
 
@@ -146,8 +147,9 @@ defmodule Workflow.QualityCompilerTest do
                %Return{}
              ] = tree.nodes
 
-      assert sc["required"] == ["score"]
-      assert sc["properties"]["score"] == %{"type" => "number"}
+      schema = Schema.to_map(sc)
+      assert schema["required"] == ["score"]
+      assert schema["properties"]["score"] == %{"type" => "number"}
       refute contains_function?(tree)
     end
 
@@ -235,6 +237,8 @@ defmodule Workflow.QualityCompilerTest do
                %Return{value: :ok}
              ] = tree.nodes
 
+      artifact_schema = Schema.to_map(artifact_schema)
+      review_schema = Schema.to_map(review_schema)
       assert artifact_schema["required"] == ["artifact"]
       assert artifact_schema["additionalProperties"] == false
       assert review_schema["required"] == ["approved", "findings"]

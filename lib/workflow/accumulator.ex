@@ -15,6 +15,7 @@ defmodule Workflow.Accumulator do
   """
 
   alias Workflow.Event
+  alias Workflow.Event.Payload
   alias Workflow.Journal
 
   @doc "Fold the whole journal of `run_id` into `%{acc_name => items}`."
@@ -25,9 +26,11 @@ defmodule Workflow.Accumulator do
   @spec fold([Event.t()]) :: %{atom() => list()}
   def fold(events), do: Enum.reduce(events, %{}, &apply_event/2)
 
-  defp apply_event(%Event{type: :accumulate, payload: p}, acc), do: Map.update(acc, p.into, p.added, &(&1 ++ p.added))
+  defp apply_event(%Event{payload: %Payload.Accumulate{} = payload}, accumulators) do
+    Map.update(accumulators, payload.into, payload.added, &(&1 ++ payload.added))
+  end
 
-  defp apply_event(%Event{}, acc), do: acc
+  defp apply_event(%Event{}, accumulators), do: accumulators
 
   @doc """
   The items in `harvest` that are new relative to `current`, deduping by the
@@ -39,15 +42,15 @@ defmodule Workflow.Accumulator do
     seen = MapSet.new(current, &project(&1, seen_by))
 
     {new, _seen} =
-      Enum.reduce(harvest, {[], seen}, fn item, {new, seen} ->
+      Enum.flat_map_reduce(harvest, seen, fn item, seen ->
         key = project(item, seen_by)
 
         if MapSet.member?(seen, key),
-          do: {new, seen},
-          else: {[item | new], MapSet.put(seen, key)}
+          do: {[], seen},
+          else: {[item], MapSet.put(seen, key)}
       end)
 
-    Enum.reverse(new)
+    new
   end
 
   # An empty field list dedups by the whole item. Otherwise project the named

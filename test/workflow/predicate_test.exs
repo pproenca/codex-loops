@@ -2,7 +2,7 @@ defmodule Workflow.PredicateTest do
   @moduledoc """
   The closed predicate sub-vocabulary at its highest seams: `Predicate.parse/2`
   against `quote`d input (no macro expansion) for the grammar, and
-  `Predicate.evaluate/2` against a plain folded context for the semantics. Anything
+  `Predicate.evaluate/2` against a typed folded context for the semantics. Anything
   outside the vocabulary is rejected at parse (compile) time.
   """
   use ExUnit.Case, async: true
@@ -14,6 +14,7 @@ defmodule Workflow.PredicateTest do
   alias Workflow.Predicate.AnyOf
   alias Workflow.Predicate.BudgetRemaining
   alias Workflow.Predicate.Compare
+  alias Workflow.Predicate.Context
   alias Workflow.Predicate.Count
   alias Workflow.Predicate.Dry
   alias Workflow.Predicate.PathCount
@@ -209,11 +210,34 @@ defmodule Workflow.PredicateTest do
 
       assert f.message =~ "threshold"
     end
+
+    test "binding refs are derived by the predicate vocabulary owner" do
+      first = {:node, [0]}
+      second = {:map, [1]}
+
+      predicate = %AllOf{
+        predicates: [
+          %Compare{
+            op: :==,
+            left: %PathCount{binding: :item, ref: first, pointer: ""},
+            right: 1
+          },
+          %AnyOf{
+            predicates: [
+              %PathExists{binding: :reviews, ref: second, pointer: "/0"},
+              %Dry{rounds: 1, seen_by: []}
+            ]
+          }
+        ]
+      }
+
+      assert Predicate.binding_refs(predicate) == [first, second]
+    end
   end
 
   describe "evaluation over a folded context" do
     defp ctx(accumulators, remaining, opts \\ []) do
-      %{
+      %Context{
         accumulators: accumulators,
         remaining: remaining,
         dry_streak: Keyword.get(opts, :dry_streak, 0),

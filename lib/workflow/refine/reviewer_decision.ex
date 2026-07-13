@@ -1,5 +1,10 @@
 defmodule Workflow.Refine.ReviewerDecision do
-  @moduledoc "The normalized outcome of one reviewer in a refine round."
+  @moduledoc """
+  The normalized outcome of one reviewer in a refine round.
+
+  Journal compatibility is handled at the event boundary. By the time a
+  decision reaches this module, its state is the single `outcome` tag.
+  """
 
   alias Workflow.Refine.ReviewerAdapter
 
@@ -14,9 +19,7 @@ defmodule Workflow.Refine.ReviewerDecision do
           outcome: outcome()
         }
 
-  @spec from_payload(t() | map()) :: t()
-  def from_payload(%__MODULE__{} = decision), do: decision
-
+  @spec from_payload(map()) :: t()
   def from_payload(%{reviewer: reviewer, reviewer_index: reviewer_index, adapter: adapter, outcome: outcome})
       when outcome in [:clear, :approved_with_findings, :rejected, :failed] do
     %__MODULE__{
@@ -24,24 +27,6 @@ defmodule Workflow.Refine.ReviewerDecision do
       reviewer_index: reviewer_index,
       adapter: adapter,
       outcome: outcome
-    }
-  end
-
-  # Compatibility for events written before `outcome` became the single durable
-  # state tag. New events never emit this flag combination.
-  def from_payload(%{
-        reviewer: reviewer,
-        reviewer_index: reviewer_index,
-        approved: approved,
-        clear: clear,
-        adapter: adapter,
-        status: status
-      }) do
-    %__MODULE__{
-      reviewer: reviewer,
-      reviewer_index: reviewer_index,
-      adapter: adapter,
-      outcome: payload_outcome(status, approved, clear)
     }
   end
 
@@ -65,9 +50,4 @@ defmodule Workflow.Refine.ReviewerDecision do
   @spec status(t()) :: :completed | :failed
   def status(%__MODULE__{outcome: :failed}), do: :failed
   def status(%__MODULE__{}), do: :completed
-
-  defp payload_outcome(:failed, _approved, _clear), do: :failed
-  defp payload_outcome(:completed, true, true), do: :clear
-  defp payload_outcome(:completed, true, false), do: :approved_with_findings
-  defp payload_outcome(:completed, false, false), do: :rejected
 end

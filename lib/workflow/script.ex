@@ -60,7 +60,6 @@ defmodule Workflow.Script do
     :teachability,
     :work
   ]
-  @shipped_atom_names Map.new(@shipped_atoms, fn atom -> {Atom.to_string(atom), atom} end)
 
   @spec load_tree(String.t()) :: {:ok, Workflow.Tree.t()} | {:error, Error.t()}
   def load_tree(path) when is_binary(path) do
@@ -120,15 +119,15 @@ defmodule Workflow.Script do
   end
 
   defp quoted(path, source) do
-    # Loading the parsers installs the closed vocabulary's controlled atoms before
-    # the external source reaches the tokenizer.
+    # Load the language vocabulary and the bundled workflows' author-chosen atoms
+    # before untrusted source reaches the existing-atoms-only tokenizer.
     :ok = Code.ensure_all_loaded(@language_modules)
+    :ok = preload_shipped_atoms()
 
     case Code.string_to_quoted(source,
            file: path,
            columns: true,
-           existing_atoms_only: true,
-           static_atoms_encoder: &static_atom/2
+           existing_atoms_only: true
          ) do
       {:ok, ast} ->
         {:ok, retain_source_binaries(ast)}
@@ -138,24 +137,17 @@ defmodule Workflow.Script do
     end
   end
 
+  # Consuming this finite literal list at runtime intentionally retains and loads
+  # its atoms in a fresh release without converting any source-controlled string.
+  defp preload_shipped_atoms do
+    Enum.each(@shipped_atoms, fn atom -> true = is_atom(atom) end)
+  end
+
   defp retain_source_binaries(ast) do
     Macro.prewalk(ast, fn
       value when is_binary(value) -> :binary.copy(value)
       node -> node
     end)
-  end
-
-  defp static_atom(name, _meta) do
-    case Map.fetch(@shipped_atom_names, name) do
-      {:ok, atom} -> {:ok, atom}
-      :error -> existing_atom(name)
-    end
-  end
-
-  defp existing_atom(name) do
-    {:ok, String.to_existing_atom(name)}
-  rescue
-    ArgumentError -> {:error, "unknown static atom #{inspect(name)}"}
   end
 
   defp parser_message(path, meta, message, token) do

@@ -20,6 +20,7 @@ defmodule Workflow.LoopRunTest do
   alias Workflow.Ledger
   alias Workflow.Run
   alias Workflow.Status
+  alias Workflow.Status.Failure
   alias Workflow.Test.EchoProvider
   alias Workflow.Test.ExplodingProvider
   alias Workflow.Test.LoopProvider
@@ -483,12 +484,12 @@ defmodule Workflow.LoopRunTest do
 
     assert [%{payload: completed}] = events(id, :loop_completed)
 
-    assert completed == %{
+    assert %Workflow.Event.Payload.LoopCompleted{
              address: [0],
              iterations: 2,
              exhausted: true,
              reason: :max_iterations
-           }
+           } = completed
 
     assert Status.of(id).state == :completed
   end
@@ -614,12 +615,17 @@ defmodule Workflow.LoopRunTest do
     assert decisions(id) == [:continue, {:exhausted, :fail}]
 
     assert [%{payload: exhausted}] = events(id, :loop_exhausted)
-    assert exhausted == %{address: [0], iterations: 1, reason: :max_iterations}
+
+    assert %Workflow.Event.Payload.LoopExhausted{
+             address: [0],
+             iterations: 1,
+             reason: :max_iterations
+           } = exhausted
 
     status = Status.of(id)
     assert status.state == :failed
 
-    assert status.failure == %{
+    assert status.failure == %Failure{
              address: [0],
              iteration: 1,
              attempts: 0,

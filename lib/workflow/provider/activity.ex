@@ -57,6 +57,13 @@ defmodule Workflow.Provider.Activity do
     end
   end
 
+  @spec normalize_all!([term()]) :: [t()]
+  def normalize_all!(activity) when is_list(activity), do: Enum.map(activity, &normalize!/1)
+
+  @doc "Convert normalized activity to its atom-keyed durable journal representation."
+  @spec to_payload(t()) :: map()
+  def to_payload(%__MODULE__{} = activity), do: Map.from_struct(activity)
+
   @spec with_index(t(), non_neg_integer()) :: t()
   def with_index(%__MODULE__{} = activity, index) when is_integer(index) and index >= 0,
     do: %{activity | activity_index: index}

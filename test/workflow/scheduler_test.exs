@@ -1,10 +1,12 @@
 defmodule Workflow.SchedulerTest do
   use ExUnit.Case, async: false
 
+  alias Workflow.IdempotencyKey
   alias Workflow.Journal
   alias Workflow.Provider.Mock
   alias Workflow.Run
   alias Workflow.Scheduler
+  alias Workflow.Scheduler.LifecycleAction
   alias Workflow.Script
   alias Workflow.Status
   alias Workflow.Test.GateProvider
@@ -302,7 +304,7 @@ defmodule Workflow.SchedulerTest do
 
     assert %{lifecycle_action: completed_action} = wait_for_projection(completed_id)
 
-    assert completed_action == %{
+    assert completed_action == %LifecycleAction{
              action: :none,
              label: "Finished",
              enabled: false,
@@ -345,7 +347,7 @@ defmodule Workflow.SchedulerTest do
     assert {:ok, %{state: :running, lifecycle_action: resume_action}} =
              Scheduler.get_run(running_id)
 
-    assert resume_action == %{
+    assert resume_action == %LifecycleAction{
              action: :resume_unavailable,
              label: "Resume unavailable",
              enabled: false,
@@ -394,7 +396,7 @@ defmodule Workflow.SchedulerTest do
 
     assert {:ok, %{state: :running, lifecycle_action: action}} = Scheduler.get_run(id)
 
-    assert action == %{
+    assert action == %LifecycleAction{
              action: :resume_unavailable,
              label: "Resume unavailable",
              enabled: false,
@@ -527,7 +529,7 @@ defmodule Workflow.SchedulerTest do
            |> Enum.map(& &1.payload.address) == [[0]]
 
     assert projection.failure.reason ==
-             {:outcome_unknown, %{address: [1], iteration: 0, attempt: 0}}
+             {:outcome_unknown, %IdempotencyKey{run_id: id, node_path: [1], iteration: 0, attempt: 0}}
 
     assert {:ok, %{state: :failed, event_count: event_count}} = Scheduler.get_run(id)
     assert event_count == length(Journal.fold(id))

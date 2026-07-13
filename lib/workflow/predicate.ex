@@ -113,6 +113,19 @@ defmodule Workflow.Predicate do
     @type t :: %__MODULE__{predicates: [Workflow.Predicate.t()]}
   end
 
+  defmodule Context do
+    @moduledoc "The complete journal-folded state available to runtime predicates."
+    @enforce_keys [:accumulators, :remaining, :dry_streak, :bindings]
+    defstruct [:accumulators, :remaining, :dry_streak, :bindings]
+
+    @type t :: %__MODULE__{
+            accumulators: %{atom() => list()},
+            remaining: integer() | :infinity,
+            dry_streak: non_neg_integer(),
+            bindings: %{Workflow.Node.binding_ref() => term()}
+          }
+  end
+
   @comparisons [:>, :<, :>=, :<=, :==]
   @binding_ref_kinds [:node, :map, :refine]
 
@@ -127,13 +140,6 @@ defmodule Workflow.Predicate do
           | AnyOf.t()
 
   @type binding_env :: %{atom() => Workflow.Node.binding_ref()}
-
-  @type context :: %{
-          optional(:accumulators) => %{atom() => list()},
-          optional(:remaining) => integer() | :infinity,
-          optional(:dry_streak) => non_neg_integer(),
-          optional(:bindings) => %{Workflow.Node.binding_ref() => term()}
-        }
 
   # --- Compile-time parsing (returns a located Finding on any out-of-vocab form) ---
 
@@ -166,6 +172,19 @@ defmodule Workflow.Predicate do
       {:error, :conflicting_seen_by} = error -> error
     end
   end
+
+  @doc "Return every journal binding ref read by a parsed predicate."
+  @spec binding_refs(t()) :: [Workflow.Node.binding_ref()]
+  def binding_refs(%Compare{left: %PathCount{ref: ref}}), do: [ref]
+  def binding_refs(%Compare{left: %Count{}}), do: []
+  def binding_refs(%Compare{left: %BudgetRemaining{}}), do: []
+  def binding_refs(%Dry{}), do: []
+  def binding_refs(%PathExists{ref: ref}), do: [ref]
+  def binding_refs(%PathNonEmpty{ref: ref}), do: [ref]
+  def binding_refs(%PathEquals{ref: ref}), do: [ref]
+  def binding_refs(%Agree{ref: ref}), do: [ref]
+  def binding_refs(%AllOf{predicates: predicates}), do: Enum.flat_map(predicates, &binding_refs/1)
+  def binding_refs(%AnyOf{predicates: predicates}), do: Enum.flat_map(predicates, &binding_refs/1)
 
   defp predicate({op, _meta, [left, right]} = form, env, binding_env) when op in @comparisons do
     with {:ok, operand} <- operand(left, form, env, binding_env),
@@ -370,77 +389,13 @@ defmodule Workflow.Predicate do
   defp json_pointer(_pointer, form, env),
     do: {:error, Finding.at(env, form, "predicate JSON pointer must be a literal string")}
 
-  defp literal_to_json(nil, _form, _env), do: {:ok, nil}
-  defp literal_to_json(value, _form, _env) when is_boolean(value), do: {:ok, value}
-  defp literal_to_json(value, _form, _env) when is_integer(value), do: {:ok, value}
-  defp literal_to_json(value, _form, _env) when is_binary(value), do: {:ok, value}
-
-  defp literal_to_json(value, form, env) when is_float(value) do
-    if finite_float?(value) do
-      {:ok, value}
-    else
-      literal_error({:error, :non_finite_float}, form, env)
-    end
-  end
-
-  defp literal_to_json(value, _form, _env) when is_atom(value), do: {:ok, Atom.to_string(value)}
-
-  defp literal_to_json(values, form, env) when is_list(values) do
-    values
-    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
-      case literal_to_json(value, form, env) do
-        {:ok, json} -> {:cont, {:ok, [json | acc]}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, acc} -> {:ok, Enum.reverse(acc)}
-      {:error, _} = err -> literal_error(err, form, env)
-    end
-  end
-
-  defp literal_to_json({:%{}, _meta, pairs}, form, env) do
-    pairs
-    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key_ast, value_ast}, {:ok, acc, seen} ->
-      with {:ok, key} <- literal_key_to_json(key_ast, form, env),
-           false <- MapSet.member?(seen, key),
-           {:ok, value} <- literal_to_json(value_ast, form, env) do
-        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
-      else
-        true -> {:halt, {:error, :duplicate_key}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, acc, _seen} -> {:ok, acc}
-      {:error, _} = err -> literal_error(err, form, env)
-    end
-  end
-
-  defp literal_to_json(value, form, env) when is_map(value) and not is_struct(value) do
+  defp literal_to_json(value, form, env) do
     value
-    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key, item}, {:ok, acc, seen} ->
-      with {:ok, key} <- literal_key_to_json(key, form, env),
-           false <- MapSet.member?(seen, key),
-           {:ok, value} <- literal_to_json(item, form, env) do
-        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
-      else
-        true -> {:halt, {:error, :duplicate_key}}
-        {:error, _} = err -> {:halt, err}
-      end
-    end)
-    |> case do
-      {:ok, acc, _seen} -> {:ok, acc}
-      {:error, _} = err -> literal_error(err, form, env)
-    end
+    |> JSONValue.from_literal(:finite_floats)
+    |> literal_error(form, env)
   end
 
-  defp literal_to_json(_value, form, env), do: literal_error({:error, :not_json}, form, env)
-
-  defp literal_key_to_json(key, _form, _env) when is_binary(key), do: {:ok, key}
-  defp literal_key_to_json(key, _form, _env) when is_atom(key), do: {:ok, Atom.to_string(key)}
-
-  defp literal_key_to_json(_key, _form, _env), do: {:error, :invalid_key}
+  defp literal_error({:ok, _value} = result, _form, _env), do: result
 
   defp literal_error({:error, :duplicate_key}, form, env),
     do: {:error, Finding.at(env, form, "predicate literal has duplicate object key")}
@@ -496,10 +451,10 @@ defmodule Workflow.Predicate do
   # --- Runtime evaluation (pure over a journal-folded context) ---
 
   @doc "Evaluate a parsed predicate against a folded journal context."
-  @spec evaluate(t(), context()) :: boolean()
+  @spec evaluate(t(), Context.t()) :: boolean()
   def evaluate(%Compare{op: op, left: left, right: right}, ctx), do: compare(op, resolve(left, ctx), right)
 
-  def evaluate(%Dry{rounds: rounds}, ctx), do: dry_streak(ctx) >= rounds
+  def evaluate(%Dry{rounds: rounds}, %Context{dry_streak: dry_streak}), do: dry_streak >= rounds
 
   def evaluate(%PathExists{ref: ref, pointer: pointer}, ctx),
     do: match?({:present, _value}, resolve_path(resolve_ref(ref, ctx), pointer))
@@ -509,7 +464,7 @@ defmodule Workflow.Predicate do
 
   def evaluate(%PathEquals{ref: ref, pointer: pointer, literal: literal}, ctx) do
     case ref |> resolve_ref(ctx) |> resolve_path(pointer) do
-      {:present, value} -> json_equal?(value, literal)
+      {:present, value} -> JSONValue.equal?(value, literal)
       :missing -> false
     end
   end
@@ -520,17 +475,15 @@ defmodule Workflow.Predicate do
   def evaluate(%AllOf{predicates: preds}, ctx), do: Enum.all?(preds, &evaluate(&1, ctx))
   def evaluate(%AnyOf{predicates: preds}, ctx), do: Enum.any?(preds, &evaluate(&1, ctx))
 
-  defp resolve(%Count{acc: acc}, ctx), do: ctx |> Map.get(:accumulators, %{}) |> Map.get(acc, []) |> length()
+  defp resolve(%Count{acc: acc}, %Context{accumulators: accumulators}), do: accumulators |> Map.get(acc, []) |> length()
 
-  defp resolve(%BudgetRemaining{}, ctx), do: Map.get(ctx, :remaining, :infinity)
+  defp resolve(%BudgetRemaining{}, %Context{remaining: remaining}), do: remaining
 
   defp resolve(%PathCount{ref: ref, pointer: pointer}, ctx),
     do: ref |> resolve_ref(ctx) |> resolve_path(pointer) |> JSONValue.count_resolution()
 
-  defp dry_streak(ctx), do: Map.get(ctx, :dry_streak, 0)
-
-  defp resolve_ref(ref, ctx) do
-    case Map.fetch(Map.get(ctx, :bindings, %{}), ref) do
+  defp resolve_ref(ref, %Context{bindings: bindings}) do
+    case Map.fetch(bindings, ref) do
       {:ok, value} -> value
       :error -> :missing
     end
@@ -553,7 +506,7 @@ defmodule Workflow.Predicate do
     matches =
       Enum.count(value, fn item ->
         case JSONPointer.resolve(item, pointer) do
-          {:present, candidate} -> json_equal?(candidate, literal)
+          {:present, candidate} -> JSONValue.equal?(candidate, literal)
           :missing -> false
         end
       end)
@@ -566,55 +519,4 @@ defmodule Workflow.Predicate do
   end
 
   defp agree?(_value, _pointer, _literal, _threshold), do: false
-
-  defp json_equal?(nil, nil), do: true
-  defp json_equal?(left, right) when is_boolean(left) and is_boolean(right), do: left == right
-  defp json_equal?(left, right) when is_integer(left) and is_integer(right), do: left == right
-
-  defp json_equal?(left, right) when is_float(left) and is_float(right),
-    do: finite_float?(left) and finite_float?(right) and left == right
-
-  defp json_equal?(left, right) when is_binary(left) and is_binary(right), do: left == right
-
-  defp json_equal?(left, right) when is_list(left) and is_list(right) do
-    length(left) == length(right) and
-      left
-      |> Enum.zip(right)
-      |> Enum.all?(fn {left_item, right_item} -> json_equal?(left_item, right_item) end)
-  end
-
-  defp json_equal?(left, right) when is_map(left) and is_map(right) do
-    with {:ok, left} <- normalize_json_object(left),
-         {:ok, right} <- normalize_json_object(right),
-         true <- Enum.sort(Map.keys(left)) == Enum.sort(Map.keys(right)) do
-      Enum.all?(left, fn {key, left_value} -> json_equal?(left_value, Map.fetch!(right, key)) end)
-    else
-      _other -> false
-    end
-  end
-
-  defp json_equal?(_left, _right), do: false
-
-  defp normalize_json_object(map) do
-    map
-    |> Enum.reduce_while({:ok, %{}, MapSet.new()}, fn {key, value}, {:ok, acc, seen} ->
-      with {:ok, key} <- runtime_object_key(key),
-           false <- MapSet.member?(seen, key) do
-        {:cont, {:ok, Map.put(acc, key, value), MapSet.put(seen, key)}}
-      else
-        true -> {:halt, :error}
-        :error -> {:halt, :error}
-      end
-    end)
-    |> case do
-      {:ok, normalized, _seen} -> {:ok, normalized}
-      :error -> :error
-    end
-  end
-
-  defp runtime_object_key(key) when is_binary(key), do: {:ok, key}
-  defp runtime_object_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
-  defp runtime_object_key(_key), do: :error
-
-  defp finite_float?(value) when is_float(value), do: value - value == 0.0
 end

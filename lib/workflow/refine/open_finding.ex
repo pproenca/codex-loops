@@ -12,9 +12,7 @@ defmodule Workflow.Refine.OpenFinding do
           fix: String.t()
         }
 
-  @spec from_payload(t() | map()) :: t()
-  def from_payload(%__MODULE__{} = finding), do: finding
-
+  @spec from_payload(map()) :: t()
   def from_payload(%{reviewer: reviewer, reviewer_index: reviewer_index, id: id, issue: issue, fix: fix}) do
     %__MODULE__{
       reviewer: reviewer,

@@ -8,6 +8,10 @@ defmodule Workflow.StatusProjectionTest do
   alias Workflow.Node.Loop
   alias Workflow.Node.Phase
   alias Workflow.Node.Refine
+  alias Workflow.Node.Refine.ColdReadGate
+  alias Workflow.Node.Refine.Gates
+  alias Workflow.Node.Refine.HaltGate
+  alias Workflow.Node.Refine.RepairGate
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Usage
   alias Workflow.Refine.OpenFinding
@@ -18,6 +22,7 @@ defmodule Workflow.StatusProjectionTest do
   alias Workflow.Refine.TerminalProjection
   alias Workflow.Scheduler.RunProjection
   alias Workflow.Status
+  alias Workflow.Status.Failure
   alias Workflow.Tree
 
   defp activity_fields(%Activity{} = activity) do
@@ -33,6 +38,23 @@ defmodule Workflow.StatusProjectionTest do
   end
 
   defp normalized_activity_fields(activity), do: activity |> Activity.normalize!() |> activity_fields()
+
+  defp round_decision!(attrs) do
+    defaults = %{role_failures: [], failed_reviewers: [], report_snippets: []}
+    struct!(RoundDecision, Map.merge(defaults, attrs))
+  end
+
+  defp terminal_projection!(attrs) do
+    defaults = %{
+      role_failures: [],
+      failed_reviewers: [],
+      reviewer_decisions: [],
+      report_snippets: [],
+      cold_read: nil
+    }
+
+    struct!(TerminalProjection, Map.merge(defaults, attrs))
+  end
 
   test "durable progress activity updates the running agent and raw journal refs" do
     run_id = "status_projection_progress"
@@ -167,12 +189,13 @@ defmodule Workflow.StatusProjectionTest do
       status: "running"
     }
 
-    failed_activity = %{
-      kind: "provider",
-      label: "Cold read",
-      summary: "timed out",
-      status: "failed"
-    }
+    failed_activity =
+      Activity.normalize!(%{
+        kind: "provider",
+        label: "Cold read",
+        summary: "timed out",
+        status: "failed"
+      })
 
     role_failure = %RoleFailure{
       address: [0],
@@ -192,7 +215,9 @@ defmodule Workflow.StatusProjectionTest do
       stamp(
         [
           Event.run_started(%Tree{name: "refine-status", nodes: [node]}),
-          node |> Event.refine_started() |> put_in([Access.key!(:payload), :future_payload_key], :ignored_by_status),
+          node
+          |> Event.refine_started()
+          |> then(fn event -> %{event | payload: Map.put(event.payload, :future_payload_key, :ignored_by_status)} end),
           Event.refine_round_started(node, 0, "draft-v1"),
           Event.agent_activity(cold_reader, 0, 0, 0, streamed_activity),
           Event.agent_committed(
@@ -212,7 +237,7 @@ defmodule Workflow.StatusProjectionTest do
           Event.refine_round_decision(
             node,
             0,
-            RoundDecision.from_payload(%{
+            round_decision!(%{
               consensus: false,
               approval_count: 0,
               total: 1,
@@ -233,7 +258,7 @@ defmodule Workflow.StatusProjectionTest do
           ),
           Event.refine_completed(
             node,
-            TerminalProjection.from_payload(%{
+            terminal_projection!(%{
               converged: true,
               final_round: 0,
               rounds: 1,
@@ -253,7 +278,7 @@ defmodule Workflow.StatusProjectionTest do
     started_event = Enum.find(events, &(&1.type == :refine_started))
 
     assert started_event.payload.review_schema_version == 1
-    assert started_event.payload.future_payload_key == :ignored_by_status
+    assert Map.fetch!(started_event.payload, :future_payload_key) == :ignored_by_status
 
     assert Enum.map(status.raw_refs.journal, & &1.seq) == Enum.to_list(0..9)
 
@@ -330,7 +355,7 @@ defmodule Workflow.StatusProjectionTest do
 
     assert status.state == :failed
 
-    assert status.failure == %{
+    assert status.failure == %Failure{
              address: [0],
              iteration: nil,
              attempts: 0,
@@ -368,7 +393,7 @@ defmodule Workflow.StatusProjectionTest do
 
     assert status.state == :failed
 
-    assert status.failure == %{
+    assert status.failure == %Failure{
              address: [0],
              iteration: 1,
              attempts: 0,
@@ -412,8 +437,8 @@ defmodule Workflow.StatusProjectionTest do
       reviser: reviser,
       until: :unanimous,
       max_rounds: 2,
-      gates: %{
-        cold_read: %{
+      gates: %Gates{
+        cold_read: %ColdReadGate{
           predicate: {:path_non_empty, "/openFindings"},
           reviewer: %Reviewer{
             index: 0,
@@ -423,8 +448,8 @@ defmodule Workflow.StatusProjectionTest do
             agent: cold_reader
           }
         },
-        repair: %{predicate: {:path_non_empty, "/openFindings"}, agent: repairer},
-        halt: %{predicate: {:path_count, "/openFindings", :>, 3}}
+        repair: %RepairGate{predicate: {:path_non_empty, "/openFindings"}, agent: repairer},
+        halt: %HaltGate{predicate: {:path_count, "/openFindings", :>, 3}}
       }
     }
   end

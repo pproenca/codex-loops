@@ -3,10 +3,13 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
 
   alias Workflow.JSONValue
   alias Workflow.Provider.Activity
+  alias Workflow.Provider.Codex.Event
+  alias Workflow.Provider.Codex.EventEffect
+  alias Workflow.Provider.Codex.EventEffect.Value, as: Effect
   alias Workflow.Provider.Usage
 
   @type t :: %__MODULE__{
-          schema: map() | nil,
+          schema: Workflow.Schema.t() | nil,
           activity_sink: (Activity.t() -> non_neg_integer()) | nil,
           final_message: String.t() | nil,
           usage: Usage.t() | nil,
@@ -28,7 +31,7 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
   def observe_line(%__MODULE__{} = acc, line) when is_binary(line) do
     case JSON.decode(line) do
       {:ok, event} when is_map(event) ->
-        observe_event(acc, copy_json(event))
+        observe_event(acc, Event.normalize(event))
 
       {:ok, decoded} ->
         put_failure(acc, :backend, %{
@@ -66,54 +69,32 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
   def partial(%__MODULE__{} = acc), do: {acc.usage, activity(acc)}
 
   defp observe_event(%__MODULE__{} = acc, event) do
+    %Effect{failure: failure, final_message: final_message, usage: usage, activity: entries} =
+      EventEffect.effect(event)
+
     acc
-    |> update_failure(event)
-    |> update_final_message(event)
-    |> update_usage(event)
-    |> update_activity(event)
+    |> maybe_put_failure(failure)
+    |> maybe_put_final_message(final_message)
+    |> maybe_put_usage(usage)
+    |> put_activity(entries)
   end
 
-  defp update_failure(acc, %{"type" => "turn.failed", "error" => %{"message" => message} = error}) do
-    put_failure(acc, :backend, Map.put(error, "message", message))
-  end
-
-  defp update_failure(acc, %{"type" => "turn.failed", "error" => error}) do
-    put_failure(acc, :backend, %{"message" => "codex turn failed", "error" => JSONValue.public(error)})
-  end
-
-  defp update_failure(acc, %{"type" => "error", "message" => message}) do
-    put_failure(acc, :backend, %{"message" => message})
-  end
-
-  defp update_failure(acc, _event), do: acc
+  defp maybe_put_failure(acc, nil), do: acc
+  defp maybe_put_failure(acc, {kind, detail}), do: put_failure(acc, kind, detail)
 
   defp put_failure(%__MODULE__{failure: nil} = acc, kind, detail), do: %{acc | failure: {kind, detail}}
   defp put_failure(%__MODULE__{} = acc, _kind, _detail), do: acc
 
-  defp update_final_message(%__MODULE__{} = acc, %{
-         "type" => "item.completed",
-         "item" => %{"type" => "agent_message", "text" => text}
-       })
-       when is_binary(text) do
-    %{acc | final_message: :binary.copy(text)}
-  end
+  defp maybe_put_final_message(acc, nil), do: acc
+  defp maybe_put_final_message(acc, final_message), do: %{acc | final_message: final_message}
 
-  defp update_final_message(%__MODULE__{} = acc, _event), do: acc
+  defp maybe_put_usage(acc, nil), do: acc
+  defp maybe_put_usage(acc, usage), do: %{acc | usage: usage}
 
-  defp update_usage(%__MODULE__{} = acc, %{"type" => "turn.completed", "usage" => usage}) when is_map(usage) do
-    input = Map.get(usage, "input_tokens", 0)
-    output = Map.get(usage, "output_tokens", 0)
-    %{acc | usage: %Usage{input_tokens: input, output_tokens: output, total_tokens: input + output}}
-  end
-
-  defp update_usage(%__MODULE__{} = acc, _event), do: acc
-
-  defp update_activity(%__MODULE__{} = acc, event) do
+  defp put_activity(acc, entries) do
     activity_rev =
-      event
-      |> activity_entries()
-      |> Enum.reduce(acc.activity_rev, fn entry, entries ->
-        [emit_activity(acc.activity_sink, entry) | entries]
+      Enum.reduce(entries, acc.activity_rev, fn entry, activity_rev ->
+        [emit_activity(acc.activity_sink, entry) | activity_rev]
       end)
 
     %{acc | activity_rev: activity_rev}
@@ -129,82 +110,10 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
 
   defp shape(text, _schema) do
     case JSON.decode(text) do
-      {:ok, value} -> copy_json(value)
+      {:ok, value} -> JSONValue.copy(value)
       {:error, _reason} -> text
     end
   end
-
-  defp activity_entries(%{"type" => "thread.started", "thread_id" => thread_id}) do
-    [
-      %Activity{
-        kind: "lifecycle",
-        label: "Thread started",
-        summary: :binary.copy(thread_id),
-        status: :running
-      }
-    ]
-  end
-
-  defp activity_entries(%{"type" => "turn.started"}) do
-    [%Activity{kind: "lifecycle", label: "Turn started", summary: nil, status: :running}]
-  end
-
-  defp activity_entries(%{"type" => event_type, "item" => %{"type" => "agent_message"} = item}) do
-    case message_text(item) do
-      "" ->
-        []
-
-      text ->
-        [%Activity{kind: "output", label: "Assistant", summary: truncate(text, 180), status: message_status(event_type)}]
-    end
-  end
-
-  defp activity_entries(%{"type" => "item.completed", "item" => %{"type" => "reasoning"} = item}) do
-    [%Activity{kind: "reasoning", label: "Reasoning", summary: item_summary(item), status: :completed}]
-  end
-
-  defp activity_entries(%{"type" => "item.completed", "item" => %{"type" => "tool_call"} = item}) do
-    label = Map.get(item, "name") || Map.get(item, "tool_name") || "Tool"
-    [%Activity{kind: "tool", label: :binary.copy(label), summary: item_summary(item), status: :completed}]
-  end
-
-  defp activity_entries(%{"type" => "item.completed", "item" => %{"type" => type} = item}) do
-    [%Activity{kind: "event", label: labelize(type), summary: item_summary(item), status: :completed}]
-  end
-
-  defp activity_entries(_event), do: []
-
-  defp message_text(item), do: item |> Map.get("text") |> message_text_part()
-
-  defp message_text_part(text) when is_binary(text), do: text
-  defp message_text_part([%{"text" => text} | _]) when is_binary(text), do: text
-  defp message_text_part(_value), do: ""
-
-  defp message_status("item.completed"), do: :completed
-  defp message_status(_event_type), do: :running
-
-  defp item_summary(item) do
-    item
-    |> summary_value()
-    |> to_summary()
-    |> truncate(180)
-  end
-
-  defp summary_value(item) do
-    Map.get(item, "text") ||
-      Map.get(item, "summary") ||
-      Map.get(item, "command") ||
-      get_in(item, ["input", "cmd"]) ||
-      Map.get(item, "input") ||
-      Map.get(item, "arguments") ||
-      Map.get(item, "output") ||
-      Map.get(item, "type")
-  end
-
-  defp to_summary(value) when is_binary(value), do: value
-  defp to_summary([%{"text" => text} | _]) when is_binary(text), do: text
-  defp to_summary(value) when is_map(value), do: JSON.encode!(value)
-  defp to_summary(value), do: inspect(value)
 
   defp truncate(text, limit) do
     if String.length(text) <= limit,
@@ -212,20 +121,5 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
       else: :binary.copy(String.slice(text, 0, limit)) <> "..."
   end
 
-  defp labelize(type) when is_binary(type) do
-    type
-    |> String.replace("_", " ")
-    |> String.capitalize()
-  end
-
   defp activity(%__MODULE__{activity_rev: activity_rev}), do: Enum.reverse(activity_rev)
-
-  defp copy_json(value) when is_binary(value), do: :binary.copy(value)
-  defp copy_json(value) when is_list(value), do: Enum.map(value, &copy_json/1)
-
-  defp copy_json(value) when is_map(value) do
-    Map.new(value, fn {key, item} -> {copy_json(key), copy_json(item)} end)
-  end
-
-  defp copy_json(value), do: value
 end

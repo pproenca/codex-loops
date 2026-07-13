@@ -26,4 +26,13 @@ defmodule Workflow.IdempotencyKey do
           iteration: non_neg_integer(),
           attempt: non_neg_integer()
         }
+
+  @spec attempt_map(t()) :: %{
+          address: Workflow.Node.address(),
+          iteration: non_neg_integer(),
+          attempt: non_neg_integer()
+        }
+  def attempt_map(%__MODULE__{node_path: address, iteration: iteration, attempt: attempt}) do
+    %{address: address, iteration: iteration, attempt: attempt}
+  end
 end

@@ -8,34 +8,35 @@ pub(super) enum OutputMode {
 
 pub(super) async fn spawn_scheduler(
     client: &SchedulerClient,
-    options: &StartOptions,
+    config: &SchedulerConfig,
+    output_mode: OutputMode,
+) -> AppResult<Child> {
+    let client = client.clone();
+    let config = config.clone();
+    blocking("start the packaged scheduler", move || {
+        spawn_scheduler_blocking(&client, &config, output_mode)
+    })
+    .await
+}
+
+fn spawn_scheduler_blocking(
+    client: &SchedulerClient,
+    config: &SchedulerConfig,
     output_mode: OutputMode,
 ) -> AppResult<Child> {
     let runtime_dir = runtime_dir(client)?;
-    let runtime = Runtime::installed()?;
-    let release = runtime.bundle.scheduler;
+    let bundle = crate::runtime::Bundle::installed()?;
+    let release = bundle.scheduler();
     let port = scheduler_port(client)?;
-    let bind_host = options
-        .bind_host
-        .clone()
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| {
-            client
-                .base_url()
-                .host_str()
-                .unwrap_or("127.0.0.1")
-                .trim_matches(['[', ']'])
-                .into()
-        });
-    let mut command = scheduler_command(&release, &runtime_dir);
+    let mut command = scheduler_command(&release, runtime_dir.as_path());
     command
         .env("CODEX_LOOPS_SERVER", "1")
-        .env("CODEX_LOOPS_HOST", bind_host)
+        .env("CODEX_LOOPS_HOST", config.bind_host.as_str())
         .env("CODEX_LOOPS_PORT", port.to_string())
         .env("PORT", port.to_string())
         .env("RELEASE_DISTRIBUTION", "none")
         .env("RELEASE_TMP", runtime_dir.join("release"))
-        .env("CODEX_LOOPS_CODEX_BIN", runtime.bundle.control_plane)
+        .env("CODEX_LOOPS_CODEX_BIN", bundle.control_plane())
         .env_remove("CODEX_LOOPS_INTERNAL_DAEMON")
         .env_remove("ROOTDIR")
         .env_remove("BINDIR")
@@ -53,15 +54,15 @@ pub(super) async fn spawn_scheduler(
                 .stderr(Stdio::from(error_log));
         }
     }
-    if let Some(journal) = &options.journal {
-        command.env("CODEX_LOOPS_JOURNAL_PATH", journal);
+    if let Some(journal) = &config.journal {
+        command.env("CODEX_LOOPS_JOURNAL_PATH", journal.as_path());
     }
-    if let Some(model) = &options.model {
+    if let Some(model) = &config.model {
         command.env("CODEX_LOOPS_CODEX_MODEL", model);
     }
     command.spawn().map_err(|error| {
         AppError::new(
-            6,
+            ExitStatus::Runtime,
             "scheduler_start_failed",
             "Could not start the scheduler release.",
         )
@@ -80,11 +81,11 @@ fn scheduler_command(release: &Path, runtime_dir: &Path) -> Command {
 
 pub(super) async fn publish_metadata(
     child: &mut Child,
-    writer: impl FnOnce() -> AppResult<()>,
+    publication: AppResult<()>,
 ) -> AppResult<()> {
-    if let Err(error) = writer() {
+    if let Err(error) = publication {
         if let Err(cleanup_error) = terminate_child(child).await {
-            return Err(AppError::new(6, "scheduler_cleanup_failed", "Scheduler startup failed and its child cleanup also failed.")
+            return Err(AppError::new(ExitStatus::Runtime, "scheduler_cleanup_failed", "Scheduler startup failed and its child cleanup also failed.")
                 .details(json!({"startup_error": error.diagnostic(), "cleanup_error": cleanup_error.diagnostic()})));
         }
         return Err(error);
@@ -95,33 +96,48 @@ pub(super) async fn publish_metadata(
 pub(super) async fn spawn_supervisor(
     client: &SchedulerClient,
     options: &StartOptions,
-    owner_token: &str,
+    owner_token: &OwnerToken,
+) -> AppResult<()> {
+    let client = client.clone();
+    let options = options.clone();
+    let owner_token = owner_token.clone();
+    blocking("start the scheduler supervisor", move || {
+        spawn_supervisor_blocking(&client, &options, &owner_token)
+    })
+    .await
+}
+
+fn spawn_supervisor_blocking(
+    client: &SchedulerClient,
+    options: &StartOptions,
+    owner_token: &OwnerToken,
 ) -> AppResult<()> {
     let executable = env::current_exe().map_err(io_error("runtime_invalid"))?;
     let log = open_log(&log_path(client)?)?;
     let error_log = log.try_clone().map_err(io_error("scheduler_log_failed"))?;
+    let runtime_dir = runtime_dir(client)?;
     let mut command = Command::new(executable);
     command
         .arg("daemon")
         .env("CODEX_LOOPS_INTERNAL_DAEMON", "1")
-        .env("CODEX_LOOPS_OWNER_TOKEN", owner_token)
+        .env("CODEX_LOOPS_OWNER_TOKEN", owner_token.as_str())
         .env("CODEX_LOOPS_SCHEDULER_URL", client.base_url().as_str())
-        .env("CODEX_LOOPS_RUNTIME_DIR", runtime_dir(client)?)
+        .env("CODEX_LOOPS_RUNTIME_DIR", runtime_dir.as_path())
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(error_log));
     if let Some(bind_host) = &options.bind_host {
-        command.env("CODEX_LOOPS_BIND_HOST", bind_host);
+        command.env("CODEX_LOOPS_BIND_HOST", bind_host.as_str());
     }
     if let Some(journal) = &options.journal {
-        command.env("CODEX_LOOPS_JOURNAL_PATH", journal);
+        command.env("CODEX_LOOPS_JOURNAL_PATH", journal.as_path());
     }
     if let Some(model) = &options.model {
         command.env("CODEX_LOOPS_CODEX_MODEL", model);
     }
     command.spawn().map_err(|error| {
         AppError::new(
-            6,
+            ExitStatus::Runtime,
             "scheduler_start_failed",
             "Could not start the scheduler supervisor.",
         )
@@ -153,13 +169,14 @@ mod tests {
             .spawn()
             .unwrap();
         let pid = child.id().unwrap();
-        let error = publish_metadata(&mut child, || {
+        let error = publish_metadata(
+            &mut child,
             Err(AppError::new(
-                6,
+                ExitStatus::Runtime,
                 "scheduler_metadata_invalid",
                 "fixture failure",
-            ))
-        })
+            )),
+        )
         .await
         .unwrap_err();
         assert_eq!(error.code(), "scheduler_metadata_invalid");

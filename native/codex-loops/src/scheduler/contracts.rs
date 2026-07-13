@@ -1,14 +1,55 @@
+use std::{fmt, str::FromStr};
+
+use clap::ValueEnum;
+use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Value, json};
 
-use crate::error::{SchedulerError, SchedulerResult};
+use crate::error::{AppError, AppResult, ExitStatus};
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize, JsonSchema, ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Mock,
+    Codex,
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Mock => "mock",
+            Self::Codex => "codex",
+        })
+    }
+}
+
+impl FromStr for Provider {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> AppResult<Self> {
+        if value == "mock" {
+            Ok(Self::Mock)
+        } else if value == "codex" {
+            Ok(Self::Codex)
+        } else {
+            Err(AppError::new(
+                ExitStatus::Usage,
+                "provider_invalid",
+                "Provider must be either `mock` or `codex`.",
+            )
+            .details(json!({"provider": value})))
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(transparent)]
-pub struct RunId(String);
+pub struct RunId(
+    #[schemars(length(min = 1), regex(pattern = r"^[A-Za-z0-9][A-Za-z0-9_.:-]*$"))] Box<str>,
+);
 
 impl RunId {
-    pub fn new(value: impl Into<String>) -> SchedulerResult<Self> {
+    pub fn new(value: impl Into<String>) -> AppResult<Self> {
         let value = value.into();
         let mut characters = value.chars();
         let valid = characters
@@ -18,18 +59,27 @@ impl RunId {
                 character.is_ascii_alphanumeric() || matches!(character, '_' | '.' | ':' | '-')
             });
         if valid {
-            Ok(Self(value))
+            Ok(Self(value.into_boxed_str()))
         } else {
-            Err(SchedulerError::new(
-                2,
+            Err(AppError::new(
+                ExitStatus::Usage,
                 "run_id_invalid",
                 "Run ID must start with an ASCII letter or digit and contain only route-safe characters.",
-            ))
+            )
+            .details(json!({"run_id": value})))
         }
     }
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+}
+
+impl FromStr for RunId {
+    type Err = AppError;
+
+    fn from_str(value: &str) -> AppResult<Self> {
+        Self::new(value)
     }
 }
 
@@ -41,21 +91,20 @@ impl<'de> Deserialize<'de> for RunId {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct SchedulerResponse<T> {
-    pub(super) api_version: String,
+    pub api_version: String,
     pub data: T,
 }
 
 impl<T: Serialize> SchedulerResponse<T> {
-    pub fn into_wire_value(self) -> SchedulerResult<Value> {
-        serde_json::to_value(self)
-            .map_err(|error| SchedulerError::new(6, "scheduler_response", error.to_string()))
+    pub fn into_wire_value(self) -> AppResult<Value> {
+        scheduler_wire_value(self)
     }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct SchedulerDocument {
     #[serde(flatten)]
-    fields: serde_json::Map<String, Value>,
+    pub fields: serde_json::Map<String, Value>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -63,16 +112,16 @@ pub struct StartData {
     pub workflow_name: Option<String>,
     pub state: Option<String>,
     #[serde(flatten)]
-    fields: serde_json::Map<String, Value>,
+    pub fields: serde_json::Map<String, Value>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub(super) struct HealthEnvelope {
     pub api_version: String,
     pub data: HealthData,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Deserialize)]
 pub(super) struct HealthData {
     pub status: String,
     pub version: String,
@@ -84,7 +133,7 @@ pub struct StartRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub provider: Option<Provider>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub budget: Option<u64>,
 }
@@ -94,7 +143,7 @@ pub struct ResumeRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub script_path: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub provider: Option<String>,
+    pub provider: Option<Provider>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -125,7 +174,13 @@ impl<T: Serialize> SchedulerEnvelope<T> {
             Self::Failure(envelope) => &envelope.api_version,
         }
     }
-    pub fn into_value(self) -> Value {
-        serde_json::to_value(self).unwrap_or_else(|error| json!({"api_version": "scheduler.v1", "error": {"code": "serialization_failed", "message": error.to_string()}}))
+    pub fn into_wire_value(self) -> AppResult<Value> {
+        scheduler_wire_value(self)
     }
+}
+
+fn scheduler_wire_value(value: impl Serialize) -> AppResult<Value> {
+    serde_json::to_value(value).map_err(|error| {
+        AppError::scheduler(ExitStatus::Runtime, "scheduler_response", error.to_string())
+    })
 }

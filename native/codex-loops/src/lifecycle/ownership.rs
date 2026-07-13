@@ -1,20 +1,59 @@
 use super::*;
+use std::num::NonZeroU16;
 
-pub(super) fn runtime_dir(client: &SchedulerClient) -> AppResult<PathBuf> {
-    if let Ok(path) = env::var("CODEX_LOOPS_RUNTIME_DIR")
+pub(super) struct RuntimeDirectory(PathBuf);
+
+impl RuntimeDirectory {
+    fn new(path: PathBuf, source: &'static str) -> AppResult<Self> {
+        if path.is_absolute() {
+            Ok(Self(path))
+        } else {
+            Err(AppError::new(
+                ExitStatus::Runtime,
+                "runtime_invalid",
+                format!("{source} must be an absolute path."),
+            )
+            .details(json!({"path": path})))
+        }
+    }
+
+    pub(super) fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    pub(super) fn join(&self, path: impl AsRef<Path>) -> PathBuf {
+        self.0.join(path)
+    }
+
+    pub(super) fn is_dir(&self) -> bool {
+        self.0.is_dir()
+    }
+}
+
+pub(super) fn runtime_dir(client: &SchedulerClient) -> AppResult<RuntimeDirectory> {
+    if let Some(path) = env::var_os("CODEX_LOOPS_RUNTIME_DIR")
         && !path.is_empty()
     {
-        return Ok(PathBuf::from(path));
+        return RuntimeDirectory::new(PathBuf::from(path), "CODEX_LOOPS_RUNTIME_DIR");
     }
-    let home =
-        env::var("HOME").map_err(|_| AppError::new(6, "runtime_invalid", "HOME is not set."))?;
-    Ok(PathBuf::from(home)
-        .join(".codex/workflows/runtime")
-        .join(runtime_key(client)?))
+    let home = env::var_os("HOME")
+        .ok_or_else(|| AppError::new(ExitStatus::Runtime, "runtime_invalid", "HOME is not set."))?;
+    RuntimeDirectory::new(
+        PathBuf::from(home)
+            .join(".codex/workflows/runtime")
+            .join(runtime_key(client)?),
+        "HOME",
+    )
 }
 
 fn runtime_key(client: &SchedulerClient) -> AppResult<String> {
-    let host = client.base_url().host_str().unwrap_or("local");
+    let host = client.base_url().host_str().ok_or_else(|| {
+        AppError::new(
+            ExitStatus::Usage,
+            "scheduler_url_invalid",
+            "Scheduler URL has no host.",
+        )
+    })?;
     let host: String = host
         .chars()
         .map(|character| {
@@ -28,11 +67,21 @@ fn runtime_key(client: &SchedulerClient) -> AppResult<String> {
     Ok(format!("{host}-{}", scheduler_port(client)?))
 }
 
-pub(super) fn scheduler_port(client: &SchedulerClient) -> AppResult<u16> {
-    client
-        .base_url()
-        .port_or_known_default()
-        .ok_or_else(|| AppError::new(2, "scheduler_url_invalid", "Scheduler URL has no port."))
+pub(super) fn scheduler_port(client: &SchedulerClient) -> AppResult<NonZeroU16> {
+    let port = client.base_url().port_or_known_default().ok_or_else(|| {
+        AppError::new(
+            ExitStatus::Usage,
+            "scheduler_url_invalid",
+            "Scheduler URL has no port.",
+        )
+    })?;
+    NonZeroU16::new(port).ok_or_else(|| {
+        AppError::new(
+            ExitStatus::Usage,
+            "scheduler_port_invalid",
+            "Scheduler port must be greater than zero.",
+        )
+    })
 }
 
 pub(super) fn metadata_path(client: &SchedulerClient) -> AppResult<PathBuf> {
@@ -43,12 +92,16 @@ pub(super) fn log_path(client: &SchedulerClient) -> AppResult<PathBuf> {
     Ok(runtime_dir(client)?.join("scheduler.log"))
 }
 
-pub(super) fn owner_lock_is_held(client: &SchedulerClient) -> AppResult<bool> {
+pub(super) async fn owner_lock_is_held(client: &SchedulerClient) -> AppResult<bool> {
     let runtime_dir = runtime_dir(client)?;
-    if !runtime_dir.is_dir() {
-        return Ok(false);
-    }
-    owner_lock_is_held_at(&runtime_dir.join("owner.lock"))
+    blocking("inspect the scheduler owner lock", move || {
+        if runtime_dir.is_dir() {
+            owner_lock_is_held_at(&runtime_dir.join("owner.lock"))
+        } else {
+            Ok(false)
+        }
+    })
+    .await
 }
 
 pub(super) fn owner_lock_is_held_at(path: &Path) -> AppResult<bool> {
@@ -88,7 +141,10 @@ mod tests {
     fn runtime_metadata_is_outside_the_packaged_release() {
         let client = SchedulerClient::new("http://127.0.0.1:49123").unwrap();
         let path = runtime_dir(&client).unwrap();
-        assert!(path.ends_with(".codex/workflows/runtime/127.0.0.1-49123"));
+        assert!(
+            path.as_path()
+                .ends_with(".codex/workflows/runtime/127.0.0.1-49123")
+        );
     }
 
     #[test]

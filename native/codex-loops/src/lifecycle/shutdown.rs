@@ -8,7 +8,7 @@ pub(super) async fn terminate_child_with_timeout(
     child: &mut Child,
     timeout: Duration,
 ) -> AppResult<()> {
-    if let Some(pid) = child.id() {
+    if let Some(pid) = child.id().and_then(std::num::NonZeroU32::new) {
         let _ = signal_process(pid, libc::SIGTERM);
     }
     match tokio::time::timeout(timeout, child.wait()).await {
@@ -16,13 +16,13 @@ pub(super) async fn terminate_child_with_timeout(
         Ok(Err(wait_error)) => {
             let kill_error = child.start_kill().err().map(|error| error.to_string());
             let final_wait_error = child.wait().await.err().map(|error| error.to_string());
-            Err(AppError::new(6, "scheduler_wait_failed", "Could not observe scheduler termination reliably.")
+            Err(AppError::new(ExitStatus::Runtime, "scheduler_wait_failed", "Could not observe scheduler termination reliably.")
                 .details(json!({"wait_error": wait_error.to_string(), "kill_error": kill_error, "final_wait_error": final_wait_error})))
         }
         Err(_elapsed) => {
             child.start_kill().map_err(|error| {
                 AppError::new(
-                    6,
+                    ExitStatus::Runtime,
                     "scheduler_kill_failed",
                     "The scheduler ignored SIGTERM and could not be killed.",
                 )
@@ -30,7 +30,7 @@ pub(super) async fn terminate_child_with_timeout(
             })?;
             child.wait().await.map_err(|error| {
                 AppError::new(
-                    6,
+                    ExitStatus::Runtime,
                     "scheduler_wait_failed",
                     "Could not wait for the killed scheduler process.",
                 )
@@ -41,13 +41,13 @@ pub(super) async fn terminate_child_with_timeout(
     }
 }
 
-pub(super) fn signal_process(pid: u32, signal: i32) -> AppResult<()> {
-    let result = unsafe { libc::kill(pid as i32, signal) };
+pub(super) fn signal_process(pid: std::num::NonZeroU32, signal: i32) -> AppResult<()> {
+    let result = unsafe { libc::kill(pid.get() as i32, signal) };
     if result == 0 {
         Ok(())
     } else {
         Err(AppError::new(
-            6,
+            ExitStatus::Runtime,
             "scheduler_stop_failed",
             "Could not signal scheduler supervisor.",
         )

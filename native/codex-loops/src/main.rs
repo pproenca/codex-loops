@@ -7,12 +7,19 @@ mod provider;
 mod runtime;
 mod scheduler;
 
-use std::{ffi::OsString, path::PathBuf, process::ExitCode};
+use std::{ffi::OsString, num::NonZeroU16, path::PathBuf, process::ExitCode};
 
 use clap::{CommandFactory, Parser, Subcommand};
-use serde_json::Value;
 
-use crate::error::AppError;
+use crate::{
+    cli::{
+        CliOutput, Endpoint, LogsOptions, RestartOptions, ResumeOptions, RunOptions, ServeOptions,
+        StopOptions,
+    },
+    error::{AppError, AppResult, ExitStatus},
+    lifecycle::BindHost,
+    scheduler::{Provider, RunId},
+};
 
 #[derive(Clone, Copy)]
 enum OutputFormat {
@@ -20,14 +27,10 @@ enum OutputFormat {
     Json,
 }
 
-macro_rules! output_format {
-    ($json:expr) => {
-        if $json {
-            OutputFormat::Json
-        } else {
-            OutputFormat::Human
-        }
-    };
+impl From<bool> for OutputFormat {
+    fn from(json: bool) -> Self {
+        if json { Self::Json } else { Self::Human }
+    }
 }
 
 #[derive(Parser)]
@@ -60,10 +63,10 @@ enum Command {
     /// Validate and start a workflow through the scheduler.
     Run {
         script: PathBuf,
-        #[arg(long, default_value = "codex", value_parser = ["codex", "mock"])]
-        provider: String,
+        #[arg(long, value_enum, default_value_t = Provider::Codex)]
+        provider: Provider,
         #[arg(long)]
-        run_id: Option<String>,
+        run_id: Option<RunId>,
         #[arg(long)]
         server: Option<String>,
         #[arg(short, long)]
@@ -73,7 +76,7 @@ enum Command {
     },
     /// Read the current projection for a workflow run.
     Status {
-        run_id: String,
+        run_id: RunId,
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
@@ -81,7 +84,7 @@ enum Command {
     },
     /// Read durable journal summaries for a workflow run.
     Inspect {
-        run_id: String,
+        run_id: RunId,
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
@@ -89,11 +92,11 @@ enum Command {
     },
     /// Resume an existing workflow run.
     Resume {
-        run_id: String,
+        run_id: RunId,
         #[arg(long)]
         script: Option<PathBuf>,
-        #[arg(long, default_value = "codex", value_parser = ["codex", "mock"])]
-        provider: String,
+        #[arg(long, value_enum, default_value_t = Provider::Codex)]
+        provider: Provider,
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
@@ -101,7 +104,7 @@ enum Command {
     },
     /// Open a workflow run in the LiveView UI.
     Open {
-        run_id: String,
+        run_id: RunId,
         #[arg(long)]
         server: Option<String>,
         #[arg(long)]
@@ -110,11 +113,11 @@ enum Command {
     /// Start or join the managed local scheduler.
     Serve {
         #[arg(long)]
-        host: Option<String>,
+        host: Option<BindHost>,
         #[arg(long)]
-        port: Option<u16>,
+        port: Option<NonZeroU16>,
         #[arg(long)]
-        journal: Option<String>,
+        journal: Option<PathBuf>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long, conflicts_with = "json")]
@@ -124,12 +127,12 @@ enum Command {
     },
     /// Stop the managed local scheduler.
     Stop {
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["host", "port"])]
         server: Option<String>,
         #[arg(long)]
-        host: Option<String>,
+        host: Option<BindHost>,
         #[arg(long)]
-        port: Option<u16>,
+        port: Option<NonZeroU16>,
         #[arg(long)]
         force: bool,
         #[arg(long)]
@@ -138,11 +141,11 @@ enum Command {
     /// Restart the managed scheduler with optional configuration.
     Restart {
         #[arg(long)]
-        host: Option<String>,
+        host: Option<BindHost>,
         #[arg(long)]
-        port: Option<u16>,
+        port: Option<NonZeroU16>,
         #[arg(long)]
-        journal: Option<String>,
+        journal: Option<PathBuf>,
         #[arg(long)]
         model: Option<String>,
         #[arg(long)]
@@ -150,12 +153,12 @@ enum Command {
     },
     /// Read the managed scheduler log.
     Logs {
-        #[arg(long)]
+        #[arg(long, conflicts_with_all = ["host", "port"])]
         server: Option<String>,
         #[arg(long)]
-        host: Option<String>,
+        host: Option<BindHost>,
         #[arg(long)]
-        port: Option<u16>,
+        port: Option<NonZeroU16>,
         #[arg(long, default_value_t = 200)]
         lines: usize,
         #[arg(long)]
@@ -181,13 +184,68 @@ enum Command {
     },
 }
 
-#[tokio::main]
-async fn main() -> ExitCode {
-    let app = App::parse();
-    match app.command {
+impl Command {
+    fn output_format(&self) -> OutputFormat {
+        match self {
+            Self::Install { json, .. }
+            | Self::Run { json, .. }
+            | Self::Status { json, .. }
+            | Self::Inspect { json, .. }
+            | Self::Resume { json, .. }
+            | Self::Open { json, .. }
+            | Self::Serve { json, .. }
+            | Self::Stop { json, .. }
+            | Self::Restart { json, .. }
+            | Self::Logs { json, .. }
+            | Self::Doctor { json } => (*json).into(),
+            Self::Mcp { .. } | Self::Daemon | Self::ProviderExec { .. } => OutputFormat::Human,
+        }
+    }
+}
+
+fn main() -> ExitCode {
+    match App::parse().command {
+        Some(Command::ProviderExec { args }) => provider::exec(args),
+        command => start_runtime(command),
+    }
+}
+
+fn start_runtime(command: Option<Command>) -> ExitCode {
+    let output = command
+        .as_ref()
+        .map_or(OutputFormat::Human, Command::output_format);
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => {
+            return report_error(
+                AppError::new(
+                    ExitStatus::Runtime,
+                    "async_runtime_unavailable",
+                    "Could not start the Codex Loops async runtime.",
+                )
+                .details(serde_json::json!({"reason": error.to_string()})),
+                output,
+            );
+        }
+    };
+    runtime.block_on(run(command))
+}
+
+async fn run(command: Option<Command>) -> ExitCode {
+    match command {
         Some(Command::Mcp { stdio: _ }) => exit_silent(mcp::run().await),
         Some(Command::Daemon) => exit_silent(lifecycle::run_supervisor().await),
-        Some(Command::ProviderExec { args }) => provider::exec(args),
+        Some(Command::ProviderExec { .. }) => report_error(
+            AppError::new(
+                ExitStatus::Runtime,
+                "provider_dispatch_invariant",
+                "Provider execution must be dispatched before starting the async runtime.",
+            ),
+            OutputFormat::Human,
+        ),
         Some(Command::Run {
             script,
             provider,
@@ -201,8 +259,17 @@ async fn main() -> ExitCode {
             } else {
                 cli::OpenMode::Skip
             };
-            let result = cli::run_workflow(script, provider, run_id, server, open_mode).await;
-            exit_value(result, output_format!(json))
+            exit_value(
+                cli::run_workflow(RunOptions {
+                    script,
+                    provider,
+                    run_id,
+                    server,
+                    open_mode,
+                })
+                .await,
+                json.into(),
+            )
         }
         Some(Command::Serve {
             host,
@@ -218,8 +285,15 @@ async fn main() -> ExitCode {
                 cli::ServeMode::Background
             };
             exit_value(
-                cli::serve(host, port, journal, model, mode).await,
-                output_format!(json),
+                cli::serve(ServeOptions {
+                    host,
+                    port,
+                    journal,
+                    model,
+                    mode,
+                })
+                .await,
+                json.into(),
             )
         }
         Some(Command::Stop {
@@ -234,10 +308,12 @@ async fn main() -> ExitCode {
             } else {
                 lifecycle::StopMode::Graceful
             };
-            exit_value(
-                cli::stop(server, host, port, mode).await,
-                output_format!(json),
-            )
+            let endpoint = match server {
+                Some(server) => Endpoint::Server(server),
+                None if host.is_some() || port.is_some() => Endpoint::Local { host, port },
+                None => Endpoint::Environment,
+            };
+            exit_value(cli::stop(StopOptions { endpoint, mode }).await, json.into())
         }
         Some(Command::Restart {
             host,
@@ -246,8 +322,14 @@ async fn main() -> ExitCode {
             model,
             json,
         }) => exit_value(
-            cli::restart(host, port, journal, model).await,
-            output_format!(json),
+            cli::restart(RestartOptions {
+                host,
+                port,
+                journal,
+                model,
+            })
+            .await,
+            json.into(),
         ),
         Some(Command::Logs {
             server,
@@ -255,17 +337,27 @@ async fn main() -> ExitCode {
             port,
             lines,
             json,
-        }) => exit_value(cli::logs(server, host, port, lines), output_format!(json)),
+        }) => {
+            let endpoint = match server {
+                Some(server) => Endpoint::Server(server),
+                None if host.is_some() || port.is_some() => Endpoint::Local { host, port },
+                None => Endpoint::Environment,
+            };
+            exit_value(
+                cli::logs(LogsOptions { endpoint, lines }).await,
+                json.into(),
+            )
+        }
         Some(Command::Status {
             run_id,
             server,
             json,
-        }) => exit_value(cli::status(run_id, server).await, output_format!(json)),
+        }) => exit_value(cli::status(run_id, server).await, json.into()),
         Some(Command::Inspect {
             run_id,
             server,
             json,
-        }) => exit_value(cli::inspect(run_id, server).await, output_format!(json)),
+        }) => exit_value(cli::inspect(run_id, server).await, json.into()),
         Some(Command::Resume {
             run_id,
             script,
@@ -273,15 +365,21 @@ async fn main() -> ExitCode {
             server,
             json,
         }) => exit_value(
-            cli::resume(run_id, script, provider, server).await,
-            output_format!(json),
+            cli::resume(ResumeOptions {
+                run_id,
+                script,
+                provider,
+                server,
+            })
+            .await,
+            json.into(),
         ),
         Some(Command::Open {
             run_id,
             server,
             json,
-        }) => exit_value(cli::open(run_id, server).await, output_format!(json)),
-        Some(Command::Doctor { json }) => exit_value(cli::doctor().await, output_format!(json)),
+        }) => exit_value(cli::open(run_id, server).await, json.into()),
+        Some(Command::Doctor { json }) => exit_value(cli::doctor().await, json.into()),
         Some(Command::Install {
             check,
             dry_run,
@@ -301,194 +399,60 @@ async fn main() -> ExitCode {
                     mode,
                     verbose,
                     codex,
-                }),
-                output_format!(json),
+                })
+                .await,
+                json.into(),
             )
         }
-        None => {
-            let mut command = App::command();
-            if let Err(error) = command.print_help() {
-                eprintln!("{error}");
-                return ExitCode::FAILURE;
-            }
-            println!();
-            ExitCode::SUCCESS
-        }
+        None => print_help(),
     }
 }
 
-fn exit_value<E>(result: Result<Value, E>, output: OutputFormat) -> ExitCode
-where
-    E: Into<AppError>,
-{
+fn exit_value(result: AppResult<CliOutput>, output: OutputFormat) -> ExitCode {
     match result {
-        Ok(value) => {
-            if matches!(output, OutputFormat::Json) {
+        Ok(value) => match output {
+            OutputFormat::Human => {
                 println!("{value}");
-            } else {
-                print_human(&value);
+                ExitCode::SUCCESS
             }
-            ExitCode::SUCCESS
-        }
-        Err(error) => {
-            let error = error.into();
-            if matches!(output, OutputFormat::Json) {
-                eprintln!("{}", error.cli_envelope());
-            } else {
-                eprintln!("{error}");
-                for next_step in error.next_steps() {
-                    eprintln!("  {next_step}");
+            OutputFormat::Json => match value.into_json() {
+                Ok(value) => {
+                    println!("{value}");
+                    ExitCode::SUCCESS
                 }
-            }
-            ExitCode::from(error.status())
-        }
+                Err(error) => report_error(error, output),
+            },
+        },
+        Err(error) => report_error(error, output),
     }
 }
 
-fn exit_silent<E>(result: Result<(), E>) -> ExitCode
-where
-    E: Into<AppError>,
-{
+fn exit_silent(result: AppResult<()>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            let error = error.into();
-            eprintln!("{error}");
-            ExitCode::from(error.status())
-        }
+        Err(error) => report_error(error, OutputFormat::Human),
     }
 }
 
-fn print_human(value: &Value) {
-    match value.get("command").and_then(Value::as_str) {
-        Some("run") => {
-            if value["scheduler_started"] == Value::Bool(true) {
-                println!(
-                    "Codex Loops started at {}",
-                    value["server_url"].as_str().unwrap_or("unknown")
-                );
-            }
-            println!(
-                "Run accepted: {}",
-                value["run_id"].as_str().unwrap_or("unknown")
-            );
-            println!(
-                "Provider: {}",
-                value["provider"].as_str().unwrap_or("unknown")
-            );
-            println!("UI: {}", value["ui_url"].as_str().unwrap_or("unknown"));
-            if value["opened"] == Value::Bool(true) {
-                println!("Opened in your browser.");
-            }
-            if let Some(warning) = value["warning"].as_str() {
-                println!("{warning}");
+fn report_error(error: AppError, output: OutputFormat) -> ExitCode {
+    match output {
+        OutputFormat::Human => {
+            eprintln!("{error}");
+            for next_step in error.next_steps_ref() {
+                eprintln!("  {next_step}");
             }
         }
-        Some("serve") => println!(
-            "Codex Loops {} at {}",
-            if value["started"] == Value::Bool(true) {
-                "started"
-            } else {
-                "already running"
-            },
-            value["server_url"].as_str().unwrap_or("unknown")
-        ),
-        Some("stop") => println!(
-            "{}",
-            if value["stopped"] == Value::Bool(true) {
-                "Codex Loops stopped."
-            } else {
-                "Codex Loops is not running."
-            }
-        ),
-        Some("restart") => println!(
-            "Codex Loops restarted at {}",
-            value["server_url"].as_str().unwrap_or("unknown")
-        ),
-        Some("logs") => print!("{}", value["output"].as_str().unwrap_or("")),
-        Some("install") => {
-            let mode = value["mode"].as_str().unwrap_or("install");
-            if mode == "dry_run" {
-                println!("Codex Loops installation plan:");
-            } else {
-                println!(
-                    "Codex Loops is {}.",
-                    if value["changed"] == Value::Bool(true) {
-                        "installed"
-                    } else {
-                        "ready"
-                    }
-                );
-            }
-            for command in value["commands"].as_array().into_iter().flatten() {
-                if let Some(command) = command.as_str() {
-                    println!("  {command}");
-                }
-            }
-            if value["plan"].as_array().is_some_and(Vec::is_empty) && mode == "dry_run" {
-                println!("  No changes required.");
-            }
-            if let Some(root) = value.pointer("/runtime/root").and_then(Value::as_str) {
-                println!("Runtime: {root}");
-            }
-            if let Some(scheduler) = value.pointer("/runtime/scheduler").and_then(Value::as_str) {
-                println!("Scheduler: {scheduler}");
-            }
-            if let Some(control_plane) = value
-                .pointer("/runtime/control_plane")
-                .and_then(Value::as_str)
-            {
-                println!("Control plane: {control_plane}");
-            }
-            if let Some(codex) = value.pointer("/codex/path").and_then(Value::as_str) {
-                println!("Codex: {codex}");
-            }
-            if let Some(skill) = value.pointer("/skill/path").and_then(Value::as_str) {
-                println!("Skill: {skill}");
-            }
-            if let Some(mcp) = value.pointer("/mcp/name").and_then(Value::as_str) {
-                println!("MCP: {mcp}");
-            }
-            if let Some(next) = value.pointer("/next_steps/0").and_then(Value::as_str) {
-                println!("Next: {next}");
-            }
-        }
-        Some("open") => println!("Opened {}", value["ui_url"].as_str().unwrap_or("unknown")),
-        Some("doctor") => {
-            println!(
-                "Codex Loops {}",
-                value["version"].as_str().unwrap_or("unknown")
-            );
-            println!(
-                "Scheduler: {}",
-                value["scheduler_state"].as_str().unwrap_or("unknown")
-            );
-            println!(
-                "URL: {}",
-                value["scheduler_url"].as_str().unwrap_or("unknown")
-            );
-        }
-        None if value.get("api_version").is_some() => {
-            println!(
-                "{}",
-                serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string())
-            );
-        }
-        Some(_) | None => {
-            println!(
-                "Codex Loops is {}.",
-                if value["changed"] == Value::Bool(true) {
-                    "installed"
-                } else {
-                    "ready"
-                }
-            );
-            if let Some(root) = value.pointer("/runtime/root").and_then(Value::as_str) {
-                println!("Runtime: {root}");
-            }
-            if let Some(next) = value.pointer("/next_steps/0").and_then(Value::as_str) {
-                println!("Next: {next}");
-            }
-        }
+        OutputFormat::Json => eprintln!("{}", error.cli_envelope()),
     }
+    ExitCode::from(u8::from(error.status()))
+}
+
+fn print_help() -> ExitCode {
+    let mut command = App::command();
+    if let Err(error) = command.print_help() {
+        eprintln!("{error}");
+        return ExitCode::FAILURE;
+    }
+    println!();
+    ExitCode::SUCCESS
 }

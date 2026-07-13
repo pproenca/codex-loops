@@ -37,12 +37,8 @@ defmodule Workflow.Provider.Codex do
   alias Workflow.Provider.Codex.StreamAccumulator
   alias Workflow.Schema
 
-  @base_exec_args [
-    "exec",
-    "--json",
-    "--dangerously-bypass-approvals-and-sandbox",
-    "--skip-git-repo-check"
-  ]
+  @base_exec_args ["exec", "--json"]
+  @unsafe_exec_args ["--dangerously-bypass-approvals-and-sandbox", "--skip-git-repo-check"]
 
   @timeout_detail %{"message" => "codex turn timed out"}
   @default_timeout 30 * 60 * 1_000
@@ -190,9 +186,34 @@ defmodule Workflow.Provider.Codex do
   end
 
   defp exec_args do
+    args = @base_exec_args ++ execution_args()
+
     case Application.get_env(:codex_loops, :codex_model) do
-      model when is_binary(model) and model != "" -> @base_exec_args ++ ["--model", model]
-      _unset -> @base_exec_args
+      model when is_binary(model) and model != "" -> args ++ ["--model", model]
+      _unset -> args
+    end
+  end
+
+  defp execution_args do
+    case Application.get_env(:codex_loops, :codex_execution) do
+      {:sandboxed, workdir} when is_binary(workdir) and workdir != "" ->
+        [
+          "--ephemeral",
+          "--ignore-user-config",
+          "-c",
+          ~s(approval_policy="never"),
+          "--sandbox",
+          "workspace-write",
+          "--cd",
+          workdir,
+          "--skip-git-repo-check"
+        ]
+
+      nil ->
+        @unsafe_exec_args
+
+      invalid ->
+        raise ArgumentError, "invalid normalized Codex execution config: #{inspect(invalid)}"
     end
   end
 

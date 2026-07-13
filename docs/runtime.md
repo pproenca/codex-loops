@@ -155,6 +155,13 @@ work again.
   --skip-git-repo-check`, folds each Codex event once, emits normalized activity
   entries into the journal, and settles with a result plus token usage.
 
+Normal runs preserve the existing unrestricted provider invocation. The
+explicit `sandbox-run` surface instead configures the provider with
+`--sandbox workspace-write`, `--ephemeral`, `--ignore-user-config`, and `--cd`
+pointing at a detached Git worktree. Its scheduler runtime, journal, home,
+loopback port, and MCP transcript are isolated and retained until
+`sandbox-clean` removes them.
+
 Schema-backed turns use Codex structured output via `--output-schema`; the
 schema owns output shape, while prompts should carry semantic work
 instructions. The writer still validates results locally and fails closed after

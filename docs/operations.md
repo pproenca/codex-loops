@@ -220,6 +220,44 @@ Use `workflow_open_ui` to watch live provider activity. `workflow_status` polls
 the latest run projection, and `workflow_inspect` returns durable journal
 summaries plus raw refs; neither MCP tool is a realtime stream.
 
+## Retained Sandbox Runs
+
+`sandbox-run` is the inspectable end-to-end MCP surface. It creates a detached
+worktree from the repository's current `HEAD`, so the workflow script must be
+committed. The run uses its own home, scheduler owner/runtime directory, journal,
+and reserved loopback port. For `provider=codex`, the nested `codex exec` process
+uses `--sandbox workspace-write`, `--ephemeral`, `--ignore-user-config`, and an
+explicit `--cd` pointing at the detached worktree.
+
+```sh
+codex-loops sandbox-run .codex/workflows/smoke.exs --provider mock --json
+codex-loops sandbox-run .codex/workflows/smoke.exs --provider codex --open
+```
+
+The retained directory contains:
+
+```text
+manifest.json
+mcp-transcript.jsonl
+initialize.json
+tools.json
+validation.json
+start.json
+status.json
+inspect.json
+open-ui.json
+journal.sqlite
+runtime/scheduler.log
+git-status.txt
+git-diff.patch
+repo/
+```
+
+`sandbox-clean ARTIFACT_DIR` stops the isolated scheduler and removes the Git
+worktree plus artifacts. It returns `sandbox_worktree_dirty` if the worktree has
+changes; use `--force` only after inspecting or preserving them. An explicit
+`--output DIRECTORY` selects a different retained artifact location.
+
 ## Normal Workflow Run
 
 Agents should use the registered Codex Loops MCP tools. The MCP adapter starts or

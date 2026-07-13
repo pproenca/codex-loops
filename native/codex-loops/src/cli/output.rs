@@ -12,6 +12,7 @@ use crate::{
     error::{AppError, AppResult, ChangeState, ExitStatus},
     install::{InstallOutput, Mode},
     lifecycle::{BindHost, StartDisposition, StopDisposition},
+    sandbox,
     scheduler::{Provider, RunId},
 };
 
@@ -146,6 +147,8 @@ pub enum CliOutput {
     Install(InstallOutput),
     Open(OpenOutput),
     Doctor(DoctorOutput),
+    SandboxRun(sandbox::RunOutput),
+    SandboxClean(sandbox::CleanOutput),
     Scheduler(Value),
 }
 
@@ -200,6 +203,33 @@ impl CliOutput {
                     scheduler_health: &output.scheduler_health,
                     runtime_root: &output.runtime_root,
                     codex: &output.codex,
+                },
+            ),
+            Self::SandboxRun(output) => {
+                let (opened, warning) = output.browser.wire();
+                success(
+                    "sandbox-run",
+                    SandboxRunWire {
+                        artifact_dir: &output.artifact_dir,
+                        worktree: &output.worktree,
+                        journal: &output.journal,
+                        transcript: &output.transcript,
+                        run_id: &output.run_id,
+                        provider: output.provider,
+                        state: &output.state,
+                        ui_url: output.ui_url.as_str(),
+                        opened,
+                        warning,
+                    },
+                )
+            }
+            Self::SandboxClean(output) => success(
+                "sandbox-clean",
+                SandboxCleanWire {
+                    artifact_dir: &output.artifact_dir,
+                    worktree: &output.worktree,
+                    scheduler_stopped: output.scheduler_stopped,
+                    removed: true,
                 },
             ),
             Self::Scheduler(envelope) => Ok(envelope),
@@ -342,6 +372,28 @@ struct DoctorWire<'a> {
     codex: &'a DoctorCodex,
 }
 
+#[derive(Serialize)]
+struct SandboxRunWire<'a> {
+    artifact_dir: &'a PathBuf,
+    worktree: &'a PathBuf,
+    journal: &'a PathBuf,
+    transcript: &'a PathBuf,
+    run_id: &'a RunId,
+    provider: Provider,
+    state: &'a str,
+    ui_url: &'a str,
+    opened: bool,
+    warning: Option<&'a str>,
+}
+
+#[derive(Serialize)]
+struct SandboxCleanWire<'a> {
+    artifact_dir: &'a PathBuf,
+    worktree: &'a PathBuf,
+    scheduler_stopped: bool,
+    removed: bool,
+}
+
 impl Display for CliOutput {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -362,6 +414,32 @@ impl Display for CliOutput {
                 "Codex Loops {}\nScheduler: running\nURL: {}",
                 env!("CARGO_PKG_VERSION"),
                 output.scheduler_url
+            ),
+            Self::SandboxRun(output) => {
+                writeln!(
+                    formatter,
+                    "Sandbox run completed: {}",
+                    output.run_id.as_str()
+                )?;
+                writeln!(formatter, "Artifacts: {}", output.artifact_dir.display())?;
+                writeln!(formatter, "Worktree: {}", output.worktree.display())?;
+                writeln!(formatter, "UI: {}", output.ui_url)?;
+                write!(
+                    formatter,
+                    "Cleanup: codex-loops sandbox-clean {}",
+                    output.artifact_dir.display()
+                )?;
+                match &output.browser {
+                    BrowserOutcome::Skipped => Ok(()),
+                    BrowserOutcome::Opened => write!(formatter, "\nOpened in your browser."),
+                    BrowserOutcome::Failed { warning } => write!(formatter, "\n{warning}"),
+                }
+            }
+            Self::SandboxClean(output) => write!(
+                formatter,
+                "Removed sandbox {} (worktree {}).",
+                output.artifact_dir.display(),
+                output.worktree.display()
             ),
             Self::Scheduler(envelope) => {
                 let pretty = serde_json::to_string_pretty(envelope).map_err(|_| std::fmt::Error)?;

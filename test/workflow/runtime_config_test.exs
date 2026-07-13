@@ -7,6 +7,8 @@ defmodule Workflow.RuntimeConfigTest do
   @env_keys ~w(
     CODEX_LOOPS_CODEX_BIN
     CODEX_LOOPS_CODEX_MODEL
+    CODEX_LOOPS_CODEX_SANDBOX
+    CODEX_LOOPS_CODEX_WORKDIR
     CODEX_LOOPS_HOST
     CODEX_LOOPS_PORT
     CODEX_LOOPS_SERVER
@@ -92,6 +94,25 @@ defmodule Workflow.RuntimeConfigTest do
 
     System.put_env("CODEX_LOOPS_CODEX_MODEL", " gpt-test ")
     assert runtime_config()[:codex_loops][:codex_model] == "gpt-test"
+  end
+
+  test "sandboxed Codex execution requires a workspace-write mode and absolute directory" do
+    System.put_env("CODEX_LOOPS_CODEX_SANDBOX", "workspace-write")
+
+    assert_raise RuntimeError, ~r/invalid Codex sandbox configuration/, fn ->
+      runtime_config()
+    end
+
+    System.put_env("CODEX_LOOPS_CODEX_WORKDIR", "relative")
+
+    assert_raise RuntimeError, ~r/must name an absolute directory/, fn ->
+      runtime_config()
+    end
+
+    System.put_env("CODEX_LOOPS_CODEX_WORKDIR", System.tmp_dir!())
+
+    assert runtime_config()[:codex_loops][:codex_execution] ==
+             {:sandboxed, System.tmp_dir!()}
   end
 
   defp runtime_config do

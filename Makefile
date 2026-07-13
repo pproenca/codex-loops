@@ -108,6 +108,7 @@ proof-live: proof-mcp-live
 
 proof-mcp: dev-bundle
 	MIX_ENV=dev mix run --no-start scripts/proof-mcp-validate.exs
+	MIX_ENV=dev mix run --no-start scripts/proof-sandbox.exs
 
 proof-mcp-live: dev-bundle
 	MIX_ENV=dev mix run --no-start scripts/proof-mcp-live.exs

@@ -5,9 +5,15 @@ mod lifecycle;
 mod mcp;
 mod provider;
 mod runtime;
+mod sandbox;
 mod scheduler;
 
-use std::{ffi::OsString, num::NonZeroU16, path::PathBuf, process::ExitCode};
+use std::{
+    ffi::OsString,
+    num::{NonZeroU16, NonZeroU64},
+    path::PathBuf,
+    process::ExitCode,
+};
 
 use clap::{CommandFactory, Parser, Subcommand};
 
@@ -71,6 +77,32 @@ enum Command {
         server: Option<String>,
         #[arg(short, long)]
         open: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Run a workflow through MCP in a retained, inspectable Git worktree sandbox.
+    SandboxRun {
+        script: PathBuf,
+        #[arg(long, value_enum, default_value_t = Provider::Codex)]
+        provider: Provider,
+        #[arg(long)]
+        run_id: Option<RunId>,
+        #[arg(long, value_name = "DIRECTORY")]
+        output: Option<PathBuf>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long, default_value = "1800")]
+        timeout_seconds: NonZeroU64,
+        #[arg(short, long)]
+        open: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Stop and remove a retained sandbox run.
+    SandboxClean {
+        artifact_dir: PathBuf,
+        #[arg(long)]
+        force: bool,
         #[arg(long)]
         json: bool,
     },
@@ -189,6 +221,8 @@ impl Command {
         match self {
             Self::Install { json, .. }
             | Self::Run { json, .. }
+            | Self::SandboxRun { json, .. }
+            | Self::SandboxClean { json, .. }
             | Self::Status { json, .. }
             | Self::Inspect { json, .. }
             | Self::Resume { json, .. }
@@ -268,6 +302,53 @@ async fn run(command: Option<Command>) -> ExitCode {
                     open_mode,
                 })
                 .await,
+                json.into(),
+            )
+        }
+        Some(Command::SandboxRun {
+            script,
+            provider,
+            run_id,
+            output,
+            model,
+            timeout_seconds,
+            open,
+            json,
+        }) => {
+            let open_mode = if open {
+                cli::OpenMode::Open
+            } else {
+                cli::OpenMode::Skip
+            };
+            exit_value(
+                sandbox::run(sandbox::RunOptions {
+                    script,
+                    provider,
+                    run_id,
+                    output_dir: output,
+                    model,
+                    timeout_seconds,
+                    open_mode,
+                })
+                .await
+                .map(CliOutput::SandboxRun),
+                json.into(),
+            )
+        }
+        Some(Command::SandboxClean {
+            artifact_dir,
+            force,
+            json,
+        }) => {
+            let mode = if force {
+                sandbox::CleanMode::Force
+            } else {
+                sandbox::CleanMode::PreserveDirty
+            };
+            exit_value(
+                sandbox::clean(sandbox::CleanOptions { artifact_dir, mode })
+                    .await
+                    .map(CliOutput::SandboxClean),
                 json.into(),
             )
         }

@@ -67,4 +67,27 @@ if config_env() == :prod do
 
       config :codex_loops, codex_model: model
   end
+
+  case {System.get_env("CODEX_LOOPS_CODEX_SANDBOX"), System.get_env("CODEX_LOOPS_CODEX_WORKDIR")} do
+    {nil, nil} ->
+      :ok
+
+    {"workspace-write", workdir} when is_binary(workdir) ->
+      with :absolute <- Path.type(workdir),
+           {:ok, %File.Stat{type: :directory}} <- File.stat(workdir) do
+        config :codex_loops, codex_execution: {:sandboxed, workdir}
+      else
+        _ -> raise "CODEX_LOOPS_CODEX_WORKDIR must name an absolute directory"
+      end
+
+    {sandbox, workdir} ->
+      raise """
+      invalid Codex sandbox configuration
+
+      CODEX_LOOPS_CODEX_SANDBOX=#{inspect(sandbox)}
+      CODEX_LOOPS_CODEX_WORKDIR=#{inspect(workdir)}
+
+      Expected both variables to be unset, or sandbox=workspace-write with an absolute workdir.
+      """
+  end
 end

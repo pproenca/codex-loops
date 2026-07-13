@@ -490,7 +490,7 @@ fn parse_port(port: &str) -> AppResult<NonZeroU16> {
     })
 }
 
-async fn open_url(url: &url::Url) -> AppResult<()> {
+pub(crate) async fn open_url(url: &url::Url) -> AppResult<()> {
     let (program, prefix): (String, &'static [&'static str]) =
         match optional_env("CODEX_LOOPS_OPEN_BIN")? {
             Some(program) => (program, &[]),

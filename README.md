@@ -73,6 +73,36 @@ workflow_open_ui  run_id=run_audit
 
 Run live only after the mock gate is clean by selecting `provider=codex`.
 
+## Inspectable Sandbox Runs
+
+Use `sandbox-run` when a workflow should execute through the packaged MCP path
+without touching the current checkout or the normal scheduler journal:
+
+```sh
+_build/dev-bundle/bin/codex-loops sandbox-run \
+  .codex/workflows/audit_workflow.exs \
+  --provider mock \
+  --open
+```
+
+The command creates a detached Git worktree, isolated `HOME`, scheduler runtime,
+SQLite journal, and loopback port. Live `codex` turns run with Codex
+`workspace-write` sandboxing, an explicit worktree root, no user configuration,
+and ephemeral session storage. It retains `manifest.json`, MCP JSONL transcript,
+status and inspection snapshots, scheduler logs, journal, Git status, and a
+binary diff under `~/.codex/workflows/sandbox-runs/<run-id>/` by default.
+
+The worktree and scheduler remain available for inspection until explicitly
+cleaned. Cleanup refuses to discard changes unless `--force` is supplied:
+
+```sh
+codex-loops sandbox-clean ~/.codex/workflows/sandbox-runs/<run-id>
+codex-loops sandbox-clean ~/.codex/workflows/sandbox-runs/<run-id> --force
+```
+
+Normal `run` and MCP starts preserve their existing provider behavior;
+`sandbox-run` is the explicit contained execution surface.
+
 ## Development And Distribution
 
 ```sh

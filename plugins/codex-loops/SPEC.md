@@ -193,7 +193,7 @@ Expected authoring loop:
    loop combinators.
 4. Use domain-rich worker prompts with exact files, evidence expectations,
    semantic field meaning, constraints, and halt conditions. Put structural
-   output shape in `schema:` / `--output-schema`.
+   output shape in `schema:` / app-server `outputSchema`.
 5. Add adversarial verification and a final build or test gate for mutating
    workflows.
 6. Run `workflow_validate` and a mock `workflow_start`; run live Codex only
@@ -206,18 +206,18 @@ Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite`, unless
 projections are folds over the journal. Completed nodes replay from the journal
 on resume.
 
-The live provider shells out to `codex exec --json --skip-git-repo-check`,
-normalizes Codex events into activity entries, and synchronously journals each
-entry before publishing a post-commit refresh notification to LiveView.
-Schema-backed agents pass `--output-schema`; the schema owns output shape, the
-prompt owns task semantics, and the writer validates outputs and fails closed
-after retry exhaustion.
+The live provider submits independent threads and turns to one scheduler-owned
+Codex app-server, normalizes correlated notifications into activity entries,
+and synchronously journals each entry before publishing a post-commit refresh
+notification to LiveView. Schema-backed agents pass app-server `outputSchema`;
+the schema owns output shape, the prompt owns task semantics, and the writer
+validates outputs and fails closed after retry exhaustion.
 
 Immediately before every provider call, the writer appends `agent_started`.
 `agent_committed`, `agent_attempt_rejected`, or `agent_failed` settles that
 attempt. If a crash leaves a start without settlement, resume does not
 redeliver the possibly-paid effect; it terminates with `outcome_unknown`.
-Provider processes have finite time and 16 MiB input/stdout bounds.
+Provider turns have finite time, bounded protocol lines, and global admission.
 
 ## Packaging
 

@@ -1,19 +1,14 @@
 #!/usr/bin/env python3
-"""Deterministic Codex JSONL stub for packaged workflow conformance proofs."""
+"""Deterministic Codex app-server stub for packaged conformance proofs."""
 
 import json
 import sys
+import threading
 import time
 
 
 HOLD_LEASE_MARKER = "CODEX_LOOPS_CONFORMANCE_HOLD_LEASE"
-
-
-def schema_path(arguments):
-    try:
-        return arguments[arguments.index("--output-schema") + 1]
-    except (ValueError, IndexError):
-        return None
+WRITE_LOCK = threading.Lock()
 
 
 def example(schema, field=None):
@@ -41,10 +36,7 @@ def example(schema, field=None):
     if schema_type == "boolean":
         return True
 
-    if schema_type == "integer":
-        return max(schema.get("minimum", 1), 1)
-
-    if schema_type == "number":
+    if schema_type in ("integer", "number"):
         return max(schema.get("minimum", 1), 1)
 
     if schema_type == "null":
@@ -53,47 +45,135 @@ def example(schema, field=None):
     return "conformance-ok"
 
 
-def emit(event):
-    print(json.dumps(event, separators=(",", ":")), flush=True)
+def emit(message):
+    with WRITE_LOCK:
+        print(json.dumps(message, separators=(",", ":")), flush=True)
 
 
-def main():
-    prompt = sys.stdin.read()
-    path = schema_path(sys.argv[1:])
+def response(request_id, result):
+    emit({"id": request_id, "result": result})
+
+
+def prompt_text(params):
+    for item in params.get("input", []):
+        if item.get("type") == "text":
+            return item.get("text", "")
+    return ""
+
+
+def run_turn(thread_id, turn_id, params):
+    prompt = prompt_text(params)
+    schema = params.get("outputSchema")
 
     if HOLD_LEASE_MARKER in prompt:
         time.sleep(2)
 
-    if path:
-        with open(path, encoding="utf-8") as schema_file:
-            message = json.dumps(example(json.load(schema_file)), separators=(",", ":"))
+    if schema:
+        message = json.dumps(example(schema), separators=(",", ":"))
     else:
         message = "CONFORMANCE-OK"
 
-    emit({"type": "thread.started", "thread_id": "conformance-stub"})
-    emit({"type": "turn.started"})
     emit(
         {
-            "type": "item.completed",
-            "item": {
-                "id": "reasoning-1",
-                "type": "reasoning",
-                "text": "Generated deterministic conformance output",
+            "method": "item/completed",
+            "params": {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "item": {
+                    "id": f"reasoning-{turn_id}",
+                    "type": "reasoning",
+                    "summary": ["Generated deterministic conformance output"],
+                },
             },
         }
     )
     emit(
         {
-            "type": "item.completed",
-            "item": {"id": "message-1", "type": "agent_message", "text": message},
+            "method": "item/completed",
+            "params": {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "item": {
+                    "id": f"message-{turn_id}",
+                    "type": "agentMessage",
+                    "text": message,
+                },
+            },
         }
     )
     emit(
         {
-            "type": "turn.completed",
-            "usage": {"input_tokens": 1, "output_tokens": 1},
+            "method": "thread/tokenUsage/updated",
+            "params": {
+                "threadId": thread_id,
+                "turnId": turn_id,
+                "tokenUsage": {
+                    "total": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
+                    "last": {"inputTokens": 1, "outputTokens": 1, "totalTokens": 2},
+                },
+            },
         }
     )
+    emit(
+        {
+            "method": "turn/completed",
+            "params": {
+                "threadId": thread_id,
+                "turn": {"id": turn_id, "status": "completed", "error": None},
+            },
+        }
+    )
+
+
+def main():
+    thread_number = 0
+    turn_number = 0
+
+    for line in sys.stdin:
+        try:
+            message = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        method = message.get("method")
+        request_id = message.get("id")
+        params = message.get("params", {})
+
+        if method == "initialize" and request_id is not None:
+            response(request_id, {"serverInfo": {"name": "conformance-stub", "version": "1"}})
+        elif method == "initialized":
+            continue
+        elif method == "thread/start" and request_id is not None:
+            thread_number += 1
+            thread_id = f"conformance-thread-{thread_number}"
+            response(
+                request_id,
+                {
+                    "thread": {"id": thread_id},
+                    "model": params.get("model") or "conformance-model",
+                    "modelProvider": "stub",
+                    "cwd": params.get("cwd", "."),
+                    "approvalPolicy": params.get("approvalPolicy", "never"),
+                    "sandbox": params.get("sandbox", "danger-full-access"),
+                },
+            )
+        elif method == "turn/start" and request_id is not None:
+            turn_number += 1
+            turn_id = f"turn-{turn_number}"
+            thread_id = params["threadId"]
+            response(request_id, {"turn": {"id": turn_id, "status": "inProgress", "error": None}})
+            threading.Thread(
+                target=run_turn, args=(thread_id, turn_id, params), daemon=True
+            ).start()
+        elif method == "turn/interrupt" and request_id is not None:
+            response(request_id, {})
+        elif request_id is not None:
+            emit(
+                {
+                    "id": request_id,
+                    "error": {"code": -32601, "message": f"unsupported method: {method}"},
+                }
+            )
 
 
 if __name__ == "__main__":

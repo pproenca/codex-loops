@@ -17,6 +17,7 @@ mod contracts;
 use contracts::{HealthEnvelope, SchedulerEnvelope};
 pub use contracts::{
     Provider, ResumeRequest, RunId, SchedulerDocument, SchedulerResponse, StartData, StartRequest,
+    WorkflowLocationRequest,
 };
 
 const PATH_SEGMENT: &AsciiSet = &CONTROLS
@@ -235,6 +236,39 @@ impl SchedulerClient {
                 found: Some(version),
                 envelope: wire,
             }
+        }
+    }
+
+    pub async fn require_compatible(&self) -> AppResult<()> {
+        match self.health_state().await {
+            HealthState::Compatible(_envelope) => Ok(()),
+            HealthState::Incompatible { found, envelope } => {
+                let message = match &found {
+                    Some(found) => format!(
+                        "A scheduler from another Codex Loops version is running (control plane {}, scheduler {found}).",
+                        env!("CARGO_PKG_VERSION")
+                    ),
+                    None => "The configured endpoint is not a compatible Codex Loops scheduler."
+                        .to_owned(),
+                };
+                Err(AppError::scheduler(
+                    ExitStatus::Runtime,
+                    "scheduler_version_mismatch",
+                    message,
+                )
+                .details(json!({
+                    "expected": env!("CARGO_PKG_VERSION"),
+                    "found": found,
+                    "health": envelope
+                })))
+            }
+            HealthState::Unreachable { reason } => Err(AppError::scheduler(
+                ExitStatus::Runtime,
+                "scheduler_unavailable",
+                "Could not reach the Codex Loops scheduler. Start it explicitly with `codex-loops serve`.",
+            )
+            .details(json!({"server": self.base_url.as_str(), "reason": reason}))
+            .next_steps(["Run `codex-loops serve`, then retry the MCP tool call."])),
         }
     }
 
@@ -488,16 +522,21 @@ mod tests {
     fn start_request_omits_absent_optional_fields() {
         let value = serde_json::to_value(StartRequest {
             script_path: "/tmp/workflow.exs".into(),
+            workspace_root: "/tmp".into(),
             run_id: None,
             provider: None,
             budget: None,
         })
         .unwrap();
 
-        assert_eq!(value, json!({"script_path": "/tmp/workflow.exs"}));
+        assert_eq!(
+            value,
+            json!({"script_path": "/tmp/workflow.exs", "workspace_root": "/tmp"})
+        );
 
         let value = serde_json::to_value(StartRequest {
             script_path: "/tmp/workflow.exs".into(),
+            workspace_root: "/tmp".into(),
             run_id: None,
             provider: Some(Provider::Mock),
             budget: Some(0),
@@ -505,8 +544,42 @@ mod tests {
         .unwrap();
         assert_eq!(
             value,
-            json!({"script_path": "/tmp/workflow.exs", "provider": "mock", "budget": 0})
+            json!({
+                "script_path": "/tmp/workflow.exs",
+                "workspace_root": "/tmp",
+                "provider": "mock",
+                "budget": 0
+            })
         );
+    }
+
+    #[test]
+    fn resume_request_keeps_script_and_workspace_root_atomic() {
+        let value = serde_json::to_value(ResumeRequest {
+            workflow: Some(WorkflowLocationRequest {
+                script_path: "/tmp/workflow.exs".into(),
+                workspace_root: "/tmp".into(),
+            }),
+            provider: Some(Provider::Mock),
+        })
+        .unwrap();
+
+        assert_eq!(
+            value,
+            json!({
+                "script_path": "/tmp/workflow.exs",
+                "workspace_root": "/tmp",
+                "provider": "mock"
+            })
+        );
+
+        let value = serde_json::to_value(ResumeRequest {
+            workflow: None,
+            provider: Some(Provider::Mock),
+        })
+        .unwrap();
+
+        assert_eq!(value, json!({"provider": "mock"}));
     }
 
     #[test]

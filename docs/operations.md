@@ -194,6 +194,7 @@ Build the scheduler and native control plane first:
 ```sh
 make dev-bundle
 _build/dev-bundle/bin/codex-loops install --codex "$(command -v codex)"
+_build/dev-bundle/bin/codex-loops serve
 ```
 
 Then, from a restarted Codex task, run a non-mutating
@@ -225,9 +226,18 @@ summaries plus raw refs; neither MCP tool is a realtime stream.
 `sandbox-run` is the inspectable end-to-end MCP surface. It creates a detached
 worktree from the repository's current `HEAD`, so the workflow script must be
 committed. The run uses its own home, scheduler owner/runtime directory, journal,
-and reserved loopback port. For `provider=codex`, the nested `codex exec` process
-uses `--sandbox workspace-write`, `--ephemeral`, `--ignore-user-config`, and an
-explicit `--cd` pointing at the detached worktree.
+and reserved loopback port. It also points the scheduler and MCP process at a
+config-isolated `CODEX_HOME` under the retained artifact. On Unix, when the
+source `CODEX_HOME/auth.json` is a regular file or a symlink to one, the sandbox
+home exposes only that credential file through a symlink; it does not expose or
+copy user `config.toml`, plugins, or instruction files. Environment-based
+`CODEX_ACCESS_TOKEN` authentication remains inherited when no file credential
+exists. Codex namespaces keyring credentials by the canonical `CODEX_HOME`, so
+an existing source-home keyring entry is not visible from the isolated home;
+use file authentication or `CODEX_ACCESS_TOKEN` for a config-isolated sandbox.
+For `provider=codex`, the isolated scheduler's app-server uses an ephemeral
+thread, a workspace-write policy, and the detached worktree as its explicit
+working directory.
 
 ```sh
 codex-loops sandbox-run .codex/workflows/smoke.exs --provider mock --json
@@ -260,10 +270,12 @@ changes; use `--force` only after inspecting or preserving them. An explicit
 
 ## Normal Workflow Run
 
-Agents should use the registered Codex Loops MCP tools. The MCP adapter starts or
-discovers the scheduler, health-checks it, and talks to the scheduler HTTP API.
-The Elixir/Phoenix scheduler owns the workflow workers, PubSub/LiveView, and
-SQLite journal.
+Agents should use the registered Codex Loops MCP tools after starting the
+scheduler explicitly with `codex-loops serve`, `codex-loops run`, or an external
+process manager. The MCP adapter health-checks the configured endpoint and talks
+only to its HTTP API; it does not create owner state or manage processes. The
+Elixir/Phoenix scheduler owns the shared Codex app-server, workflow workers,
+PubSub/LiveView, and SQLite journal.
 
 Relative MCP script paths resolve against the client's workspace root, so the
 usual `.codex/workflows/<name>.exs` form works independently of the installed

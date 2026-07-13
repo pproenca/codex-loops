@@ -3,127 +3,28 @@ defmodule Workflow.CodexProviderTest do
   The real provider driven through the interpreter over an inert tree, exercising
   external behaviour at the highest seam: `Workflow.Run.run/2` with the `:codex`
   backend selected as a port swap. The backend is a **hermetic stub** — a genuine
-  OS subprocess reached through the `Workflow.Containment` boundary — that speaks
-  the *exact* line protocol the real `codex exec --json` speaks: it
-  reads the prompt on stdin and emits the same JSONL `ThreadEvent` stream
-  (`thread.started` / `turn.started` / `item.completed{agent_message}` /
-  `turn.completed{usage}`) that the production default parses, then exits `0`. So
-  every turn crosses a real process boundary (real `Port`, real stdio, real JSONL,
-  real exit status) with no network, over the genuine protocol. Assertions are on
+  OS subprocess owned by the supervised app-server transport. It speaks the same
+  JSONL JSON-RPC handshake, request, notification, token-usage, and terminal-turn
+  protocol as `codex app-server`. Every turn crosses a real process boundary (real
+  `Port`, real stdio, real JSONL) with no network. Assertions are on
   the committed journal and the folded read model, never on provider internals.
 
   The production wiring itself (`Provider.Codex.default_command/0` → the real
-  `codex` binary's one-shot `exec` entrypoint) is covered separately, without
+  `codex` binary's `app-server` entrypoint) is covered separately, without
   spending a live turn.
   """
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   alias Workflow.Journal
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Codex
+  alias Workflow.Provider.Codex.AppServer
   alias Workflow.Provider.Mock
   alias Workflow.Provider.Usage
   alias Workflow.Run
   alias Workflow.Schema
   alias Workflow.Status
   alias Workflow.Status.ProviderFailure
-
-  # A hermetic stub `codex exec --json`: read the prompt on stdin, emit
-  # the real JSONL event stream, exit 0. Output is chosen by argv mode. The `retry`
-  # mode alternates invalid→valid across successive invocations via a counter file —
-  # exactly how successive real turns differ — so it exercises fail-closed retry.
-  @stub_source ~S"""
-  [mode | rest] = System.argv()
-  prompt = case IO.read(:stdio, :eof) do :eof -> ""; s -> String.trim(s) end
-
-  if mode == "timeout" do
-    Process.sleep(500)
-    System.halt(0)
-  end
-
-  valid = %{"bugs" => [%{"file" => "lib/a.ex", "line" => 3}]}
-  invalid = %{"bugs" => "nope"}
-
-  text =
-    case mode do
-      "echo" -> prompt
-      "activity" -> prompt
-      "schema_file" ->
-        schema_file =
-          rest
-          |> Enum.chunk_every(2, 1, :discard)
-          |> Enum.find_value(fn
-            ["--output-schema", file] -> file
-            _ -> nil
-          end)
-
-        File.read!(schema_file)
-      "schema_prompt_contract" ->
-        schema_file =
-          rest
-          |> Enum.chunk_every(2, 1, :discard)
-          |> Enum.find_value(fn
-            ["--output-schema", file] -> file
-            _ -> nil
-          end)
-
-        JSON.encode!(%{"prompt" => prompt, "hasSchemaFile" => is_binary(schema_file)})
-      "large_schema_output" -> JSON.encode!(%{"body" => String.duplicate("x", 500) <> "tail"})
-      "turn_failed" -> "partial assistant output"
-      "turn_failed_exit" -> "partial assistant output"
-      "stream_error" -> "partial assistant output"
-      "stream_error_exit" -> "partial assistant output"
-      "completed_exit" -> "plausible but uncommitted output"
-      "always_invalid" -> JSON.encode!(invalid)
-      "retry" ->
-        counter = Enum.at(rest, 0)
-        first? = not File.exists?(counter)
-        File.write!(counter, "seen")
-        JSON.encode!(if first?, do: invalid, else: valid)
-    end
-
-  usage =
-    case mode do
-      "echo" -> %{"input_tokens" => 3, "cached_input_tokens" => 0, "output_tokens" => 5, "reasoning_output_tokens" => 0}
-      _ -> %{"input_tokens" => 1, "cached_input_tokens" => 0, "output_tokens" => 1, "reasoning_output_tokens" => 0}
-    end
-
-  activity =
-    case mode do
-      "activity" ->
-        [
-          %{"type" => "item.completed", "item" => %{"id" => "r1", "type" => "reasoning", "text" => "Read the failing test"}},
-          %{"type" => "item.completed", "item" => %{"id" => "c1", "type" => "tool_call", "name" => "shell", "input" => %{"cmd" => "mix test test/workflow/codex_provider_test.exs"}}}
-        ]
-
-      _ ->
-        []
-    end
-
-  terminal =
-    case mode do
-      mode when mode in ["turn_failed", "turn_failed_exit"] ->
-        [%{"type" => "turn.failed", "error" => %{"message" => "codex backend exploded"}}]
-
-      mode when mode in ["stream_error", "stream_error_exit"] ->
-        [%{"type" => "error", "message" => "codex stream failed"}]
-
-      _ -> [%{"type" => "turn.completed", "usage" => usage}]
-    end
-
-  for event <- [
-        %{"type" => "thread.started", "thread_id" => "t1"},
-        %{"type" => "turn.started"}
-      ] ++ activity ++ [
-        %{"type" => "item.completed", "item" => %{"id" => "i1", "type" => "agent_message", "text" => text}}
-      ] ++ terminal do
-    IO.puts(JSON.encode!(event))
-  end
-
-  if mode in ["turn_failed_exit", "stream_error_exit", "completed_exit"] do
-    System.halt(1)
-  end
-  """
 
   @bugs_schema %{
     "type" => "object",
@@ -218,10 +119,13 @@ defmodule Workflow.CodexProviderTest do
   end
 
   setup_all do
-    path = Path.join(System.tmp_dir!(), "codex_stub_#{System.unique_integer([:positive])}.exs")
-    File.write!(path, @stub_source)
-    on_exit(fn -> File.rm(path) end)
-    %{elixir: System.find_executable("elixir"), stub: path}
+    %{python: System.find_executable("python3"), stub: Path.expand("../support/codex_app_server_stub.py", __DIR__)}
+  end
+
+  setup do
+    AppServer.reset()
+    on_exit(&AppServer.reset/0)
+    :ok
   end
 
   defp run_id, do: "run_#{System.unique_integer([:positive])}"
@@ -229,7 +133,7 @@ defmodule Workflow.CodexProviderTest do
   defp tmp(suffix), do: Path.join(System.tmp_dir!(), "codex_#{suffix}_#{System.unique_integer([:positive])}")
 
   # Select the codex backend as a port swap, pointed at the hermetic stub in `mode`.
-  defp codex(%{elixir: elixir, stub: stub}, mode, extra \\ []), do: {Codex, command: {elixir, [stub, mode | extra]}}
+  defp codex(%{python: python, stub: stub}, mode, extra \\ []), do: {Codex, command: {python, [stub, mode | extra]}}
 
   defp types(id), do: id |> Journal.fold() |> Enum.map(& &1.type)
   defp settled_types(id), do: id |> types() |> Enum.reject(&(&1 in [:agent_started, :agent_activity]))
@@ -352,15 +256,11 @@ defmodule Workflow.CodexProviderTest do
     refute Enum.any?(Journal.fold(id), &(&1.type == :run_failed))
   end
 
-  test "a nonzero exit cannot commit a plausible completed response", ctx do
+  test "a terminal response is committed before a later idle app-server exit", ctx do
     id = run_id()
 
-    assert {:error, {:provider_failure, [0], :backend, detail}} =
-             Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "completed_exit"))
-
-    assert detail["message"] =~ "exited with status 1"
-    assert settled_types(id) == [:run_started, :agent_failed]
-    refute Enum.any?(Journal.fold(id), &(&1.type == :agent_committed))
+    assert {:ok, ^id} = Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "completed_exit"))
+    assert settled_types(id) == [:run_started, :agent_committed, :run_completed]
   end
 
   test "stream-level error prevents successful settlement even after assistant output", ctx do
@@ -374,15 +274,29 @@ defmodule Workflow.CodexProviderTest do
     refute Enum.any?(Journal.fold(id), &(&1.type == :agent_committed))
   end
 
-  test "containment timeout is an expected provider failure with stable detail", ctx do
+  test "non-retrying app-server errors fail closed while retrying errors await terminal status", ctx do
+    key = %Workflow.IdempotencyKey{run_id: "app-server-error", node_path: [0], iteration: 0}
+
+    assert {:error, {:provider_failure, :backend, %{"message" => "transient backend error"}, %Usage{}, _activity}} =
+             Codex.run_agent("ignored", nil, key, elem(codex(ctx, "error_nonretry"), 1))
+
+    AppServer.reset()
+
+    assert {:ok, "kept going", %Usage{}, _activity} =
+             Codex.run_agent("kept going", nil, key, elem(codex(ctx, "error_retry"), 1))
+  end
+
+  test "turn timeout is an expected provider failure and interrupts only that turn", ctx do
     id = run_id()
     key = %Workflow.IdempotencyKey{run_id: id, node_path: [0], iteration: 0}
     {Codex, opts} = codex(ctx, "timeout")
     opts = Keyword.put(opts, :timeout, 100)
     detail = %{"message" => "codex turn timed out"}
 
-    assert {:error, {:provider_failure, :timeout, ^detail, nil, []}} =
+    assert {:error, {:provider_failure, :timeout, ^detail, nil, direct_activity}} =
              Codex.run_agent("say hello", nil, key, opts)
+
+    assert Enum.map(direct_activity, & &1.label) == ["Thread started", "Turn started"]
 
     assert {:error, {:provider_failure, [0], :timeout, ^detail}} =
              Run.run(EchoWorkflow.tree(), run_id: id, provider: {Codex, opts})
@@ -392,7 +306,7 @@ defmodule Workflow.CodexProviderTest do
     failed = Enum.find(Journal.fold(id), &(&1.type == :agent_failed))
     assert failed.payload.reason == {:provider_failure, :timeout, detail}
     assert failed.payload.usage == nil
-    assert failed.payload.activity == []
+    assert Enum.map(failed.payload.activity, & &1.label) == ["Thread started", "Turn started"]
 
     status = Status.of(id)
     assert status.state == :failed
@@ -402,7 +316,7 @@ defmodule Workflow.CodexProviderTest do
     assert [agent] = status.agents
     assert agent.status == :failed
     assert agent.usage == %Usage{}
-    assert agent.activity == []
+    assert Enum.map(agent.activity, & &1.label) == ["Thread started", "Turn started"]
     assert agent.provider_failure == %ProviderFailure{kind: :timeout, detail: detail}
   end
 
@@ -428,7 +342,7 @@ defmodule Workflow.CodexProviderTest do
     assert Status.of(id).state == :completed
   end
 
-  test "schema-backed turns use --output-schema without prompt schema-shape boilerplate", ctx do
+  test "schema-backed turns use outputSchema without prompt schema-shape boilerplate", ctx do
     id = run_id()
 
     assert {:ok, ^id} =
@@ -497,13 +411,13 @@ defmodule Workflow.CodexProviderTest do
 
   test "the schema reaches the backend so the schema map is respected" do
     # Sanity: the compiled inert tree carries the normalized schema unchanged, and the
-    # provider forwards it as `--output-schema` — the writer, not the provider,
+    # provider forwards it as inline `outputSchema` — the writer, not the provider,
     # decides validity.
     assert [%Workflow.Node.Agent{schema: schema} | _] = SchemaWorkflow.tree().nodes
     assert Schema.to_map(schema) == @bugs_schema
   end
 
-  test "schemas handed to --output-schema are strict object schemas", ctx do
+  test "schemas handed to outputSchema are strict object schemas", ctx do
     schema = %{
       "type" => "object",
       "additionalProperties" => true,
@@ -533,5 +447,343 @@ defmodule Workflow.CodexProviderTest do
 
     assert written["additionalProperties"] == false
     assert written["properties"]["items"]["items"]["additionalProperties"] == false
+  end
+
+  test "one app-server process is reused for sequential turns", ctx do
+    starts = tmp("server_starts")
+    on_exit(fn -> File.rm(starts) end)
+    {Codex, opts} = codex(ctx, "server_count", [starts])
+
+    for {prompt, iteration} <- [{"first", 0}, {"second", 1}] do
+      key = %Workflow.IdempotencyKey{run_id: "reuse", node_path: [0], iteration: iteration}
+      assert {:ok, ^prompt, %Usage{}, _activity} = Codex.run_agent(prompt, nil, key, opts)
+    end
+
+    assert File.read!(starts) == "started\n"
+  end
+
+  test "cwd, model, approval, sandbox, and schema are sent as per-turn protocol fields", ctx do
+    capture = tmp("protocol_capture")
+    on_exit(fn -> File.rm(capture) end)
+    {Codex, opts} = codex(ctx, "capture", [capture])
+    opts = Keyword.merge(opts, workspace_root: "/tmp/codex-loops-workspace", model: "gpt-test")
+    key = %Workflow.IdempotencyKey{run_id: "capture", node_path: [0], iteration: 0}
+    schema = %{"type" => "object", "properties" => %{}, "required" => []}
+
+    assert {:ok, %{}, %Usage{}, _activity} = Codex.run_agent("{}", schema, key, opts)
+
+    messages =
+      capture
+      |> File.stream!()
+      |> Enum.map(&JSON.decode!/1)
+
+    thread = Enum.find(messages, &(&1["method"] == "thread/start"))["params"]
+    turn = Enum.find(messages, &(&1["method"] == "turn/start"))["params"]
+
+    assert thread["cwd"] == "/tmp/codex-loops-workspace"
+    assert thread["model"] == "gpt-test"
+    assert thread["approvalPolicy"] == "never"
+    assert thread["sandbox"] == "danger-full-access"
+    assert thread["ephemeral"] == false
+    assert turn["cwd"] == "/tmp/codex-loops-workspace"
+    assert turn["model"] == "gpt-test"
+    assert turn["approvalPolicy"] == "never"
+    assert turn["sandboxPolicy"] == %{"type" => "dangerFullAccess"}
+    assert turn["outputSchema"]["additionalProperties"] == false
+  end
+
+  test "sandbox execution overrides cwd with an ephemeral workspace-write turn", ctx do
+    capture = tmp("sandbox_capture")
+    workdir = tmp("sandbox_workdir")
+    previous = Application.get_env(:codex_loops, :codex_execution)
+    Application.put_env(:codex_loops, :codex_execution, {:sandboxed, workdir})
+    AppServer.reset()
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:codex_loops, :codex_execution)
+      else
+        Application.put_env(:codex_loops, :codex_execution, previous)
+      end
+
+      File.rm(capture)
+      AppServer.reset()
+    end)
+
+    key = %Workflow.IdempotencyKey{run_id: "sandbox", node_path: [0], iteration: 0}
+    opts = elem(codex(ctx, "capture", [capture]), 1)
+    assert {:ok, "prompt", %Usage{}, _activity} = Codex.run_agent("prompt", nil, key, opts)
+
+    messages = capture |> File.stream!() |> Enum.map(&JSON.decode!/1)
+    thread = Enum.find(messages, &(&1["method"] == "thread/start"))["params"]
+    turn = Enum.find(messages, &(&1["method"] == "turn/start"))["params"]
+
+    assert thread["cwd"] == Path.expand(workdir)
+    assert thread["sandbox"] == "workspace-write"
+    assert thread["ephemeral"] == true
+    assert turn["cwd"] == Path.expand(workdir)
+    assert turn["sandboxPolicy"]["type"] == "workspaceWrite"
+    assert turn["sandboxPolicy"]["writableRoots"] == [Path.expand(workdir)]
+  end
+
+  test "concurrent turns are correlated to their own caller", ctx do
+    {Codex, opts} = codex(ctx, "concurrent")
+
+    results =
+      1..12
+      |> Enum.map(fn iteration ->
+        Task.async(fn ->
+          prompt = "prompt-#{iteration}"
+          key = %Workflow.IdempotencyKey{run_id: "concurrent", node_path: [iteration], iteration: 0}
+          {prompt, Codex.run_agent(prompt, nil, key, opts)}
+        end)
+      end)
+      |> Task.await_many(5_000)
+
+    assert Enum.all?(results, fn {prompt, result} -> match?({:ok, ^prompt, %Usage{}, _activity}, result) end)
+  end
+
+  test "commentary messages remain activity but cannot replace the final answer", ctx do
+    key = %Workflow.IdempotencyKey{run_id: "phases", node_path: [0], iteration: 0}
+
+    assert {:ok, "final", %Usage{}, activity} =
+             Codex.run_agent("ignored", nil, key, elem(codex(ctx, "commentary_then_final"), 1))
+
+    assert activity |> Enum.filter(&(&1.kind == "output")) |> Enum.map(& &1.summary) == ["interim", "final"]
+  end
+
+  test "interactive approval requests fail closed without hanging", ctx do
+    key = %Workflow.IdempotencyKey{run_id: "approval", node_path: [0], iteration: 0}
+    opts = ctx |> codex("approval") |> elem(1) |> Keyword.put(:timeout, 1_000)
+
+    assert {:error, {:provider_failure, :backend, detail, nil, activity}} =
+             Codex.run_agent("do not prompt", nil, key, opts)
+
+    assert detail == %{
+             "message" => "Codex requested unsupported interactive input",
+             "method" => "item/commandExecution/requestApproval"
+           }
+
+    assert Enum.map(activity, & &1.label) == ["Thread started", "Turn started"]
+  end
+
+  test "a port crash after turn acceptance leaves the paid attempt outcome unknown", ctx do
+    id = run_id()
+
+    assert {:error, {:run_crashed, {:codex_turn_outcome_unknown, detail}}} =
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "crash_after_accept"))
+
+    assert detail["message"] =~ "app-server"
+    events = Journal.fold(id)
+    assert Enum.any?(events, &(&1.type == :agent_started))
+    refute Enum.any?(events, &(&1.type in [:agent_failed, :agent_committed]))
+
+    assert %Status{failure: %{reason: {:outcome_unknown, %Workflow.IdempotencyKey{run_id: ^id}}}} = Status.of(id)
+
+    assert {:error, {:outcome_unknown, %{address: [0], iteration: 0, attempt: 0}}} =
+             Run.run(EchoWorkflow.tree(), run_id: id, provider: codex(ctx, "echo"))
+  end
+
+  test "malformed and oversized protocol lines are bounded ambiguous failures after acceptance", ctx do
+    for mode <- ["malformed", "oversize"] do
+      AppServer.reset()
+      key = %Workflow.IdempotencyKey{run_id: mode, node_path: [0], iteration: 0}
+      opts = elem(codex(ctx, mode), 1)
+      parent = self()
+
+      {pid, monitor} =
+        spawn_monitor(fn ->
+          send(parent, {:unexpected_provider_result, Codex.run_agent("prompt", nil, key, opts)})
+        end)
+
+      assert_receive {:DOWN, ^monitor, :process, ^pid, {:codex_turn_outcome_unknown, detail}}, 2_000
+      assert detail["message"] =~ "Codex app-server emitted"
+      refute_receive {:unexpected_provider_result, _result}
+    end
+  end
+
+  test "an app-server that never initializes is torn down at a bounded deadline", ctx do
+    previous = Application.get_env(:codex_loops, :codex_app_server_initialize_timeout)
+    Application.put_env(:codex_loops, :codex_app_server_initialize_timeout, 50)
+    AppServer.reset()
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:codex_loops, :codex_app_server_initialize_timeout)
+      else
+        Application.put_env(:codex_loops, :codex_app_server_initialize_timeout, previous)
+      end
+
+      AppServer.reset()
+    end)
+
+    key = %Workflow.IdempotencyKey{run_id: "init-timeout", node_path: [0], iteration: 0}
+    opts = ctx |> codex("initialize_hang") |> elem(1) |> Keyword.put(:timeout, 1_000)
+
+    assert {:error, {:provider_failure, :unavailable, detail, nil, []}} =
+             Codex.run_agent("prompt", nil, key, opts)
+
+    assert detail["message"] == "Codex app-server initialize timed out"
+  end
+
+  test "aggregate per-turn notification volume is bounded across valid lines", ctx do
+    previous = Application.get_env(:codex_loops, :codex_app_server_max_turn_events)
+    Application.put_env(:codex_loops, :codex_app_server_max_turn_events, 5)
+    AppServer.reset()
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:codex_loops, :codex_app_server_max_turn_events)
+      else
+        Application.put_env(:codex_loops, :codex_app_server_max_turn_events, previous)
+      end
+
+      AppServer.reset()
+    end)
+
+    key = %Workflow.IdempotencyKey{run_id: "event-flood", node_path: [0], iteration: 0}
+
+    assert {:error, {:provider_failure, :backend, detail, nil, activity}} =
+             Codex.run_agent("prompt", nil, key, elem(codex(ctx, "event_flood"), 1))
+
+    assert detail["message"] == "Codex app-server turn notification limit exceeded"
+    assert detail["maxEvents"] == 5
+    assert length(activity) == 5
+  end
+
+  test "prompt bytes are bounded before admission to the app-server" do
+    key = %Workflow.IdempotencyKey{run_id: "large-prompt", node_path: [0], iteration: 0}
+    prompt = String.duplicate("x", 16 * 1_024 * 1_024 + 1)
+
+    assert {:error, {:provider_failure, :model_limit, detail, nil, []}} =
+             Codex.run_agent(prompt, nil, key, [])
+
+    assert detail["message"] == "codex prompt exceeded the provider input limit"
+    assert detail["maxBytes"] == 16 * 1_024 * 1_024
+  end
+
+  test "an interrupt that never completes recycles the transport before admitting more work", ctx do
+    previous_active = Application.get_env(:codex_loops, :codex_app_server_max_active)
+    previous_interrupt = Application.get_env(:codex_loops, :codex_app_server_interrupt_timeout)
+    Application.put_env(:codex_loops, :codex_app_server_max_active, 1)
+    Application.put_env(:codex_loops, :codex_app_server_interrupt_timeout, 50)
+    AppServer.reset()
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_max_active, previous_active)
+      restore_env(:codex_app_server_interrupt_timeout, previous_interrupt)
+      AppServer.reset()
+    end)
+
+    {Codex, base_opts} = codex(ctx, "ignore_interrupt")
+    first_key = %Workflow.IdempotencyKey{run_id: "ignored-interrupt-1", node_path: [0], iteration: 0}
+    second_key = %Workflow.IdempotencyKey{run_id: "ignored-interrupt-2", node_path: [0], iteration: 0}
+
+    first = Task.async(fn -> Codex.run_agent("first", nil, first_key, Keyword.put(base_opts, :timeout, 75)) end)
+    Process.sleep(30)
+    second = Task.async(fn -> Codex.run_agent("second", nil, second_key, Keyword.put(base_opts, :timeout, 1_000)) end)
+
+    assert {:error, {:provider_failure, :timeout, _detail, nil, _activity}} = Task.await(first, 1_000)
+
+    assert {:error, {:provider_failure, :backend, detail, nil, []}} = Task.await(second, 1_000)
+    assert detail["message"] == "Codex app-server did not complete an interrupted turn"
+
+    echo_key = %Workflow.IdempotencyKey{run_id: "after-recycle", node_path: [0], iteration: 0}
+
+    assert {:ok, "after", %Usage{}, _activity} =
+             Codex.run_agent("after", nil, echo_key, elem(codex(ctx, "echo"), 1))
+  end
+
+  test "queued caller churn removes queue entries instead of retaining tombstones", ctx do
+    previous_active = Application.get_env(:codex_loops, :codex_app_server_max_active)
+    previous_pending = Application.get_env(:codex_loops, :codex_app_server_max_pending)
+    Application.put_env(:codex_loops, :codex_app_server_max_active, 1)
+    Application.put_env(:codex_loops, :codex_app_server_max_pending, 1)
+    AppServer.reset()
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_max_active, previous_active)
+      restore_env(:codex_app_server_max_pending, previous_pending)
+      AppServer.reset()
+    end)
+
+    {Codex, base_opts} = codex(ctx, "timeout")
+    active_key = %Workflow.IdempotencyKey{run_id: "queue-active", node_path: [0], iteration: 0}
+    active = Task.async(fn -> Codex.run_agent("active", nil, active_key, Keyword.put(base_opts, :timeout, 500)) end)
+    wait_for_active_codex_request()
+
+    for iteration <- 1..12 do
+      key = %Workflow.IdempotencyKey{run_id: "queue-#{iteration}", node_path: [0], iteration: 0}
+
+      assert {:error, {:provider_failure, :timeout, _detail, nil, []}} =
+               Codex.run_agent("queued", nil, key, Keyword.put(base_opts, :timeout, 10))
+    end
+
+    state = :sys.get_state(AppServer)
+    assert :queue.len(state.waiting) == 0
+    assert map_size(state.requests) == 1
+    assert {:error, {:provider_failure, :timeout, _detail, nil, _activity}} = Task.await(active, 1_000)
+  end
+
+  test "explicit cancellation immediately admits the next queued turn", ctx do
+    previous_active = Application.get_env(:codex_loops, :codex_app_server_max_active)
+    Application.put_env(:codex_loops, :codex_app_server_max_active, 1)
+    AppServer.reset()
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_max_active, previous_active)
+      AppServer.reset()
+    end)
+
+    request = %{
+      prompt: "prompt",
+      cwd: File.cwd!(),
+      thread_sandbox: "danger-full-access",
+      turn_sandbox: %{"type" => "dangerFullAccess"},
+      command: {ctx.python, [ctx.stub, "thread_hang", "app-server"]},
+      timeout: 1_000
+    }
+
+    assert {:ok, first_ref, _owner} = AppServer.start_turn(request)
+    assert {:ok, second_ref, _owner} = AppServer.start_turn(request)
+    wait_for_request_phase(first_ref, :thread_start)
+    wait_for_request_phase(second_ref, :queued)
+
+    AppServer.cancel(first_ref)
+
+    wait_for_request_phase(second_ref, :thread_start)
+  end
+
+  defp restore_env(key, nil), do: Application.delete_env(:codex_loops, key)
+  defp restore_env(key, value), do: Application.put_env(:codex_loops, key, value)
+
+  defp wait_for_active_codex_request(attempts \\ 100)
+
+  defp wait_for_active_codex_request(0), do: flunk("Codex request never became active")
+
+  defp wait_for_active_codex_request(attempts) do
+    state = :sys.get_state(AppServer)
+
+    if Enum.any?(state.requests, fn {_ref, request} -> request.phase != :queued end) do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_active_codex_request(attempts - 1)
+    end
+  end
+
+  defp wait_for_request_phase(ref, phase, attempts \\ 100)
+
+  defp wait_for_request_phase(_ref, phase, 0), do: flunk("Codex request never reached #{phase}")
+
+  defp wait_for_request_phase(ref, phase, attempts) do
+    case :sys.get_state(AppServer).requests do
+      %{^ref => %{phase: ^phase}} ->
+        :ok
+
+      _other ->
+        Process.sleep(5)
+        wait_for_request_phase(ref, phase, attempts - 1)
+    end
   end
 end

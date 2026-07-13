@@ -76,7 +76,8 @@ defmodule Workflow.Scheduler.RunProjection do
     :raw_refs,
     :lifecycle_action,
     :ui_path,
-    :ui_url
+    :ui_url,
+    workspace_root: nil
   ]
 
   @type t :: %__MODULE__{
@@ -98,6 +99,7 @@ defmodule Workflow.Scheduler.RunProjection do
           refines: [Refine.t()],
           tool_activity: [ToolActivity.t()],
           raw_refs: RawRefs.t(),
+          workspace_root: String.t() | nil,
           lifecycle_action: LifecycleAction.t(),
           ui_path: String.t(),
           ui_url: String.t()
@@ -127,6 +129,7 @@ defmodule Workflow.Scheduler.RunProjection do
       refines: status.refines,
       tool_activity: status.tool_activity,
       raw_refs: status.raw_refs,
+      workspace_root: workspace_root(Keyword.get(opts, :events, [])),
       lifecycle_action: lifecycle_action(status, opts),
       ui_path: ui_path,
       ui_url: ui_path
@@ -199,6 +202,7 @@ defmodule Workflow.Scheduler.RunProjection do
       "refines" => Enum.map(projection.refines, &refine_map/1),
       "toolActivity" => Enum.map(projection.tool_activity, &tool_activity_map/1),
       "rawRefs" => raw_refs_map(projection.raw_refs),
+      "workspaceRoot" => projection.workspace_root,
       "workflowName" => projection.workflow_name,
       "lifecycleAction" => lifecycle_action_map(projection.lifecycle_action),
       "uiPath" => projection.ui_path,
@@ -226,6 +230,17 @@ defmodule Workflow.Scheduler.RunProjection do
 
       _event ->
         false
+    end)
+  end
+
+  defp workspace_root(events) do
+    Enum.find_value(events, fn
+      %Event{payload: %Payload.RunStarted{workspace_root: root}}
+      when is_binary(root) and root != "" ->
+        root
+
+      _event ->
+        nil
     end)
   end
 

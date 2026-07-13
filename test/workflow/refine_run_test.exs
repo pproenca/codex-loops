@@ -269,6 +269,53 @@ defmodule Workflow.RefineRunTest do
     end
   end
 
+  defmodule AmbiguousRefineProvider do
+    @moduledoc false
+    @behaviour Workflow.Provider
+
+    @detail %{"message" => "Codex app-server transport was lost"}
+
+    @impl true
+    def run_agent(_prompt, _schema, key, opts) do
+      if key.node_path == Keyword.fetch!(opts, :ambiguous_at) do
+        exit({:codex_turn_outcome_unknown, @detail})
+      end
+
+      output =
+        case key.node_path do
+          [0, 0] ->
+            %{"artifact" => "draft-v1"}
+
+          [0, 1, 0] ->
+            %{
+              "approved" => false,
+              "findings" => [
+                %{
+                  "id" => "base-gap",
+                  "blocking" => true,
+                  "issue" => "Base review found a gap.",
+                  "fix" => "Repair the base gap."
+                }
+              ]
+            }
+
+          [0, 1, _reviewer_index] ->
+            %{"approved" => true, "findings" => []}
+
+          [0, 2] ->
+            %{"artifact" => "draft-v2"}
+
+          [0, 3] ->
+            %{"approved" => true, "findings" => []}
+
+          [0, 4] ->
+            %{"artifact" => "repaired-v1"}
+        end
+
+      {:ok, output, %Usage{input_tokens: 1, output_tokens: 1, total_tokens: 2}}
+    end
+  end
+
   defmodule ReviewerRoleFailureProvider do
     @moduledoc false
     @behaviour Workflow.Provider
@@ -2185,6 +2232,27 @@ defmodule Workflow.RefineRunTest do
     assert Status.of(id).state == :completed
   end
 
+  test "an ambiguous reviewer transport loss reaches the writer outcome-unknown boundary" do
+    id = run_id()
+    detail = %{"message" => "Codex app-server transport was lost"}
+
+    assert {:error, {:run_crashed, {:codex_turn_outcome_unknown, ^detail}}} =
+             Run.run(SequentialReviewerConverges.tree(),
+               run_id: id,
+               provider: {AmbiguousRefineProvider, ambiguous_at: [0, 1, 0]}
+             )
+
+    attempt = %Workflow.IdempotencyKey{run_id: id, node_path: [0, 1, 0], iteration: 0, attempt: 0}
+    assert %Status{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
+    refute Enum.any?(events(id), &(&1.type == :refine_role_failed))
+
+    assert {:error, {:outcome_unknown, %{address: [0, 1, 0], iteration: 0, attempt: 0}}} =
+             Run.run(SequentialReviewerConverges.tree(),
+               run_id: id,
+               provider: {AmbiguousRefineProvider, ambiguous_at: [0, 1, 0]}
+             )
+  end
+
   test "cold-read and repair gates journal descriptors, role effects, and structured result" do
     id = run_id()
 
@@ -2336,6 +2404,31 @@ defmodule Workflow.RefineRunTest do
         Application.delete_env(:codex_loops, :refine_reviewer_timeout)
       end
     end
+  end
+
+  test "an ambiguous cold-read transport loss reaches the writer outcome-unknown boundary" do
+    id = run_id()
+    detail = %{"message" => "Codex app-server transport was lost"}
+
+    assert {:error, {:run_crashed, {:codex_turn_outcome_unknown, ^detail}}} =
+             Run.run(GateColdRepairEmitResult.tree(),
+               run_id: id,
+               provider: {AmbiguousRefineProvider, ambiguous_at: [0, 3]}
+             )
+
+    attempt = %Workflow.IdempotencyKey{run_id: id, node_path: [0, 3], iteration: 0, attempt: 0}
+    assert %Status{state: :failed, failure: %{reason: {:outcome_unknown, ^attempt}}} = Status.of(id)
+
+    refute Enum.any?(events(id), fn
+             %{type: :refine_role_failed, payload: %{role: :cold_read}} -> true
+             _event -> false
+           end)
+
+    assert {:error, {:outcome_unknown, %{address: [0, 3], iteration: 0, attempt: 0}}} =
+             Run.run(GateColdRepairEmitResult.tree(),
+               run_id: id,
+               provider: {AmbiguousRefineProvider, ambiguous_at: [0, 3]}
+             )
   end
 
   test "repair gate replay turns exhausted rejected attempts into one role failure" do

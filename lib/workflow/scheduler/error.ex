@@ -34,6 +34,36 @@ defmodule Workflow.Scheduler.Error do
     })
   end
 
+  @spec invalid_workspace_root(term(), term()) :: t()
+  def invalid_workspace_root(root, reason) do
+    new(
+      400,
+      "scheduler.run.invalid_workspace_root",
+      "Workspace root must be an absolute existing directory.",
+      workspace_details("workspace_root", root, reason, "absolute_existing_directory")
+    )
+  end
+
+  @spec invalid_workspace_script(term(), term()) :: t()
+  def invalid_workspace_script(path, reason) do
+    new(
+      400,
+      "scheduler.run.invalid_script_path",
+      "Workflow script must resolve to an existing regular file.",
+      workspace_details("script_path", path, reason, "existing_regular_file")
+    )
+  end
+
+  @spec script_outside_workspace(String.t(), String.t()) :: t()
+  def script_outside_workspace(script_path, workspace_root) do
+    new(
+      400,
+      "scheduler.run.script_outside_workspace",
+      "Workflow script must be contained by the workspace root.",
+      %{script_path: script_path, workspace_root: workspace_root}
+    )
+  end
+
   @spec invalid_run_id() :: t()
   def invalid_run_id do
     new(400, "scheduler.run.invalid_run_id", "Run id must be a non-empty string.", %{
@@ -127,6 +157,13 @@ defmodule Workflow.Scheduler.Error do
   defp validation_details(%Error{} = error) do
     Map.merge(error.details, %{path: error.path, reason: error.message, type: error.kind})
   end
+
+  defp workspace_details(field, value, reason, expected) do
+    maybe_put_value(%{field: field, expected: expected, reason: inspect(reason)}, value)
+  end
+
+  defp maybe_put_value(details, value) when is_binary(value), do: Map.put(details, :value, value)
+  defp maybe_put_value(details, _value), do: details
 
   defp new(status, code, message, details \\ %{}),
     do: %__MODULE__{status: status, code: code, message: message, details: details}

@@ -12,7 +12,11 @@ defmodule ProofSandbox do
 
     try do
       File.mkdir_p!(Path.join(home, ".codex/workflows"))
-      File.mkdir_p!(codex_home)
+      File.mkdir_p!(Path.join(codex_home, "plugins"))
+      source_auth = Path.join(codex_home, "auth.json")
+      File.write!(source_auth, JSON.encode!(%{"proof" => "sandbox-auth"}))
+      File.write!(Path.join(codex_home, "config.toml"), "model = \"user-config-model\"\n")
+      File.write!(Path.join(codex_home, "AGENTS.md"), "user-level instructions\n")
       File.write!(codex, "#!/bin/sh\nprintf 'codex-cli 0.0.0\\n'\n")
       File.chmod!(codex, 0o755)
 
@@ -47,6 +51,7 @@ defmodule ProofSandbox do
 
       for file <- [
             "manifest.json",
+            "serve.json",
             "initialize.json",
             "tools.json",
             "validation.json",
@@ -64,14 +69,38 @@ defmodule ProofSandbox do
       end
 
       manifest = artifact_dir |> Path.join("manifest.json") |> File.read!() |> JSON.decode!()
+      serve = artifact_dir |> Path.join("serve.json") |> File.read!() |> JSON.decode!()
       status = artifact_dir |> Path.join("status.json") |> File.read!() |> JSON.decode!()
       transcript = artifact_dir |> Path.join("mcp-transcript.jsonl") |> File.stream!() |> Enum.to_list()
+      isolated_codex_home = Path.join(artifact_dir, "home/codex-home")
+      isolated_auth = Path.join(isolated_codex_home, "auth.json")
 
       assert!(manifest["format"] == "codex-loops.sandbox.v1", "sandbox manifest format should be stable")
       assert!(manifest["provider"] == "mock", "sandbox manifest should record the provider")
       assert!(manifest["state"] == "completed", "sandbox manifest should record completion")
+      assert!(serve["started"] == true, "sandbox orchestration should start its scheduler explicitly")
+      assert!(serve["state"] == "running", "sandbox scheduler should be ready before MCP starts")
       assert!(status["data"]["state"] == "completed", "status artifact should record completion")
-      assert!(length(transcript) >= 10, "MCP transcript should include the lifecycle calls")
+      assert!(length(transcript) >= 10, "MCP transcript should include the workflow tool calls")
+      assert!(
+        not File.exists?(isolated_auth),
+        "mock sandbox must not inspect or expose source authentication"
+      )
+
+      assert!(
+        not File.exists?(Path.join(isolated_codex_home, "config.toml")),
+        "sandbox must not expose source Codex config"
+      )
+
+      assert!(
+        not File.exists?(Path.join(isolated_codex_home, "plugins")),
+        "sandbox must not expose source Codex plugins"
+      )
+
+      assert!(
+        not File.exists?(Path.join(isolated_codex_home, "AGENTS.md")),
+        "sandbox must not expose source Codex instructions"
+      )
 
       worktree = result["worktree"]
       File.write!(Path.join(worktree, "sandbox-dirty-proof.txt"), "retain me\n")
@@ -95,6 +124,7 @@ defmodule ProofSandbox do
       cleaned = JSON.decode!(cleaned)
       assert!(cleaned["removed"] == true, "forced cleanup should remove the sandbox")
       assert!(not File.exists?(artifact_dir), "sandbox artifacts should be removed")
+      assert!(File.read!(source_auth) == JSON.encode!(%{"proof" => "sandbox-auth"}), "cleanup must preserve source auth")
       IO.puts("Retained MCP sandbox run/inspect/cleanup proof passed")
     after
       File.rm_rf(temp_root)

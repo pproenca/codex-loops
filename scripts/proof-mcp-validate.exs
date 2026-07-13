@@ -101,6 +101,24 @@ defmodule ProofMCPValidate do
             "invalid MCP arguments must not start the scheduler"
           )
 
+          {unavailable, client} =
+            call_tool!(client, 8_998, "workflow_status", %{"run_id" => unknown_run_id})
+
+          unavailable_payload = error_tool_payload!(unavailable, "workflow_status")
+
+          assert!(
+            unavailable_payload["error"]["code"] == "scheduler_unavailable",
+            "MCP should report that an explicitly managed scheduler is unavailable"
+          )
+
+          assert!(
+            not File.exists?(runtime_dir),
+            "MCP must not create lifecycle state when the scheduler is unavailable"
+          )
+
+          start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root)
+          assert_scheduler_running!(scheduler_url)
+
           relative_path = ".codex/workflows/conformance_core.exs"
 
           {relative_validation, client} =
@@ -937,6 +955,33 @@ defmodule ProofMCPValidate do
       match?({:ok, _response}, http_health(scheduler_url)),
       "scheduler should survive MCP shutdown at #{scheduler_url}"
     )
+  end
+
+  defp start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root) do
+    {output, status} =
+      System.cmd(
+        entrypoint,
+        [
+          "serve",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          to_string(port),
+          "--journal",
+          journal_path,
+          "--json"
+        ],
+        env: [
+          {"CODEX_LOOPS_RUNTIME_DIR", runtime_dir},
+          {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
+          {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)},
+          {"CODEX_LOOPS_JOURNAL_PATH", journal_path},
+          {"HOME", Path.join(temp_root, "home")}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert!(status == 0, "native CLI could not start scheduler explicitly: #{output}")
   end
 
   defp stop_scheduler!(runtime_root, runtime_dir, port) do

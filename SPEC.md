@@ -1880,8 +1880,8 @@ forever.
   before `agent_committed` / `agent_attempt_rejected` is written. The activity sink is
   telemetry only: it does not change validation, retry, attempt identity, or workflow
   results.
-- **Codex `--output-schema` strictness.** The Codex provider passes a schema-backed turn's
-  schema to the CLI with `--output-schema`. Before writing that temporary schema file, it
+- **Codex `outputSchema` strictness.** The Codex provider passes a schema-backed turn's
+  schema to the app-server with `outputSchema`. Before sending it, the provider
   normalizes every object schema recursively to force `"additionalProperties" => false`,
   overriding any author-supplied value. This provider-port normalization is for Codex/OpenAI
   structured-output strictness; it does not mutate `%Agent{schema}` in the inert tree, and

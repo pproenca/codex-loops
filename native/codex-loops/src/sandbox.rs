@@ -1,7 +1,9 @@
 mod artifact;
 mod cleanup;
+mod codex_home;
 mod git;
 mod mcp_client;
+mod scheduler_process;
 
 use std::{
     env,
@@ -28,8 +30,10 @@ use self::{
         validate_manifest, write_json, write_snapshot,
     },
     cleanup::stop_scheduler,
+    codex_home::{Authentication, IsolatedCodexHome},
     git::RemoveMode,
     mcp_client::{McpClient, SpawnOptions},
+    scheduler_process::{SchedulerSpawnOptions, start_scheduler},
 };
 
 pub struct RunOptions {
@@ -81,11 +85,14 @@ pub async fn run(options: RunOptions) -> AppResult<RunOutput> {
     };
     let runtime = Runtime::installed()?;
     let original_home = home_dir()?;
-    let codex_home = env::var_os("CODEX_HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| original_home.join(".codex"));
+    let source_codex_home = source_codex_home(&original_home)?;
+    let authentication = match options.provider {
+        Provider::Mock => Authentication::NotRequired,
+        Provider::Codex => Authentication::required(&source_codex_home).await?,
+    };
     let layout = prepare_layout(options.output_dir.as_deref(), &run_id, &original_home).await?;
     persist_binding(&runtime.codex, &layout.home)?;
+    let codex_home = IsolatedCodexHome::prepare(&layout.home, &authentication).await?;
     let port = reserve_port()?;
     let server_url = Url::parse(&format!("http://127.0.0.1:{port}/")).map_err(|error| {
         AppError::new(
@@ -130,17 +137,26 @@ pub async fn run(options: RunOptions) -> AppResult<RunOutput> {
     };
     write_json(&layout.artifact_dir.join("manifest.json"), &manifest).await?;
 
+    let serve = start_scheduler(SchedulerSpawnOptions {
+        executable: &runtime.bundle.control_plane(),
+        worktree: &layout.worktree,
+        home: &layout.home,
+        codex_home: codex_home.as_path(),
+        runtime: &layout.runtime,
+        journal: &layout.journal,
+        port,
+        model: options.model.as_deref(),
+    })
+    .await?;
+    write_json(&layout.artifact_dir.join("serve.json"), &serve).await?;
+
     let mut client = McpClient::spawn(SpawnOptions {
         executable: &runtime.bundle.control_plane(),
         worktree: &layout.worktree,
         home: &layout.home,
-        codex_home: &codex_home,
-        runtime: &layout.runtime,
-        journal: &layout.journal,
         transcript: &layout.transcript,
         stderr: &layout.artifact_dir.join("mcp-stderr.log"),
         port,
-        model: options.model.as_deref(),
     })
     .await?;
 
@@ -293,6 +309,26 @@ fn reserve_port() -> AppResult<u16> {
                 ExitStatus::Runtime,
                 "sandbox_port_unavailable",
                 "Could not read the reserved sandbox scheduler port.",
+            )
+            .details(json!({"reason": error.to_string()}))
+        })
+}
+
+fn source_codex_home(default_home: &Path) -> AppResult<PathBuf> {
+    let configured = env::var_os("CODEX_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| default_home.join(".codex"));
+    if configured.is_absolute() {
+        return Ok(configured);
+    }
+    env::current_dir()
+        .map(|current| current.join(configured))
+        .map_err(|error| {
+            AppError::new(
+                ExitStatus::Runtime,
+                "sandbox_codex_home_invalid",
+                "Could not resolve the source Codex home directory.",
             )
             .details(json!({"reason": error.to_string()}))
         })

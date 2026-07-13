@@ -215,7 +215,7 @@ defmodule Workflow.Event do
   defp hydrate_activity(%Activity{} = activity), do: activity
   defp hydrate_activity(activity) when is_map(activity), do: Activity.normalize!(activity)
 
-  defp payload_spec(:run_started, _payload), do: {P.RunStarted, %{budget: nil, script_path: nil}}
+  defp payload_spec(:run_started, _payload), do: {P.RunStarted, %{budget: nil, script_path: nil, workspace_root: nil}}
   defp payload_spec(:phase_entered, _payload), do: {P.PhaseEntered, %{}}
   defp payload_spec(:log_emitted, _payload), do: {P.LogEmitted, %{}}
   defp payload_spec(:agent_started, _payload), do: {P.AgentStarted, %{label: nil}}
@@ -405,19 +405,21 @@ defmodule Workflow.Event do
   keeps the ledger a pure fold and survives resume: the target is read back from
   this journaled event rather than re-supplied.
 
-  `script_path` is the on-disk source the tree was compiled from (or `nil` when a
-  tree was supplied directly). Journaling it lets `resume` recover the workflow
-  from the run alone — recompiling the same path — so the read command surface
-  needs no separate script argument. The field is additive; older runs fold to
-  `nil` and stay resumable by re-supplying the tree.
+  `script_path` is the canonical on-disk source the tree was compiled from (or
+  `nil` when a tree was supplied directly). `workspace_root` is its canonical,
+  containing execution directory. Journaling both lets `resume` recover the
+  workflow and the same Codex filesystem context from the run alone. Both fields
+  are additive; older runs hydrate them to `nil` and can derive a safe root from a
+  recovered script path.
   """
-  def run_started(%Workflow.Tree{} = tree, budget \\ nil, script_path \\ nil) do
+  def run_started(%Workflow.Tree{} = tree, budget \\ nil, script_path \\ nil, workspace_root \\ nil) do
     event(%P.RunStarted{
       tree_name: tree.name,
       tree_version: tree.version,
       node_count: length(tree.nodes),
       budget: budget,
-      script_path: script_path
+      script_path: script_path,
+      workspace_root: workspace_root
     })
   end
 

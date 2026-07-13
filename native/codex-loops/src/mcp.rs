@@ -20,10 +20,9 @@ use serde_json::{Value, json};
 use crate::{
     cli::{ResolvedWorkflowScript, require_shared_filesystem},
     error::{AppError, AppResult, ExitStatus},
-    lifecycle,
     scheduler::{
         Provider, ResumeRequest, RunId, SchedulerClient, SchedulerDocument, SchedulerResponse,
-        StartRequest,
+        StartRequest, WorkflowLocationRequest,
     },
 };
 
@@ -93,6 +92,13 @@ enum ToolCall {
     Inspect(RunArgs),
     Resume(ResumeArgs),
     OpenUi(RunArgs),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspaceRootRequirement {
+    NotNeeded,
+    Optional,
+    Required,
 }
 
 #[derive(Debug)]
@@ -165,12 +171,33 @@ impl ToolCall {
         }
     }
 
-    fn contains_relative_script_path(&self) -> bool {
+    fn workspace_root_requirement(&self) -> WorkspaceRootRequirement {
         match self {
-            Self::Validate(args) => !args.script_path.is_absolute(),
-            Self::Start(args) => !args.script_path.is_absolute(),
-            Self::Resume(args) => args.script_path.iter().any(|path| !path.is_absolute()),
-            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => false,
+            Self::Validate(args) if args.script_path.is_absolute() => {
+                WorkspaceRootRequirement::Optional
+            }
+            Self::Validate(_args) => WorkspaceRootRequirement::Required,
+            Self::Start(args) if args.script_path.is_absolute() => {
+                WorkspaceRootRequirement::Optional
+            }
+            Self::Start(_args) => WorkspaceRootRequirement::Required,
+            Self::Resume(args) => match &args.script_path {
+                Some(path) if path.is_absolute() => WorkspaceRootRequirement::Optional,
+                Some(_path) => WorkspaceRootRequirement::Required,
+                None => WorkspaceRootRequirement::NotNeeded,
+            },
+            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => {
+                WorkspaceRootRequirement::NotNeeded
+            }
+        }
+    }
+
+    fn script_path(&self) -> Option<&Path> {
+        match self {
+            Self::Validate(args) => Some(&args.script_path),
+            Self::Start(args) => Some(&args.script_path),
+            Self::Resume(args) => args.script_path.as_deref(),
+            Self::Status(_args) | Self::Inspect(_args) | Self::OpenUi(_args) => None,
         }
     }
 
@@ -230,7 +257,7 @@ impl CodexLoopsServer {
     }
 
     async fn execute(&self, call: ResolvedToolCall) -> CallToolResult {
-        if let Err(error) = lifecycle::ensure_ready(&self.client).await {
+        if let Err(error) = self.client.require_compatible().await {
             return CallToolResult::structured_error(error.mcp_envelope());
         }
 
@@ -245,16 +272,19 @@ impl CodexLoopsServer {
                 run_id,
                 provider,
                 budget,
-            } => self
-                .client
-                .start(&StartRequest {
-                    script_path: script.into_string(),
-                    run_id,
-                    provider,
-                    budget,
-                })
-                .await
-                .and_then(SchedulerResponse::into_wire_value),
+            } => {
+                let location = script.into_location();
+                self.client
+                    .start(&StartRequest {
+                        script_path: location.script_path,
+                        workspace_root: location.workspace_root,
+                        run_id,
+                        provider,
+                        budget,
+                    })
+                    .await
+                    .and_then(SchedulerResponse::into_wire_value)
+            }
             ResolvedToolCall::Status(run_id) => {
                 self.client.status(&run_id).await.map(conform_projection)
             }
@@ -265,17 +295,28 @@ impl CodexLoopsServer {
                 run_id,
                 script,
                 provider,
-            } => self
-                .client
-                .resume(
-                    &run_id,
-                    &ResumeRequest {
-                        script_path: script.map(ResolvedWorkflowScript::into_string),
+            } => {
+                let request = match script {
+                    Some(script) => {
+                        let location = script.into_location();
+                        ResumeRequest {
+                            workflow: Some(WorkflowLocationRequest {
+                                script_path: location.script_path,
+                                workspace_root: location.workspace_root,
+                            }),
+                            provider,
+                        }
+                    }
+                    None => ResumeRequest {
+                        workflow: None,
                         provider,
                     },
-                )
-                .await
-                .and_then(SchedulerResponse::into_wire_value),
+                };
+                self.client
+                    .resume(&run_id, &request)
+                    .await
+                    .and_then(SchedulerResponse::into_wire_value)
+            }
             ResolvedToolCall::OpenUi(run_id) => self
                 .client
                 .status(&run_id)
@@ -321,13 +362,15 @@ impl ServerHandler for CodexLoopsServer {
             },
         )?;
         let requires_shared_filesystem = call.requires_shared_filesystem();
-        let workspace_root = if call.contains_relative_script_path() {
-            match workspace_root(&context).await {
-                Ok(root) => Some(root),
-                Err(error) => return Ok(CallToolResult::structured_error(error.mcp_envelope())),
-            }
-        } else {
-            None
+        let workspace_root = match workspace_root(
+            &context,
+            call.workspace_root_requirement(),
+            call.script_path(),
+        )
+        .await
+        {
+            Ok(root) => root,
+            Err(error) => return Ok(CallToolResult::structured_error(error.mcp_envelope())),
         };
         let call = match call.resolve(workspace_root.as_deref()).await {
             Ok(call) => call,
@@ -358,12 +401,19 @@ fn mcp_transport_error(error: impl std::fmt::Display) -> AppError {
 }
 
 #[allow(deprecated)]
-async fn workspace_root(context: &RequestContext<RoleServer>) -> AppResult<PathBuf> {
+async fn workspace_root(
+    context: &RequestContext<RoleServer>,
+    requirement: WorkspaceRootRequirement,
+    script_path: Option<&Path>,
+) -> AppResult<Option<PathBuf>> {
+    if requirement == WorkspaceRootRequirement::NotNeeded {
+        return Ok(None);
+    }
     match std::env::var("CODEX_LOOPS_WORKSPACE_ROOT") {
         Ok(root) if !root.is_empty() => {
             let root = PathBuf::from(root);
             if root.is_absolute() {
-                return Ok(root);
+                return Ok(Some(root));
             }
             return Err(workspace_root_config_error(
                 "CODEX_LOOPS_WORKSPACE_ROOT must be an absolute path.",
@@ -379,46 +429,102 @@ async fn workspace_root(context: &RequestContext<RoleServer>) -> AppResult<PathB
         }
     }
 
-    let client = context.peer.peer_info().ok_or_else(|| {
-        workspace_root_error(
-            "The MCP client did not provide initialization information for resolving the relative workflow path.",
-            json!({"source": "client_initialize"}),
-        )
-    })?;
-    client.capabilities.roots.as_ref().ok_or_else(|| {
-        workspace_root_error(
-            "The MCP client does not support workspace roots; set CODEX_LOOPS_WORKSPACE_ROOT to resolve relative workflow paths.",
-            json!({"missing_capability": "roots"}),
-        )
-    })?;
-    let roots = tokio::time::timeout(Duration::from_secs(1), context.peer.list_roots())
-        .await
-        .map_err(|_| {
+    let client = match context.peer.peer_info() {
+        Some(client) => client,
+        None => {
+            return missing_workspace_root(
+                requirement,
+                workspace_root_error(
+                    "The MCP client did not provide initialization information for resolving the relative workflow path.",
+                    json!({"source": "client_initialize"}),
+                ),
+            );
+        }
+    };
+    if client.capabilities.roots.is_none() {
+        return missing_workspace_root(
+            requirement,
             workspace_root_error(
-                "Timed out while requesting workspace roots from the MCP client.",
-                json!({"timeout_ms": 1_000}),
-            )
-        })?
-        .map_err(|error| {
-            workspace_root_error(
-                "The MCP client rejected the workspace-roots request.",
-                json!({"reason": error.to_string()}),
-            )
-        })?;
-    roots
+                "The MCP client does not support workspace roots; set CODEX_LOOPS_WORKSPACE_ROOT to resolve relative workflow paths.",
+                json!({"missing_capability": "roots"}),
+            ),
+        );
+    }
+    let roots = match tokio::time::timeout(Duration::from_secs(1), context.peer.list_roots()).await
+    {
+        Ok(Ok(roots)) => roots,
+        Ok(Err(error)) => {
+            return missing_workspace_root(
+                requirement,
+                workspace_root_error(
+                    "The MCP client rejected the workspace-roots request.",
+                    json!({"reason": error.to_string()}),
+                ),
+            );
+        }
+        Err(_elapsed) => {
+            return missing_workspace_root(
+                requirement,
+                workspace_root_error(
+                    "Timed out while requesting workspace roots from the MCP client.",
+                    json!({"timeout_ms": 1_000}),
+                ),
+            );
+        }
+    };
+    let local_roots: Vec<PathBuf> = roots
         .roots
         .iter()
-        .find_map(|root| {
+        .filter_map(|root| {
             url::Url::parse(&root.uri)
                 .ok()
                 .and_then(|uri| uri.to_file_path().ok())
         })
-        .ok_or_else(|| {
+        .collect();
+    match select_workspace_root(local_roots, script_path).await {
+        Some(root) => Ok(Some(root)),
+        None => missing_workspace_root(
+            requirement,
             workspace_root_error(
                 "The MCP client did not return a local filesystem workspace root; set CODEX_LOOPS_WORKSPACE_ROOT to resolve relative workflow paths.",
                 json!({"roots": roots.roots.iter().map(|root| &root.uri).collect::<Vec<_>>() }),
-            )
-        })
+            ),
+        ),
+    }
+}
+
+async fn select_workspace_root(roots: Vec<PathBuf>, script_path: Option<&Path>) -> Option<PathBuf> {
+    let Some(script_path) = script_path.filter(|path| path.is_absolute()) else {
+        return roots.into_iter().next();
+    };
+    let canonical_script = tokio::fs::canonicalize(script_path).await.ok();
+    let mut selected = None;
+    for root in roots {
+        let canonical_root = tokio::fs::canonicalize(&root).await.ok();
+        let candidate = canonical_root.as_deref().unwrap_or(&root);
+        let contains_script = canonical_script
+            .as_deref()
+            .is_some_and(|script| script.starts_with(candidate))
+            || script_path.starts_with(&root);
+        if contains_script
+            && selected.as_ref().is_none_or(|current: &PathBuf| {
+                candidate.components().count() > current.components().count()
+            })
+        {
+            selected = Some(candidate.to_path_buf());
+        }
+    }
+    selected
+}
+
+fn missing_workspace_root(
+    requirement: WorkspaceRootRequirement,
+    error: AppError,
+) -> AppResult<Option<PathBuf>> {
+    match requirement {
+        WorkspaceRootRequirement::NotNeeded | WorkspaceRootRequirement::Optional => Ok(None),
+        WorkspaceRootRequirement::Required => Err(error),
+    }
 }
 
 fn workspace_root_error(message: &str, details: Value) -> AppError {
@@ -680,6 +786,56 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code(), "invalid_params");
+    }
+
+    #[test]
+    fn workspace_roots_are_required_only_for_relative_script_paths() {
+        let relative = ToolCall::parse(
+            "workflow_start",
+            arguments(json!({"script_path": ".codex/workflows/review.exs"})),
+        )
+        .unwrap();
+        let absolute = ToolCall::parse(
+            "workflow_start",
+            arguments(json!({"script_path": "/tmp/review.exs"})),
+        )
+        .unwrap();
+        let pathless =
+            ToolCall::parse("workflow_resume", arguments(json!({"run_id": "run-1"}))).unwrap();
+
+        assert_eq!(
+            relative.workspace_root_requirement(),
+            WorkspaceRootRequirement::Required
+        );
+        assert_eq!(
+            absolute.workspace_root_requirement(),
+            WorkspaceRootRequirement::Optional
+        );
+        assert_eq!(
+            pathless.workspace_root_requirement(),
+            WorkspaceRootRequirement::NotNeeded
+        );
+    }
+
+    #[tokio::test]
+    async fn absolute_scripts_choose_the_deepest_containing_client_root() {
+        let root = tempfile::tempdir().unwrap();
+        let unrelated = root.path().join("unrelated");
+        let workspace = root.path().join("workspace");
+        let nested = workspace.join("nested");
+        tokio::fs::create_dir_all(&unrelated).await.unwrap();
+        tokio::fs::create_dir_all(&nested).await.unwrap();
+        let script = nested.join("review.exs");
+        tokio::fs::write(&script, "workflow \"test\" do\nend\n")
+            .await
+            .unwrap();
+
+        let selected =
+            select_workspace_root(vec![unrelated, workspace, nested.clone()], Some(&script))
+                .await
+                .unwrap();
+
+        assert_eq!(selected, tokio::fs::canonicalize(nested).await.unwrap());
     }
 
     #[test]

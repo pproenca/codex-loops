@@ -149,6 +149,68 @@ defmodule Workflow.Provider.Codex.Event do
   @type state :: :started | :updated | :completed
 
   @spec normalize(map()) :: t()
+  def normalize(%{"method" => "thread/tokenUsage/updated", "params" => %{"tokenUsage" => token_usage}})
+      when is_map(token_usage) do
+    usage = Map.get(token_usage, "last") || token_usage
+
+    case app_server_usage(usage) do
+      {:ok, usage} -> %TurnCompleted{usage: usage}
+      :error -> %StreamError{detail: %{"message" => "codex emitted invalid token usage"}}
+    end
+  end
+
+  def normalize(%{"method" => "error", "params" => %{"willRetry" => false, "error" => %{"message" => message} = error}})
+      when is_binary(message) do
+    %StreamError{detail: durable_map(error, message)}
+  end
+
+  def normalize(%{"method" => "error", "params" => %{"willRetry" => false} = params}) do
+    %StreamError{
+      detail: %{
+        "message" => "codex turn failed",
+        "error" => durable_value(Map.get(params, "error"))
+      }
+    }
+  end
+
+  def normalize(%{"method" => "error", "params" => %{"willRetry" => true}}) do
+    %Unknown{type: "error/retrying"}
+  end
+
+  def normalize(%{"method" => method, "params" => %{"item" => item}})
+      when method in ["item/started", "item/completed"] and is_map(item) do
+    state = if method == "item/started", do: :started, else: :completed
+    normalize_item(app_server_item(item), state)
+  end
+
+  def normalize(%{"method" => "item/agentMessage/delta", "params" => %{"delta" => delta}}) when is_binary(delta) do
+    %AgentMessage{state: :updated, text: copy(delta), final_message: nil}
+  end
+
+  def normalize(%{"method" => "turn/completed", "params" => %{"turn" => %{"status" => "completed"}}}) do
+    %Unknown{type: "turn/completed"}
+  end
+
+  def normalize(%{"method" => "turn/completed", "params" => %{"turn" => turn}}) when is_map(turn) do
+    error = Map.get(turn, "error")
+
+    case error do
+      %{"message" => message} = detail when is_binary(message) ->
+        %TurnFailed{detail: durable_map(detail, message)}
+
+      nil ->
+        status = Map.get(turn, "status", "failed")
+        %TurnFailed{detail: %{"message" => "codex turn #{status}"}}
+
+      other ->
+        %TurnFailed{detail: %{"message" => "codex turn failed", "error" => durable_value(other)}}
+    end
+  end
+
+  def normalize(%{"method" => method}) when is_binary(method) do
+    %Unknown{type: copy(method)}
+  end
+
   def normalize(%{"type" => "thread.started", "thread_id" => thread_id}) when is_binary(thread_id) do
     %ThreadStarted{thread_id: copy(thread_id)}
   end
@@ -247,9 +309,49 @@ defmodule Workflow.Provider.Codex.Event do
     end
   end
 
+  defp app_server_usage(usage) when is_map(usage) do
+    input = Map.get(usage, "inputTokens", 0)
+    output = Map.get(usage, "outputTokens", 0)
+    total = Map.get(usage, "totalTokens", input + output)
+
+    if is_integer(input) and input >= 0 and is_integer(output) and output >= 0 and is_integer(total) and total >= 0 do
+      {:ok, %Usage{input_tokens: input, output_tokens: output, total_tokens: total}}
+    else
+      :error
+    end
+  end
+
+  defp app_server_usage(_usage), do: :error
+
+  defp app_server_item(item) do
+    case Map.get(item, "type") do
+      "agentMessage" -> Map.put(item, "type", "agent_message")
+      "toolCall" -> Map.put(item, "type", "tool_call")
+      "commandExecution" -> Map.put(item, "type", "command_execution")
+      "dynamicToolCall" -> Map.put(item, "type", "dynamic_tool_call")
+      "fileChange" -> Map.put(item, "type", "file_change")
+      "imageGeneration" -> Map.put(item, "type", "image_generation")
+      "mcpToolCall" -> Map.put(item, "type", "mcp_tool_call")
+      "todoList" -> Map.put(item, "type", "todo_list")
+      "webSearch" -> Map.put(item, "type", "web_search")
+      type when is_binary(type) -> Map.put(item, "type", camel_to_snake(type))
+      _other -> item
+    end
+  end
+
+  defp camel_to_snake(value) do
+    value
+    |> String.replace(~r/([a-z0-9])([A-Z])/, "\\1_\\2")
+    |> String.downcase()
+  end
+
   defp message_text(text) when is_binary(text), do: text
   defp message_text([%{"text" => text} | _]) when is_binary(text), do: text
   defp message_text(_value), do: ""
+
+  defp agent_message(%{"text" => text, "phase" => "commentary"}, :completed) when is_binary(text) do
+    {copy(text), nil}
+  end
 
   defp agent_message(%{"text" => text}, :completed) when is_binary(text) do
     text = copy(text)
@@ -286,6 +388,15 @@ defmodule Workflow.Provider.Codex.Event do
 
   defp to_summary(value) when is_binary(value), do: value
   defp to_summary([%{"text" => text} | _]) when is_binary(text), do: text
+
+  defp to_summary(value) when is_list(value) do
+    Enum.map_join(value, " ", fn
+      text when is_binary(text) -> text
+      %{"text" => text} when is_binary(text) -> text
+      other -> inspect(other)
+    end)
+  end
+
   defp to_summary(value) when is_map(value), do: JSON.encode!(value)
   defp to_summary(value), do: inspect(value)
 
@@ -310,5 +421,12 @@ defmodule Workflow.Provider.Codex.Event do
   defp durable_value(value) do
     value = JSONValue.public(value)
     if JSONValue.durable_detail?(value), do: JSONValue.copy(value), else: inspect(value)
+  end
+
+  defp durable_map(detail, message) do
+    case durable_value(detail) do
+      durable when is_map(durable) -> Map.put(durable, "message", copy(message))
+      durable -> %{"message" => copy(message), "error" => durable}
+    end
   end
 end

@@ -6,9 +6,10 @@ This file provides guidance to coding agents when working with code in this repo
 
 Codex Loops is a local, path-first workflow scheduler for Codex. The product
 surface is an immutable runtime bundle with a native Rust CLI/MCP control plane,
-a packaged Elixir/Phoenix scheduler, and an optional skill-only plugin. Rust owns installation, OS-process lifecycle,
-stdio MCP, and scheduler HTTP calls; Elixir owns OTP supervision, workflow
-workers, Phoenix PubSub/LiveView, and the SQLite journal.
+a packaged Elixir/Phoenix scheduler, and an optional skill-only plugin. Rust owns installation, explicit OS-process
+lifecycle commands, stdio MCP, and scheduler HTTP calls; Elixir owns OTP
+supervision, one shared Codex app-server, workflow workers, Phoenix
+PubSub/LiveView, and the SQLite journal. MCP never starts the scheduler.
 
 ## Layout
 
@@ -40,7 +41,10 @@ Codex proofs remain manual because they require credentials and spend a turn.
 - Runs persist in SQLite at `~/.codex/workflows/runs_1.sqlite` unless
   `CODEX_LOOPS_JOURNAL_PATH` is set.
 - MCP tools call the scheduler HTTP API. They do not read SQLite or call
-  scheduler internals directly.
+  scheduler internals directly, and they do not manage scheduler processes.
+- One supervised Elixir process owns and multiplexes the scheduler-wide Codex
+  app-server connection. Provider activity is folded by callers, outside that
+  protocol owner's mailbox.
 - A supervised per-run writer process walks the compiled workflow tree, invokes
   the selected provider, synchronously commits ordered journal events, and only
   then publishes post-commit refresh notifications.

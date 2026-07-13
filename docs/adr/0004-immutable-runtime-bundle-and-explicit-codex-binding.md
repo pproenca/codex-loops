@@ -43,9 +43,10 @@ probed version remain persisted outside the immutable artifact.
 
 The native scheduler launcher injects a normalized command tuple pointing back
 to the versioned control plane. Its private `provider-exec` boundary reloads and
-re-probes the persisted `{path, version}` immediately before every real turn,
-then replaces itself with that exact command. A changed long-lived mise shim
-therefore fails as unavailable instead of silently selecting another Codex.
+re-probes the persisted `{path, version}` when the scheduler launches its Codex
+app-server, then replaces itself with that exact command. A changed long-lived
+mise shim therefore fails as unavailable instead of silently selecting another
+Codex. The app-server stays pinned until scheduler restart;
 `Workflow.Provider.Codex` trusts the injected tuple and never discovers or
 validates commands itself.
 

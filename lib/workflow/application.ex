@@ -12,6 +12,8 @@ defmodule Workflow.Application do
       the journal, not PubSub, remains authoritative.
     * `Workflow.TaskSupervisor` — supervised, unlinked worker tasks for
       failure-isolated concurrent regions such as `refine` reviewer panels.
+    * `Workflow.Provider.Codex.AppServer` — the fixed owner of the scheduler's
+      single lazy, long-lived Codex app-server process and JSON-RPC correlations.
     * `Workflow.Run.Supervisor` — dynamic supervisor for per-run writer processes.
     * `Workflow.Web.Endpoint` — the Phoenix endpoint serving the scheduler-snapshot
       LiveView. It starts after its dependencies and holds no run state of its own.
@@ -25,6 +27,7 @@ defmodule Workflow.Application do
       {Registry, keys: :unique, name: Workflow.Run.Registry},
       {Phoenix.PubSub, name: Workflow.PubSub},
       {Task.Supervisor, name: Workflow.TaskSupervisor},
+      Workflow.Provider.Codex.AppServer,
       {DynamicSupervisor, name: Workflow.Run.Supervisor, strategy: :one_for_one},
       Workflow.Web.Endpoint
     ]

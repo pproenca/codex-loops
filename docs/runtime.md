@@ -8,15 +8,17 @@ invokes the selected provider, commits ordered journal events to SQLite, and
 exits. Read surfaces are run projections folded from the journal.
 
 ```text
-Codex MCP tool -> scheduler HTTP API -> supervised run writer
-               -> provider turn or mock turn -> append-only SQLite journal
-               -> scheduler API / Phoenix LiveView projections
+Codex MCP tool -> Rust HTTP adapter -> scheduler HTTP API -> supervised run writer
+                                      -> mock turn, or one shared Codex app-server
+                                      -> append-only SQLite journal
+                                      -> scheduler API / Phoenix LiveView projections
 ```
 
-The native Rust control plane owns adapter and OS-process concerns: locating its
-fixed runtime bundle, starting, supervising, and stopping the local scheduler release; health-checking
-it; translating MCP tool calls into scheduler HTTP requests; and returning
-MCP-friendly envelopes. Elixir owns supervision inside the OTP application:
+The native Rust control plane owns adapter and explicit OS-process concerns:
+locating its fixed runtime bundle; CLI start, supervision, and stop commands;
+health-checking; and translating MCP tool calls into scheduler HTTP requests.
+The MCP subcommand never performs process lifecycle work. Elixir owns
+supervision inside the OTP application: the shared Codex app-server Port,
 `DynamicSupervisor`, `Registry`, run writers, journal owner, Phoenix PubSub, and
 Phoenix LiveView.
 
@@ -113,11 +115,11 @@ polling status snapshot and journal summaries through `/api/runs/<id>` and
 reachable. It then launches another mock run through the packaged
 `codex-loops run` command and verifies that run's LiveView URL.
 
-The MCP stage inside `make ci` executes the bundled control plane directly and
-proves lifecycle, validation, mock execution, conformance variants, status,
-inspection, resume, and UI opening against that external runtime. The proof
-asserts that the scheduler survives MCP shutdown, then stops it explicitly
-through the native CLI.
+The MCP stage inside `make ci` starts the scheduler explicitly, executes the
+bundled MCP adapter, and proves validation, mock execution, conformance
+variants, status, inspection, resume, and UI opening against that runtime. It
+also asserts that MCP creates no owner state and that closing MCP has no effect
+on the scheduler. Native lifecycle behavior has its own proof surface.
 
 The health projection checks the OTP application, journal owner, and PubSub.
 `Workflow.Web.Endpoint` is intentionally not repeated as a component check:
@@ -151,18 +153,17 @@ work again.
 ## Providers
 
 - `mock`: offline provider used by `test`.
-- `codex`: live provider that shells out to the explicitly bound `codex exec --json
-  --skip-git-repo-check`, folds each Codex event once, emits normalized activity
-  entries into the journal, and settles with a result plus token usage.
+- `codex`: live provider that submits turns to one scheduler-owned, initialized
+  Codex app-server, folds each correlated notification once, emits normalized
+  activity entries into the journal, and settles with a result plus token usage.
 
-Normal runs preserve the existing unrestricted provider invocation. The
-explicit `sandbox-run` surface instead configures the provider with
-`--sandbox workspace-write`, `--ephemeral`, `--ignore-user-config`, and `--cd`
-pointing at a detached Git worktree. Its scheduler runtime, journal, home,
-loopback port, and MCP transcript are isolated and retained until
-`sandbox-clean` removes them.
+Normal runs preserve unrestricted provider execution. The explicit
+`sandbox-run` surface instead starts ephemeral app-server threads with a
+workspace-write policy and an explicit detached Git worktree as `cwd`. Its
+scheduler runtime, journal, home, loopback port, and MCP transcript are isolated
+and retained until `sandbox-clean` removes them.
 
-Schema-backed turns use Codex structured output via `--output-schema`; the
+Schema-backed turns use the app-server `outputSchema` parameter; the
 schema owns output shape, while prompts should carry semantic work
 instructions. The writer still validates results locally and fails closed after
 configured retries.
@@ -172,14 +173,15 @@ lexical path plus exact version. The native launcher passes that path into
 runtime configuration. The provider consumes normalized application
 configuration and never searches PATH or reads process environment.
 
-Every external provider process is one-shot and bounded: input and stdout are
-limited to 16 MiB, the default turn deadline is 30 minutes, stderr is discarded,
-and a timeout or size breach fails the attempt. Concurrent workflow work is
-bounded by a system cap of eight tasks, fanout width by 64 lanes, and requested
-per-node limits may reduce those caps further. Agent retries are limited to five
-and loop bounds to 1000 iterations. Refine reviewers also have a finite
-per-reviewer deadline. Compatibility `while_budget`, `until_dry`, and `fan_out`
-forms lower to the generic `loop`/`fanout` semantic core before execution.
+The app-server protocol is bounded: JSON lines and pending admission have fixed
+limits, the default turn deadline is 30 minutes, and a timeout interrupts only
+its turn. At most eight live turns share the connection across all runs.
+Concurrent workflow work is also capped at eight tasks, fanout width at 64
+lanes, and requested per-node limits may reduce those caps further. Agent
+retries are limited to five and loop bounds to 1000 iterations. Refine reviewers
+also have a finite per-reviewer deadline. Compatibility `while_budget`,
+`until_dry`, and `fan_out` forms lower to the generic `loop`/`fanout` semantic
+core before execution.
 
 ## Supervision
 
@@ -188,6 +190,9 @@ The application supervises:
 - `Workflow.Journal`: SQLite write owner and boot gate.
 - `Workflow.Run.Registry`: unique per-run writer lease.
 - `Workflow.PubSub`: post-commit notifications.
+- `Workflow.TaskSupervisor`: bounded failure-isolated workflow tasks.
+- `Workflow.Provider.Codex.AppServer`: lazy owner and concurrent router for the
+  single Codex app-server Port.
 - `Workflow.Run.Supervisor`: dynamic supervisor for run writers.
 - `Workflow.Web.Endpoint`: optional endpoint, disabled by default unless
   `CODEX_LOOPS_SERVER=1` or `true`.
@@ -198,7 +203,7 @@ restarted too. No writer can remain alive behind a replacement registry.
 
 ## Scope
 
-Supported: local workflow scripts, MCP lifecycle/tool calls, mock tests, live
+Supported: local workflow scripts, explicit CLI lifecycle, HTTP-only MCP tool calls, mock tests, live
 Codex runs, SQLite-backed scheduler projections, scheduler API/UI reads, and
 release packaging.
 

@@ -4,13 +4,14 @@ defmodule Workflow.Run.Options do
   alias Workflow.Provider
 
   @enforce_keys [:run_id, :provider, :budget, :script_path]
-  defstruct @enforce_keys
+  defstruct @enforce_keys ++ [workspace_root: nil]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           provider: Provider.t(),
           budget: non_neg_integer() | nil,
-          script_path: String.t() | nil
+          script_path: String.t() | nil,
+          workspace_root: String.t() | nil
         }
 
   @type option ::
@@ -18,19 +19,22 @@ defmodule Workflow.Run.Options do
           | {:provider, Provider.t()}
           | {:budget, non_neg_integer()}
           | {:script_path, String.t()}
+          | {:workspace_root, String.t()}
 
   @spec from_keyword([option()]) :: {:ok, t()} | {:error, term()}
   def from_keyword(options) when is_list(options) do
     with {:ok, run_id} <- run_id(Keyword.get(options, :run_id)),
          {:ok, provider} <- Provider.resolve(Keyword.get(options, :provider)),
          {:ok, budget} <- budget(Keyword.get(options, :budget)),
-         {:ok, script_path} <- script_path(Keyword.get(options, :script_path)) do
+         {:ok, script_path} <- script_path(Keyword.get(options, :script_path)),
+         {:ok, workspace_root} <- workspace_root(Keyword.get(options, :workspace_root)) do
       {:ok,
        %__MODULE__{
          run_id: run_id,
          provider: provider,
          budget: budget,
-         script_path: script_path
+         script_path: script_path,
+         workspace_root: workspace_root
        }}
     end
   end
@@ -49,4 +53,10 @@ defmodule Workflow.Run.Options do
   defp script_path(nil), do: {:ok, nil}
   defp script_path(path) when is_binary(path) and byte_size(path) > 0, do: {:ok, :binary.copy(path)}
   defp script_path(_invalid), do: {:error, {:usage, :script_path}}
+
+  defp workspace_root(nil), do: {:ok, nil}
+
+  defp workspace_root(path) when is_binary(path) and byte_size(path) > 0, do: {:ok, :binary.copy(path)}
+
+  defp workspace_root(_invalid), do: {:error, {:usage, :workspace_root}}
 end

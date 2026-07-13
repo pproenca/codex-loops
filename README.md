@@ -3,9 +3,10 @@
 Codex Loops is a local, path-first workflow scheduler for Codex. It ships as one
 immutable runtime bundle containing a native Rust CLI/MCP control plane, a
 packaged Elixir/Phoenix scheduler, and the Codex Loops skill. Rust owns
-installation, OS-process lifecycle, stdio MCP, and scheduler HTTP calls; Elixir
-owns OTP supervision, workflow workers, Phoenix PubSub/LiveView, and the SQLite
-journal.
+installation, explicit OS-process lifecycle commands, stdio MCP, and scheduler
+HTTP calls; Elixir owns OTP supervision, the shared Codex app-server, workflow
+workers, Phoenix PubSub/LiveView, and the SQLite journal. MCP is an HTTP client
+of an already-running scheduler; it never starts or supervises one.
 
 The single `codex-loops` executable exposes both the user CLI and the `mcp`
 subcommand. It resolves the scheduler and skill only from fixed paths inside its
@@ -63,6 +64,9 @@ runtime executes at most eight workflow tasks concurrently. `while_budget`,
 
 Drive it through MCP:
 
+Start the scheduler first with `codex-loops serve` (or let an external process
+manager own it); MCP itself performs no lifecycle operations.
+
 ```text
 workflow_validate script_path=.codex/workflows/audit_workflow.exs
 workflow_start    script_path=.codex/workflows/audit_workflow.exs run_id=run_audit provider=mock
@@ -100,7 +104,7 @@ codex-loops sandbox-clean ~/.codex/workflows/sandbox-runs/<run-id>
 codex-loops sandbox-clean ~/.codex/workflows/sandbox-runs/<run-id> --force
 ```
 
-Normal `run` and MCP starts preserve their existing provider behavior;
+Normal `run` and MCP-triggered runs preserve their existing provider behavior;
 `sandbox-run` is the explicit contained execution surface.
 
 ## Development And Distribution

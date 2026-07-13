@@ -13,13 +13,9 @@ pub(super) struct SpawnOptions<'a> {
     pub executable: &'a Path,
     pub worktree: &'a Path,
     pub home: &'a Path,
-    pub codex_home: &'a Path,
-    pub runtime: &'a Path,
-    pub journal: &'a Path,
     pub transcript: &'a Path,
     pub stderr: &'a Path,
     pub port: u16,
-    pub model: Option<&'a str>,
 }
 
 pub(super) struct McpClient {
@@ -40,27 +36,8 @@ impl McpClient {
             )
             .details(json!({"path": options.stderr, "reason": error.to_string()}))
         })?;
-        let mut command = Command::new(options.executable);
-        command
-            .arg("mcp")
-            .current_dir(options.worktree)
-            .env("HOME", options.home)
-            .env("CODEX_HOME", options.codex_home)
-            .env("CODEX_LOOPS_RUNTIME_DIR", options.runtime)
-            .env("CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1")
-            .env("CODEX_LOOPS_SCHEDULER_PORT", options.port.to_string())
-            .env("CODEX_LOOPS_JOURNAL_PATH", options.journal)
-            .env("CODEX_LOOPS_WORKSPACE_ROOT", options.worktree)
-            .env("CODEX_LOOPS_CODEX_SANDBOX", "workspace-write")
-            .env("CODEX_LOOPS_CODEX_WORKDIR", options.worktree)
-            .env_remove("CODEX_LOOPS_SCHEDULER_URL")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::from(stderr))
-            .kill_on_drop(true);
-        if let Some(model) = options.model {
-            command.env("CODEX_LOOPS_CODEX_MODEL", model);
-        }
+        let mut command = mcp_command(&options);
+        command.stderr(Stdio::from(stderr));
         let mut child = command.spawn().map_err(|error| {
             AppError::new(
                 ExitStatus::Command,
@@ -326,6 +303,29 @@ impl McpClient {
     }
 }
 
+fn mcp_command(options: &SpawnOptions<'_>) -> Command {
+    let mut command = Command::new(options.executable);
+    command
+        .arg("mcp")
+        .current_dir(options.worktree)
+        .env("HOME", options.home)
+        .env("CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1")
+        .env("CODEX_LOOPS_SCHEDULER_PORT", options.port.to_string())
+        .env("CODEX_LOOPS_WORKSPACE_ROOT", options.worktree)
+        .env_remove("CODEX_HOME")
+        .env_remove("CODEX_ACCESS_TOKEN")
+        .env_remove("CODEX_LOOPS_RUNTIME_DIR")
+        .env_remove("CODEX_LOOPS_JOURNAL_PATH")
+        .env_remove("CODEX_LOOPS_CODEX_SANDBOX")
+        .env_remove("CODEX_LOOPS_CODEX_WORKDIR")
+        .env_remove("CODEX_LOOPS_CODEX_MODEL")
+        .env_remove("CODEX_LOOPS_SCHEDULER_URL")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true);
+    command
+}
+
 fn transcript_error(error: std::io::Error) -> AppError {
     AppError::new(
         ExitStatus::Runtime,
@@ -342,4 +342,45 @@ fn mcp_write_error(error: std::io::Error) -> AppError {
         "Could not write to the sandbox MCP process.",
     )
     .details(json!({"reason": error.to_string()}))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::BTreeMap, ffi::OsStr};
+
+    use super::*;
+
+    #[test]
+    fn mcp_has_only_transport_and_workspace_authority() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let options = SpawnOptions {
+            executable: Path::new("/opt/codex-loops"),
+            worktree: &root.path().join("repo"),
+            home: &home,
+            transcript: &root.path().join("mcp-transcript.jsonl"),
+            stderr: &root.path().join("mcp-stderr.log"),
+            port: 47_125,
+        };
+
+        let command = mcp_command(&options);
+        let env: BTreeMap<_, _> = command.as_std().get_envs().collect();
+
+        assert_eq!(
+            env.get(OsStr::new("CODEX_LOOPS_WORKSPACE_ROOT")),
+            Some(&Some(options.worktree.as_os_str()))
+        );
+        for removed in [
+            "CODEX_HOME",
+            "CODEX_ACCESS_TOKEN",
+            "CODEX_LOOPS_RUNTIME_DIR",
+            "CODEX_LOOPS_JOURNAL_PATH",
+            "CODEX_LOOPS_CODEX_SANDBOX",
+            "CODEX_LOOPS_CODEX_WORKDIR",
+            "CODEX_LOOPS_CODEX_MODEL",
+            "CODEX_LOOPS_SCHEDULER_URL",
+        ] {
+            assert_eq!(env.get(OsStr::new(removed)), Some(&None));
+        }
+    }
 }

@@ -114,6 +114,28 @@ defmodule Workflow.JournalPersistenceTest do
              Journal.fold(run_id)
   end
 
+  test "legacy run-started maps hydrate a nil workspace root" do
+    legacy = %Event{
+      run_id: "legacy_workspace",
+      seq: 0,
+      type: :run_started,
+      payload: %{
+        tree_name: "legacy",
+        tree_version: 1,
+        node_count: 0,
+        budget: nil,
+        script_path: "/tmp/legacy.exs"
+      }
+    }
+
+    assert %Event{
+             payload: %P.RunStarted{
+               script_path: "/tmp/legacy.exs",
+               workspace_root: nil
+             }
+           } = Event.normalize(legacy)
+  end
+
   test "additive payload keys survive persistence and typed hydration" do
     run_id = "run_journal_additive_payload_#{System.unique_integer([:positive])}"
     event = Event.run_completed(:ok)

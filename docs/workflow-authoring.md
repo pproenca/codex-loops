@@ -37,7 +37,7 @@ known atoms; arbitrary source text cannot mint atoms in the scheduler VM.
 - `agent "prompt"` runs one provider turn.
 - `agent "prompt", schema: %{...}, retries: n` requests structured output, where
   `n` is `0..5`, and fails closed after invalid attempts. For the Codex provider, the schema is
-  passed with `--output-schema`.
+  passed with the app-server `outputSchema` parameter.
 - `let :name = agent(...)`, `let :name = synthesize(...)`, and
   `let :name = refine(...)` bind a top-level producer's journaled output for
   later dataflow rendering.

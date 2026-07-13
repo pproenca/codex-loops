@@ -214,7 +214,8 @@ defmodule Workflow.Run.Writer do
               provider,
               prior,
               options.budget,
-              options.script_path
+              options.script_path,
+              options.workspace_root
             )
         end
     end
@@ -255,16 +256,16 @@ defmodule Workflow.Run.Writer do
 
   defp failed_turn_result(address, reason), do: {:malformed_output, address, reason}
 
-  defp run_tree(run_id, tree, provider, prior, budget, script_path) do
+  defp run_tree(run_id, tree, provider, prior, budget, script_path, workspace_root) do
     seq = Journal.last_seq(run_id) + 1
 
-    # A fresh run gets its start marker (carrying the budget target and the source
-    # path); a resume already carries one, so appending another would falsely
-    # re-mark the folded run as `:running` and re-declare a target the ledger
-    # already folded.
+    # A fresh run gets its start marker (carrying the budget target, source path,
+    # and workspace); a resume already carries one, so appending another would
+    # falsely re-mark the folded run as `:running` and re-declare facts the journal
+    # already owns.
     seq =
       if prior == [],
-        do: commit(run_id, seq, Event.run_started(tree, budget, script_path)),
+        do: commit(run_id, seq, Event.run_started(tree, budget, script_path, workspace_root)),
         else: seq
 
     ctx = %{seq: seq, return: nil, last_result: nil, iteration: 0, seen_by: [], loop_address: nil}
@@ -1064,6 +1065,9 @@ defmodule Workflow.Run.Writer do
           )
 
         {:failed, seq, failure}
+
+      {:exit, {:codex_turn_outcome_unknown, detail}} ->
+        exit({:codex_turn_outcome_unknown, detail})
 
       {:exit, {%_{} = exception, stacktrace}} when is_list(stacktrace) ->
         reraise exception, stacktrace
@@ -2190,6 +2194,9 @@ defmodule Workflow.Run.Writer do
 
       {{:exit, :timeout}, reviewer} ->
         failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_timeout, timeout}, detail: timeout)
+
+      {{:exit, {:codex_turn_outcome_unknown, detail}}, _reviewer} ->
+        exit({:codex_turn_outcome_unknown, detail})
 
       {{:exit, {%_{} = exception, stacktrace}}, _reviewer} when is_list(stacktrace) ->
         reraise exception, stacktrace

@@ -3,6 +3,7 @@ defmodule Workflow.SchedulerTest do
 
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
+  alias Workflow.Provider.Codex.AppServer
   alias Workflow.Provider.Mock
   alias Workflow.Run
   alias Workflow.Scheduler
@@ -34,40 +35,24 @@ defmodule Workflow.SchedulerTest do
     """)
   end
 
-  defp codex_stub_source do
-    """
-    #!/bin/sh
-    cat >/dev/null
-    printf '%s\\n' '{"type":"thread.started","thread_id":"scheduler-stub"}'
-    printf '%s\\n' '{"type":"turn.started"}'
-    printf '%s\\n' '{"type":"item.completed","item":{"id":"item-1","type":"agent_message","text":"LIVE-MCP-PROOF-OK"}}'
-    printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":0,"output_tokens":11,"reasoning_output_tokens":0}}'
-    """
-  end
-
   defp with_codex_stub(fun) when is_function(fun, 0) do
-    dir =
-      Path.join(System.tmp_dir!(), "scheduler_codex_stub_#{System.unique_integer([:positive])}")
-
-    File.mkdir_p!(dir)
-
-    stub = Path.join(dir, "codex")
-    File.write!(stub, codex_stub_source())
-    File.chmod!(stub, 0o755)
+    python = System.find_executable("python3")
+    stub = Path.expand("support/codex_app_server_stub.py", __DIR__ <> "/..")
 
     previous_codex_command = Application.get_env(:codex_loops, :codex_command)
-    Application.put_env(:codex_loops, :codex_command, {stub, []})
+    AppServer.reset()
+    Application.put_env(:codex_loops, :codex_command, {python, [stub, "live_proof"]})
 
     try do
       fun.()
     after
+      AppServer.reset()
+
       if previous_codex_command do
         Application.put_env(:codex_loops, :codex_command, previous_codex_command)
       else
         Application.delete_env(:codex_loops, :codex_command)
       end
-
-      File.rm_rf(dir)
     end
   end
 

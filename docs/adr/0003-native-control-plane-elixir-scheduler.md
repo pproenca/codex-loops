@@ -1,5 +1,8 @@
 # ADR 0003: Native Control Plane and Elixir Scheduler
 
+> Partially superseded by ADR 0005: MCP no longer performs implicit scheduler
+> lifecycle management. Explicit native CLI lifecycle commands remain accepted.
+
 ## Status
 
 Accepted. Supersedes ADR 0002 and the Anubis decision in ADR 0001.

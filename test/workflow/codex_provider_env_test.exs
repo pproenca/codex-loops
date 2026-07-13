@@ -3,6 +3,7 @@ defmodule Workflow.CodexProviderEnvTest do
 
   alias Workflow.Journal
   alias Workflow.Provider.Codex
+  alias Workflow.Provider.Codex.AppServer
   alias Workflow.Run
   alias Workflow.Status
 
@@ -25,11 +26,13 @@ defmodule Workflow.CodexProviderEnvTest do
     previous_codex_command = Application.get_env(:codex_loops, :codex_command)
     previous_codex_model = Application.get_env(:codex_loops, :codex_model)
     previous_codex_execution = Application.get_env(:codex_loops, :codex_execution)
+    AppServer.reset()
 
     on_exit(fn ->
       restore_config(:codex_command, previous_codex_command)
       restore_config(:codex_model, previous_codex_model)
       restore_config(:codex_execution, previous_codex_execution)
+      AppServer.reset()
     end)
 
     :ok
@@ -39,50 +42,23 @@ defmodule Workflow.CodexProviderEnvTest do
     bin = executable_stub("codex-bin")
     Application.put_env(:codex_loops, :codex_command, {bin, []})
 
-    assert {^bin,
-            [
-              "exec",
-              "--json",
-              "--dangerously-bypass-approvals-and-sandbox",
-              "--skip-git-repo-check"
-            ]} = Codex.default_command()
+    assert {^bin, ["app-server"]} = Codex.default_command()
   end
 
-  test "the normalized application config selects the Codex model" do
+  test "the model remains a per-turn setting rather than a process argument" do
     bin = executable_stub("codex-model")
     Application.put_env(:codex_loops, :codex_command, {bin, []})
     Application.put_env(:codex_loops, :codex_model, "gpt-5.5")
 
-    assert {^bin,
-            [
-              "exec",
-              "--json",
-              "--dangerously-bypass-approvals-and-sandbox",
-              "--skip-git-repo-check",
-              "--model",
-              "gpt-5.5"
-            ]} = Codex.default_command()
+    assert {^bin, ["app-server"]} = Codex.default_command()
   end
 
-  test "the normalized application config selects a sandboxed ephemeral worktree" do
+  test "the sandbox remains a per-turn setting rather than a process argument" do
     bin = executable_stub("codex-sandbox")
     Application.put_env(:codex_loops, :codex_command, {bin, []})
     Application.put_env(:codex_loops, :codex_execution, {:sandboxed, "/tmp/review-worktree"})
 
-    assert {^bin,
-            [
-              "exec",
-              "--json",
-              "--ephemeral",
-              "--ignore-user-config",
-              "-c",
-              ~s(approval_policy="never"),
-              "--sandbox",
-              "workspace-write",
-              "--cd",
-              "/tmp/review-worktree",
-              "--skip-git-repo-check"
-            ]} = Codex.default_command()
+    assert {^bin, ["app-server"]} = Codex.default_command()
   end
 
   test "a missing normalized Codex command is journaled as an unavailable provider failure" do
@@ -123,7 +99,7 @@ defmodule Workflow.CodexProviderEnvTest do
              )
 
     assert detail["config"] == "codex_command"
-    assert detail["message"] =~ "exit status 127"
+    assert detail["message"] =~ "Codex app-server"
 
     assert id |> Journal.fold() |> Enum.map(& &1.type) == [
              :run_started,

@@ -48,6 +48,11 @@ defmodule Workflow.Provider.Codex.StreamAccumulator do
     end
   end
 
+  @spec observe_map(t(), map()) :: t()
+  def observe_map(%__MODULE__{} = acc, event) when is_map(event) do
+    observe_event(acc, Event.normalize(event))
+  end
+
   @spec finish(t()) ::
           {:ok, term(), Usage.t(), [Activity.t()]}
           | {:error, {:provider_failure, atom(), map(), Usage.t() | nil, [Activity.t()]}}

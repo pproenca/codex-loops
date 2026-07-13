@@ -130,6 +130,7 @@ pub(super) struct HealthData {
 #[derive(Debug, Serialize)]
 pub struct StartRequest {
     pub script_path: String,
+    pub workspace_root: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub run_id: Option<RunId>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -140,10 +141,16 @@ pub struct StartRequest {
 
 #[derive(Debug, Serialize)]
 pub struct ResumeRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub script_path: Option<String>,
+    #[serde(flatten)]
+    pub workflow: Option<WorkflowLocationRequest>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WorkflowLocationRequest {
+    pub script_path: String,
+    pub workspace_root: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

@@ -41,7 +41,8 @@ syntax lowers to the generic bounded core.
 _Avoid_: unbounded retry, unlimited fanout, runtime-specific legacy semantics
 
 **Codex event**:
-A raw JSON object emitted by `codex exec --json`; it is provider protocol input before Codex Loops normalizes it.
+A correlated app-server notification for one Codex thread/turn; it is provider
+protocol input before Codex Loops normalizes it.
 _Avoid_: journal event, activity entry
 
 **Run projection**:

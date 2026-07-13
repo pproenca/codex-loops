@@ -53,6 +53,8 @@ defmodule ProofMCPLive do
 
     try do
       File.write!(workflow_path, workflow_source())
+      start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root)
+      assert_scheduler_running!(scheduler_url)
 
       with_mcp_client(
         temp_root,
@@ -545,6 +547,36 @@ defmodule ProofMCPLive do
       match?({:ok, _response}, http_health(scheduler_url)),
       "scheduler should survive MCP shutdown at #{scheduler_url}"
     )
+  end
+
+  defp start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root) do
+    codex_home = System.get_env("CODEX_HOME") || Path.join(System.user_home!(), ".codex")
+
+    {output, status} =
+      System.cmd(
+        entrypoint,
+        [
+          "serve",
+          "--host",
+          "127.0.0.1",
+          "--port",
+          to_string(port),
+          "--journal",
+          journal_path,
+          "--json"
+        ],
+        env: [
+          {"CODEX_LOOPS_RUNTIME_DIR", runtime_dir},
+          {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
+          {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)},
+          {"CODEX_LOOPS_JOURNAL_PATH", journal_path},
+          {"CODEX_HOME", Path.expand(codex_home)},
+          {"HOME", Path.join(temp_root, "home")}
+        ],
+        stderr_to_stdout: true
+      )
+
+    assert!(status == 0, "native CLI could not start scheduler explicitly: #{output}")
   end
 
   defp stop_scheduler!(runtime_root, runtime_dir, port) do

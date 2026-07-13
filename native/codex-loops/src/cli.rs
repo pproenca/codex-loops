@@ -24,7 +24,8 @@ use crate::{
     lifecycle::{self, AbsolutePath, BindHost, SchedulerConfig, StartOptions, StopMode},
     runtime::Runtime,
     scheduler::{
-        HealthState, Provider, ResumeRequest, RunId, SchedulerClient, StartRequest, local_url,
+        HealthState, Provider, ResumeRequest, RunId, SchedulerClient, StartRequest,
+        WorkflowLocationRequest, local_url,
     },
 };
 
@@ -112,8 +113,10 @@ pub async fn run_workflow(options: RunOptions) -> AppResult<CliOutput> {
         Some(run_id) => run_id,
         None => default_run_id(script.as_path())?,
     };
+    let location = script.into_location();
     let request = StartRequest {
-        script_path: script.into_string(),
+        script_path: location.script_path,
+        workspace_root: location.workspace_root,
         run_id: Some(run_id),
         provider: Some(options.provider),
         budget: None,
@@ -308,9 +311,21 @@ pub async fn resume(options: ResumeOptions) -> AppResult<CliOutput> {
         None => None,
     };
     lifecycle::ensure_ready(&client).await?;
-    let request = ResumeRequest {
-        script_path: script.map(ResolvedWorkflowScript::into_string),
-        provider: Some(options.provider),
+    let request = match script {
+        Some(script) => {
+            let location = script.into_location();
+            ResumeRequest {
+                workflow: Some(WorkflowLocationRequest {
+                    script_path: location.script_path,
+                    workspace_root: location.workspace_root,
+                }),
+                provider: Some(options.provider),
+            }
+        }
+        None => ResumeRequest {
+            workflow: None,
+            provider: Some(options.provider),
+        },
     };
     Ok(CliOutput::Scheduler(
         client
@@ -675,6 +690,14 @@ mod tests {
             AppError::new(ExitStatus::Runtime, "test_setup_failed", error.to_string())
         })?;
         assert_eq!(resolved.as_path(), canonical);
+        assert_eq!(
+            resolved.workspace_root(),
+            tokio::fs::canonicalize(root.path())
+                .await
+                .map_err(|error| {
+                    AppError::new(ExitStatus::Runtime, "test_setup_failed", error.to_string())
+                })?
+        );
         Ok(())
     }
 }

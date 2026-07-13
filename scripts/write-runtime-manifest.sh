@@ -13,7 +13,7 @@ cat >"$destination" <<EOF
   "target": "$target",
   "codex": {
     "binding": "user-local lexical absolute path plus exact probed version",
-    "required_protocol": "codex exec --json JSONL with direct codex mcp registration"
+    "required_protocol": "codex app-server JSONL with direct codex mcp registration"
   }
 }
 EOF

@@ -11,6 +11,7 @@ defmodule Workflow.Scheduler do
   alias Workflow.Event.Payload
   alias Workflow.Journal
   alias Workflow.PackageVersion
+  alias Workflow.Provider.Codex
   alias Workflow.Provider.Mock
   alias Workflow.Run
   alias Workflow.Run.Options, as: RunOptions
@@ -21,6 +22,7 @@ defmodule Workflow.Scheduler do
   alias Workflow.Scheduler.RunStart
   alias Workflow.Scheduler.Snapshot
   alias Workflow.Scheduler.Validation
+  alias Workflow.Scheduler.Workspace
   alias Workflow.Script
   alias Workflow.Status
 
@@ -48,12 +50,15 @@ defmodule Workflow.Scheduler do
          {:ok, run_id} <- run_id(params),
          {:ok, provider} <- run_provider(params),
          {:ok, budget} <- run_budget(params),
-         {:ok, tree} <- Script.load_tree(path) do
+         {:ok, requested_workspace_root} <- run_workspace_root(params),
+         {:ok, workspace} <- Workspace.resolve(path, requested_workspace_root),
+         {:ok, tree} <- Script.load_tree(workspace.script_path) do
       options = %RunOptions{
         run_id: run_id,
-        provider: provider,
+        provider: provider_with_workspace(provider, workspace.workspace_root),
         budget: budget,
-        script_path: Path.expand(path)
+        script_path: workspace.script_path,
+        workspace_root: workspace.workspace_root
       }
 
       case Run.start(tree, options) do
@@ -82,12 +87,15 @@ defmodule Workflow.Scheduler do
          :ok <- ensure_run_exists(run_id),
          {:ok, provider} <- run_provider(params),
          {:ok, path} <- resume_script_path(run_id, params),
-         {:ok, tree} <- Script.load_tree(path) do
+         {:ok, requested_workspace_root} <- resume_workspace_root(run_id, params),
+         {:ok, workspace} <- Workspace.resolve(path, requested_workspace_root),
+         {:ok, tree} <- Script.load_tree(workspace.script_path) do
       options = %RunOptions{
         run_id: run_id,
-        provider: provider,
+        provider: provider_with_workspace(provider, workspace.workspace_root),
         budget: nil,
-        script_path: Path.expand(path)
+        script_path: workspace.script_path,
+        workspace_root: workspace.workspace_root
       }
 
       case Run.start(tree, options) do
@@ -202,6 +210,44 @@ defmodule Workflow.Scheduler do
     end
   end
 
+  defp run_workspace_root(params) do
+    case explicit_workspace_root(params) do
+      {:ok, root} -> {:ok, root}
+      :missing -> {:ok, nil}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp resume_workspace_root(run_id, params) do
+    case explicit_workspace_root(params) do
+      {:ok, root} -> {:ok, root}
+      :missing -> {:ok, journaled_workspace_root(run_id)}
+      {:error, error} -> {:error, error}
+    end
+  end
+
+  defp explicit_workspace_root(params) do
+    case fetch_param(params, :workspace_root, "workspace_root") do
+      {:ok, root} when is_binary(root) and byte_size(root) > 0 -> {:ok, root}
+      :missing -> :missing
+      {:ok, invalid} -> {:error, Error.invalid_workspace_root(invalid, :invalid_value)}
+    end
+  end
+
+  defp journaled_workspace_root(run_id) do
+    case Enum.find(Journal.fold(run_id), fn
+           %Event{payload: %Payload.RunStarted{}} -> true
+           %Event{} -> false
+         end) do
+      %Event{payload: %Payload.RunStarted{workspace_root: root}}
+      when is_binary(root) and byte_size(root) > 0 ->
+        root
+
+      _missing_or_legacy ->
+        nil
+    end
+  end
+
   defp run_id(params) do
     case fetch_param(params, :run_id, "run_id") do
       :missing -> {:ok, RunOptions.generate_run_id()}
@@ -255,10 +301,21 @@ defmodule Workflow.Scheduler do
     case fetch_param(params, :provider, "provider") do
       :missing -> {:ok, {Mock, []}}
       {:ok, provider} when provider in ["mock", :mock] -> {:ok, {Mock, []}}
-      {:ok, provider} when provider in ["codex", :codex] -> {:ok, {Workflow.Provider.Codex, []}}
+      {:ok, provider} when provider in ["codex", :codex] -> {:ok, {Codex, []}}
       {:ok, _unsupported} -> {:error, Error.invalid_provider(@supported_providers)}
     end
   end
+
+  defp provider_with_workspace({Codex, opts}, workspace_root) do
+    opts =
+      opts
+      |> Keyword.put(:workspace_root, workspace_root)
+      |> Keyword.put(:cwd, workspace_root)
+
+    {Codex, opts}
+  end
+
+  defp provider_with_workspace(provider, _workspace_root), do: provider
 
   defp run_budget(params) do
     case fetch_param(params, :budget, "budget") do

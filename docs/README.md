@@ -2,9 +2,10 @@
 
 Codex Loops is a local, path-first workflow scheduler distributed as one
 immutable runtime bundle. Its native Rust control plane owns installation,
-stdio MCP, scheduler HTTP translation, and OS-process lifecycle. Its packaged
-Elixir/Phoenix scheduler owns OTP supervision, workflow workers, the SQLite
-journal, PubSub, and LiveView.
+stdio MCP, scheduler HTTP translation, and explicit OS-process lifecycle
+commands. Its packaged Elixir/Phoenix scheduler owns OTP supervision, one
+shared Codex app-server connection, workflow workers, the SQLite journal,
+PubSub, and LiveView. MCP only talks to an already-running scheduler over HTTP.
 
 ## Canonical Subdocs
 

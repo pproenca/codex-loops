@@ -16,6 +16,7 @@ defmodule Workflow.Web.RunLiveTest do
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
   alias Workflow.Node.Phase
+  alias Workflow.Provider.Codex.AppServer
   alias Workflow.Provider.Usage
   alias Workflow.Run
   alias Workflow.Script
@@ -297,38 +298,18 @@ defmodule Workflow.Web.RunLiveTest do
     """)
   end
 
-  defp codex_realtime_stub_source do
-    """
-    #!/bin/sh
-    cat >/dev/null
-    if [ -z "$CODEX_LOOPS_STUB_RELEASE" ]; then
-      echo "CODEX_LOOPS_STUB_RELEASE is required" >&2
-      exit 2
-    fi
-    printf '%s\\n' '{"type":"thread.started","thread_id":"run-live-stub"}'
-    printf '%s\\n' '{"type":"turn.started"}'
-    printf '%s\\n' '{"type":"item.completed","item":{"id":"reason-1","type":"reasoning","text":"read the acceptance criteria"}}'
-    printf '%s\\n' '{"type":"item.completed","item":{"id":"tool-1","type":"tool_call","name":"shell","input":{"cmd":"mix test test/workflow/web/run_live_test.exs"}}}'
-    printf '%s\\n' '{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"codex final draft"}}'
-    while [ ! -f "$CODEX_LOOPS_STUB_RELEASE" ]; do
-      sleep 0.05
-    done
-    printf '%s\\n' '{"type":"turn.completed","usage":{"input_tokens":7,"cached_input_tokens":0,"output_tokens":11,"reasoning_output_tokens":0}}'
-    """
-  end
-
   defp with_blocking_codex_stub(fun) when is_function(fun, 1) do
     dir = Path.join(System.tmp_dir!(), "run_live_codex_stub_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
 
-    stub = Path.join(dir, "codex")
+    python = System.find_executable("python3")
+    stub = Path.expand("../../support/codex_app_server_stub.py", __DIR__)
     release = Path.join(dir, "release")
-    File.write!(stub, codex_realtime_stub_source())
-    File.chmod!(stub, 0o755)
 
     previous_codex_command = Application.get_env(:codex_loops, :codex_command)
     previous_release = System.get_env("CODEX_LOOPS_STUB_RELEASE")
-    Application.put_env(:codex_loops, :codex_command, {stub, []})
+    AppServer.reset()
+    Application.put_env(:codex_loops, :codex_command, {python, [stub, "realtime"]})
     System.put_env("CODEX_LOOPS_STUB_RELEASE", release)
 
     release_stub = fn -> File.write!(release, "go") end
@@ -337,6 +318,7 @@ defmodule Workflow.Web.RunLiveTest do
       fun.(release_stub)
     after
       release_stub.()
+      AppServer.reset()
 
       if previous_codex_command do
         Application.put_env(:codex_loops, :codex_command, previous_codex_command)

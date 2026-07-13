@@ -96,8 +96,8 @@ Use a scout-first authoring loop:
    `parallel`, `pipeline`, or loop combinators.
 4. Write domain-rich worker prompts with exact paths or search scope, evidence
    expectations, semantic field meaning, constraints, and halt conditions. Put
-   structural output shape in `schema:` so Codex receives it through
-   `--output-schema`.
+   structural output shape in `schema:` so Codex receives it through the
+   app-server `outputSchema` parameter.
 5. For mutating workflows, include adversarial verification and a final build or
    test gate before reporting completion.
 6. Run `workflow_validate` and a mock `workflow_start` before live execution.

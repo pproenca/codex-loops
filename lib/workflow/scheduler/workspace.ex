@@ -168,5 +168,5 @@ defmodule Workflow.Scheduler.Workspace do
   end
 
   defp join_segments([root | segments]), do: join_path(root, segments)
-  defp join_path(root, segments), do: Enum.reduce(segments, root, &Path.join(&2, &1))
+  defp join_path(root, segments), do: Path.join([root | segments])
 end

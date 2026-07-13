@@ -111,7 +111,8 @@ defmodule Workflow.Web.RunLive do
       valid_agent_id(status, phase_id, socket.assigns[:selected_agent_id]) ||
         first_agent_id(status, phase_id)
 
-    assign(socket,
+    socket
+    |> assign(
       run_id: run_id,
       status: status,
       run_projection: run_projection,
@@ -119,6 +120,7 @@ defmodule Workflow.Web.RunLive do
       user_focused_phase_id: user_focused_phase_id,
       selected_agent_id: agent_id
     )
+    |> assign_detail(status, phase_id, agent_id)
   end
 
   defp scheduler_snapshot(run_id), do: Scheduler.get_run_snapshot(run_id)
@@ -162,21 +164,40 @@ defmodule Workflow.Web.RunLive do
     status = socket.assigns.status
     phase_id = valid_phase_id(status, phase_id) || first_phase_id(status)
 
-    assign(socket,
+    agent_id = first_agent_id(status, phase_id)
+
+    socket
+    |> assign(
       focused_phase_id: phase_id,
       user_focused_phase_id: phase_id,
-      selected_agent_id: first_agent_id(status, phase_id)
+      selected_agent_id: agent_id
     )
+    |> assign_detail(status, phase_id, agent_id)
   end
 
   defp select_agent(socket, phase_id, agent_id) do
     status = socket.assigns.status
     phase_id = valid_phase_id(status, phase_id) || socket.assigns.focused_phase_id
 
-    assign(socket,
+    agent_id = valid_agent_id(status, phase_id, agent_id) || first_agent_id(status, phase_id)
+
+    socket
+    |> assign(
       focused_phase_id: phase_id,
       user_focused_phase_id: phase_id,
-      selected_agent_id: valid_agent_id(status, phase_id, agent_id) || first_agent_id(status, phase_id)
+      selected_agent_id: agent_id
+    )
+    |> assign_detail(status, phase_id, agent_id)
+  end
+
+  defp assign_detail(socket, status, phase_id, agent_id) do
+    rejections = detail_rejections(status, phase_id, agent_id)
+
+    assign(socket,
+      selected_agent: selected_agent(status, phase_id, agent_id),
+      active_agent: active_agent(status),
+      detail_rejections: rejections,
+      failed_rejections: failed_rejections(status, rejections)
     )
   end
 
@@ -294,6 +315,7 @@ defmodule Workflow.Web.RunLive do
               >
                 <div
                   :for={agent <- phase.agents}
+                  :key={agent_id(agent)}
                   :if={phase.id == @focused_phase_id}
                   data-address={inspect(agent.address)}
                   data-iteration={agent.iteration}
@@ -331,6 +353,7 @@ defmodule Workflow.Web.RunLive do
                 <div :if={phase.id != @focused_phase_id and phase.agents != []} class="agent-summary-list">
                   <div
                     :for={agent <- phase.agents}
+                    :key={agent_id(agent)}
                     data-testid={"phase-agent-#{agent_slug(agent)}"}
                     class="agent-summary"
                     data-status={agent_status(agent)}
@@ -360,82 +383,93 @@ defmodule Workflow.Web.RunLive do
         </nav>
 
         <section data-testid="agent-detail">
-          <% agent = selected_agent(@status, @focused_phase_id, @selected_agent_id) %>
-          <% active_agent = active_agent(@status) %>
-          <% rejections = detail_rejections(@status, @focused_phase_id, @selected_agent_id) %>
-          <% failed_rejections = failed_rejections(@status, rejections) %>
-          <%= if agent do %>
+          <%= if @selected_agent do %>
             <h2>Execution state</h2>
             <div data-testid="agent-execution-state" class="detail-state">
               <p>
                 <span class="detail-kicker">State</span>
-                <strong>{status_label(agent)}</strong>
-                <span class="detail-meta">{agent_meta(agent)}</span>
+                <strong>{status_label(@selected_agent)}</strong>
+                <span class="detail-meta">{agent_meta(@selected_agent)}</span>
               </p>
               <p>
                 <span class="detail-kicker">Selected agent</span>
-                <strong>{agent_title(agent)}</strong>
+                <strong>{agent_title(@selected_agent)}</strong>
                 <span class="detail-meta">
-                  iteration {agent.iteration} · address {inspect(agent.address)}
+                  iteration {@selected_agent.iteration} · address {inspect(@selected_agent.address)}
                 </span>
               </p>
               <p
-                :if={active_agent && agent_id(active_agent) != agent_id(agent)}
+                :if={@active_agent && agent_id(@active_agent) != agent_id(@selected_agent)}
                 data-testid="active-agent"
               >
                 <span class="detail-kicker">Active now</span>
-                <strong>{agent_title(active_agent)}</strong>
+                <strong>{agent_title(@active_agent)}</strong>
                 <span class="detail-meta">
-                  {status_label(active_agent)} · iteration {active_agent.iteration} · address {inspect(active_agent.address)}
+                  {status_label(@active_agent)} · iteration {@active_agent.iteration} · address {inspect(@active_agent.address)}
                 </span>
               </p>
             </div>
 
             <section data-testid="latest-activity" class="detail-panel">
               <h3>Latest activity</h3>
-              <p class="detail-text">{latest_meaningful_event(@status, agent, rejections, failed_rejections)}</p>
+              <p class="detail-text">
+                {latest_meaningful_event(
+                  @status,
+                  @selected_agent,
+                  @detail_rejections,
+                  @failed_rejections
+                )}
+              </p>
             </section>
 
             <section data-testid="retry-context" class="detail-panel">
               <h3>Retry context</h3>
-              <p>{retry_context_text(rejections, failed_rejections)}</p>
+              <p>{retry_context_text(@detail_rejections, @failed_rejections)}</p>
             </section>
 
             <section data-testid="final-outcome" class="detail-panel">
               <h3>Final outcome</h3>
-              <p class="detail-text">{final_outcome_text(agent)}</p>
+              <p class="detail-text">{final_outcome_text(@selected_agent)}</p>
             </section>
 
             <details data-testid="prompt-preview">
-              <summary>Prompt preview · {line_count(agent.prompt)} lines</summary>
-              <p class="detail-text">{prompt_preview(agent.prompt)}</p>
-              <p class="preview-more" :if={hidden_line_count(agent.prompt, 2) > 0}>
-                ... {hidden_line_count(agent.prompt, 2)} more lines
+              <summary>Prompt preview · {line_count(@selected_agent.prompt)} lines</summary>
+              <p class="detail-text">{prompt_preview(@selected_agent.prompt)}</p>
+              <p class="preview-more" :if={hidden_line_count(@selected_agent.prompt, 2) > 0}>
+                ... {hidden_line_count(@selected_agent.prompt, 2)} more lines
               </p>
             </details>
 
-            <details :if={agent_has_result?(agent)} data-testid="raw-output">
+            <details :if={agent_has_result?(@selected_agent)} data-testid="raw-output">
               <summary>Raw output</summary>
-              <p class="detail-text">{outcome_preview(agent)}</p>
+              <p class="detail-text">{outcome_preview(@selected_agent)}</p>
             </details>
 
             <details data-testid="raw-activity">
-              <summary>Raw activity · last {length(recent_activity(agent))} of {length(agent.activity)}</summary>
+              <summary>
+                Raw activity · last {length(recent_activity(@selected_agent))} of {length(
+                  @selected_agent.activity
+                )}
+              </summary>
               <div class="activity-list">
-                <div :for={entry <- recent_activity(agent)} class="activity-row">
+                <div
+                  :for={entry <- recent_activity(@selected_agent)}
+                  :key={entry.activity_index}
+                  class="activity-row"
+                >
                   {activity_line(entry)}
                 </div>
               </div>
-              <p :if={agent.activity == []}>No activity recorded</p>
+              <p :if={@selected_agent.activity == []}>No activity recorded</p>
             </details>
           <% else %>
-            <p :if={rejections == []}>No agent selected</p>
+            <p :if={@detail_rejections == []}>No agent selected</p>
           <% end %>
-          <details :if={rejections != []} data-testid="retry-history">
+          <details :if={@detail_rejections != []} data-testid="retry-history">
             <summary>Retry history</summary>
             <h3>Rejected attempts</h3>
             <ol>
-              <li :for={rejection <- rejections}>
+              <li :for={rejection <- @detail_rejections}>
                 <strong>attempt {rejection.attempt}</strong>
                 <span> {inspect(rejection.reason)}</span>
                 <pre>{inspect(rejection.output)}</pre>
@@ -450,11 +484,11 @@ defmodule Workflow.Web.RunLive do
               </li>
             </ol>
           </details>
-          <details :if={failed_rejections != []} data-testid="failed-attempts">
+          <details :if={@failed_rejections != []} data-testid="failed-attempts">
             <summary>Failed attempts</summary>
             <h3>Failed attempts</h3>
             <ol>
-              <li :for={rejection <- failed_rejections}>
+              <li :for={rejection <- @failed_rejections}>
                 <strong>iteration {rejection.iteration}, attempt {rejection.attempt}</strong>
                 <span> {inspect(rejection.reason)}</span>
                 <pre>{inspect(rejection.output)}</pre>

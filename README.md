@@ -56,6 +56,12 @@ A workflow file contains exactly one bare, top-level `workflow` declaration.
 The scheduler parses that declaration as data; it does not compile the file,
 execute it, or discover a module through reflection.
 
+For production-shaped workflows covering incident response, release readiness,
+dependency upgrades, bounded discovery, consensus repair, architecture decisions,
+and adversarial refinement, see [`examples/`](examples/README.md). The examples
+are executable fixtures: the test suite loads every one through the public script
+gate and pins their major orchestration shapes.
+
 The language is bounded: agent retries are `0..5`, loops require
 `max_iterations` in `1..1000`, resolved fanout width never exceeds 64, and the
 runtime executes at most eight workflow tasks concurrently. `while_budget`,

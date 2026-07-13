@@ -92,6 +92,7 @@ pub async fn run(options: RunOptions) -> AppResult<RunOutput> {
             Authentication::required(&source_codex_home).await?
         }
     };
+    let inherit_access_token = matches!(&authentication, Authentication::AccessToken);
     let layout = prepare_layout(options.output_dir.as_deref(), &run_id, &original_home).await?;
     persist_binding(&runtime.codex, &layout.home)?;
     let codex_home = IsolatedCodexHome::prepare(&layout.home, &authentication).await?;
@@ -148,6 +149,7 @@ pub async fn run(options: RunOptions) -> AppResult<RunOutput> {
         journal: &layout.journal,
         port,
         model: options.model.as_deref(),
+        inherit_access_token,
     })
     .await?;
     write_json(&layout.artifact_dir.join("serve.json"), &serve).await?;

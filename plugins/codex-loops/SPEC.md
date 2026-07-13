@@ -54,9 +54,12 @@ MCP behavior:
   `script_path`, optional scheduler-supported `script` alias, and optional
   `provider` (`mock` or `codex`)
 - `workflow_open_ui` input schema requires `run_id`
-- `tools/call` health-checks `GET /api/health` before scheduler operations
-- when health fails, the server discovers and starts a packaged scheduler
-  release before retrying the operation
+- every `tools/call` health-checks `GET /api/health` and verifies the published
+  scheduler API version before its scheduler operation
+- when health or compatibility checks fail, the MCP server returns an actionable
+  `scheduler_unavailable` or version-mismatch error directing the operator to
+  `codex-loops serve`; it does not discover, start, stop, lock, or supervise a
+  scheduler
 - `workflow_start` calls `POST /api/runs` and returns the scheduler success or
   error envelope exactly as MCP `structuredContent`
 - `workflow_status` calls `GET /api/runs/:id` and returns the §7.5 conforming
@@ -75,10 +78,10 @@ MCP behavior:
 - scheduler success envelopes are returned as MCP `structuredContent`
 - scheduler typed errors remain typed and are returned as MCP `isError: true`
 - scheduler lifecycle failures use MCP-friendly `scheduler_unavailable` or
-  `scheduler_start_failed` envelopes with actionable details
+  version-mismatch envelopes with actionable details
 - the MCP adapter reaches the scheduler only through HTTP API calls; it does not
   read SQLite or call `Workflow.Scheduler`, `Workflow.Journal`, or runtime
-  internals directly
+  internals directly, and it does not create native owner-state files
 - the packaging stage of `make ci` assembles one fixed runtime under
   `_build/dev-bundle`; the plugin contains no generated release artifacts or
   MCP launcher
@@ -234,10 +237,11 @@ The single `codex-loops` command selects stdio mode with the `mcp` subcommand.
 configuration and installs the skill under the user skill root. It calls the
 scheduler only through HTTP and does not boot a second ERTS payload.
 
-The native control plane starts or discovers the generated `agent_loops` release
-through a durable per-user supervisor. An MCP stdio session does not own that
-supervisor or stop it when disconnected; scheduler shutdown is always explicit.
-The supervisor restarts unexpected scheduler exits with bounded backoff.
+Explicit native CLI lifecycle subcommands start or discover the generated
+`agent_loops` release through a durable per-user supervisor. The MCP subcommand
+never calls that lifecycle layer, owns no supervisor, and cannot stop one when
+disconnected; scheduler shutdown is always explicit. The supervisor restarts
+unexpected scheduler exits with bounded backoff.
 
 Public development commands:
 

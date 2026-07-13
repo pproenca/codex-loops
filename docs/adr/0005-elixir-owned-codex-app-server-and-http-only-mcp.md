@@ -70,6 +70,10 @@ The durable `agent_started` event remains the boundary for paid effects.
 
 - Failure before a turn request is sent or admitted is a normal unavailable or
   backend provider failure.
+- Admission itself has a bounded five-second deadline. Because a timed-out
+  `GenServer.call` may already be in the owner's mailbox, its outcome is unknown;
+  an ordered cancellation removes late queued work, but the attempt is not
+  redelivered.
 - Loss of the shared app-server after `turn/start` is sent is ambiguous. The
   caller exits without settling the attempt; writer supervision records or
   later resume derives `outcome_unknown`. The attempt is never redelivered.

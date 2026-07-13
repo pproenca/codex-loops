@@ -31,7 +31,7 @@ Run this before handing off any code change. It includes Styler formatting,
 dependency audits, warnings-as-errors compilation, Credo, Sobelow, spec lint,
 the complete scheduler/API/UI Elixir suite, Dialyzer, PhoenixTest Playwright
 browser E2E, plugin-package validation, packaged release/API/CLI proof, and
-packaged MCP lifecycle plus workflow-conformance proof.
+packaged MCP transport plus explicit-scheduler workflow-conformance proof.
 
 The narrower internal targets remain available for diagnosing a failing stage,
 but contributors should not need to compose the validation graph themselves.
@@ -230,7 +230,9 @@ and reserved loopback port. The scheduler receives a config-isolated
 `CODEX_HOME` under the retained artifact; the MCP subprocess receives neither a
 Codex home nor provider authentication. With `provider=mock`, the isolated home
 stays empty and the source Codex home is not inspected. With `provider=codex` on
-Unix, a non-empty inherited `CODEX_ACCESS_TOKEN` takes precedence. Otherwise,
+Unix, a non-empty inherited `CODEX_ACCESS_TOKEN` takes precedence and is passed
+only to a live, token-authenticated sandbox scheduler. Mock and file-authenticated
+sandboxes remove any ambient token. Otherwise,
 when the source `CODEX_HOME/auth.json` is a regular file or a symlink to one, the
 isolated home exposes only that credential file through a symlink; it does not
 expose or copy user `config.toml`, plugins, or instruction files. This is a live

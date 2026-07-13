@@ -18,15 +18,51 @@ defmodule Workflow.Provider.Codex.AppServer do
   @default_max_active 8
   @hard_max_active 8
   @default_max_pending 64
+  @hard_max_pending 64
   @default_max_line_bytes 1_048_576
+  @hard_max_line_bytes 1_048_576
   @default_max_turn_bytes 16 * 1_024 * 1_024
   @hard_max_turn_bytes 16 * 1_024 * 1_024
   @default_max_turn_events 10_000
   @hard_max_turn_events 10_000
   @max_prompt_bytes 16 * 1_024 * 1_024
+  @default_admission_timeout 5_000
   @default_initialize_timeout 10_000
   @default_interrupt_timeout 5_000
   @cancel_start_grace 5_000
+
+  defmodule TurnRequest do
+    @moduledoc false
+    @enforce_keys [
+      :prompt,
+      :cwd,
+      :thread_sandbox,
+      :turn_sandbox,
+      :command,
+      :timeout
+    ]
+    defstruct [
+      :prompt,
+      :schema,
+      :cwd,
+      :model,
+      :thread_sandbox,
+      :turn_sandbox,
+      :command,
+      :timeout
+    ]
+
+    @type t :: %__MODULE__{
+            prompt: String.t(),
+            schema: map() | nil,
+            cwd: String.t(),
+            model: String.t() | nil,
+            thread_sandbox: String.t(),
+            turn_sandbox: map(),
+            command: {String.t(), [String.t()]},
+            timeout: pos_integer()
+          }
+  end
 
   defmodule Request do
     @moduledoc false
@@ -84,26 +120,36 @@ defmodule Workflow.Provider.Codex.AppServer do
               max_turn_events: 10_000
   end
 
-  @type turn_request :: %{
-          required(:prompt) => String.t(),
-          required(:cwd) => String.t(),
-          required(:thread_sandbox) => String.t(),
-          required(:turn_sandbox) => map(),
-          required(:command) => {String.t(), [String.t()]},
-          required(:timeout) => pos_integer(),
-          optional(:schema) => map() | nil,
-          optional(:model) => String.t() | nil
-        }
-
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []), do: GenServer.start_link(__MODULE__, opts, name: @name)
 
-  @spec start_turn(turn_request()) :: {:ok, reference(), pid()} | {:error, :unavailable, map()}
-  def start_turn(request) when is_map(request) do
-    GenServer.call(@name, {:start_turn, self(), request}, :infinity)
-  catch
-    :exit, _reason ->
-      {:error, :unavailable, %{"message" => "Codex app-server owner is unavailable"}}
+  @spec start_turn(TurnRequest.t()) ::
+          {:ok, reference(), pid()}
+          | {:error, :unavailable | :outcome_unknown, map()}
+  def start_turn(%TurnRequest{} = request) do
+    ref = make_ref()
+    timeout = admission_timeout()
+
+    try do
+      GenServer.call(@name, {:start_turn, self(), ref, request}, timeout)
+    catch
+      :exit, {:timeout, _call} ->
+        # A call timeout does not retract its mailbox message. The caller-created
+        # identity lets the ordered cast (and, in normal provider use, caller
+        # death) remove a request that the owner may process later. Whether the
+        # owner already emitted turn/start is unknowable, so this must cross the
+        # writer's at-most-once boundary rather than becoming a retryable failure.
+        cancel(ref)
+
+        {:error, :outcome_unknown,
+         %{
+           "message" => "Codex app-server admission timed out",
+           "timeoutMs" => timeout
+         }}
+
+      :exit, _reason ->
+        {:error, :unavailable, %{"message" => "Codex app-server owner is unavailable"}}
+    end
   end
 
   @type caller_event ::
@@ -157,11 +203,10 @@ defmodule Workflow.Provider.Codex.AppServer do
   end
 
   @impl true
-  def handle_call({:start_turn, caller, request}, _from, state) do
+  def handle_call({:start_turn, caller, ref, request}, _from, state) do
     with :ok <- validate_request(request),
          :ok <- command_compatible(state, request.command),
          :ok <- admission_available(state) do
-      ref = make_ref()
       monitor = Process.monitor(caller)
       timer = Process.send_after(self(), {:request_timeout, ref}, request.timeout)
 
@@ -321,11 +366,13 @@ defmodule Workflow.Provider.Codex.AppServer do
       max_pending:
         :codex_loops
         |> Application.get_env(:codex_app_server_max_pending, @default_max_pending)
-        |> positive_integer(@default_max_pending),
+        |> positive_integer(@default_max_pending)
+        |> min(@hard_max_pending),
       max_line_bytes:
         :codex_loops
         |> Application.get_env(:codex_app_server_max_line_bytes, @default_max_line_bytes)
-        |> positive_integer(@default_max_line_bytes),
+        |> positive_integer(@default_max_line_bytes)
+        |> min(@hard_max_line_bytes),
       initialize_timeout:
         :codex_loops
         |> Application.get_env(:codex_app_server_initialize_timeout, @default_initialize_timeout)
@@ -347,10 +394,17 @@ defmodule Workflow.Provider.Codex.AppServer do
     }
   end
 
+  defp admission_timeout do
+    :codex_loops
+    |> Application.get_env(:codex_app_server_admission_timeout, @default_admission_timeout)
+    |> positive_integer(@default_admission_timeout)
+    |> min(@default_admission_timeout)
+  end
+
   defp positive_integer(value, _default) when is_integer(value) and value > 0, do: value
   defp positive_integer(_value, default), do: default
 
-  defp validate_request(%{
+  defp validate_request(%TurnRequest{
          prompt: prompt,
          cwd: cwd,
          thread_sandbox: thread_sandbox,

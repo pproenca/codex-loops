@@ -1773,13 +1773,26 @@ CallProvider({module, opts}, prompt, schema, key):
   - Return NormalizeProviderOutcome(raw).
 ```
 
-The reference Codex provider runs one external process per attempt through
-`Workflow.Containment`. The boundary rejects input above 16 MiB, stops stdout above
-16 MiB, uses a monotonic absolute deadline (30 minutes by default), and discards stderr.
-Timeout, input-limit, and output-limit outcomes are finite failures; stdout is accumulated
-as bounded iodata, never by unbounded binary concatenation. Concurrent branch tasks have
-their own finite 31-minute deadline so a stalled child cannot leave a writer waiting
-forever.
+The reference Codex provider sends every attempt through one lazy, scheduler-owned
+`codex app-server` process. A supervised `Workflow.Provider.Codex.AppServer` owns the
+Port, initializes the JSON-RPC session once, starts a distinct thread and turn for each
+attempt, and correlates concurrent notifications back to the caller. Admission is capped
+at eight active turns plus 64 queued requests. The admission call itself has a bounded
+five-second deadline; a deadline is treated as an unknowable outcome because the owner may
+already have accepted the mailbox request. Prompts are capped at 16 MiB, protocol lines at
+1 MiB, and each turn at 16 MiB or 10,000 forwarded events. Initialization, individual
+turns, interruption, and cancellation acknowledgement all have finite deadlines. Caller
+death removes queued work or interrupts and drains an active turn before its capacity is
+reused.
+
+The app-server is a shared failure domain. Loss before a turn request is written is an
+ordinary unavailable/backend failure. Loss after `turn/start` is written, including a
+timed-out admission whose exact state cannot be observed, MUST leave the durable
+`agent_started` event unsettled and become `outcome_unknown`; Codex Loops MUST NOT retry
+that attempt. Unsupported interactive server requests are answered fail-closed and the
+affected turn is interrupted. Mock runs and scheduler health do not eagerly start Codex.
+Concurrent branch tasks retain their own finite 31-minute deadline so a stalled child
+cannot leave a writer waiting forever.
 
 - **Inputs.** `prompt :: String.t()` (this node's literal prompt — never a splice of any
   other node's output), `schema :: map() | nil` (the node's JSON-schema map, or `nil` for a

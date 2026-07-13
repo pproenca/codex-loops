@@ -14,6 +14,7 @@ pub(super) struct SchedulerSpawnOptions<'a> {
     pub journal: &'a Path,
     pub port: u16,
     pub model: Option<&'a str>,
+    pub inherit_access_token: bool,
 }
 
 pub(super) async fn start_scheduler(options: SchedulerSpawnOptions<'_>) -> AppResult<Value> {
@@ -73,6 +74,9 @@ fn scheduler_command(options: &SchedulerSpawnOptions<'_>) -> Command {
         .env("CODEX_LOOPS_CODEX_SANDBOX", "workspace-write")
         .env("CODEX_LOOPS_CODEX_WORKDIR", options.worktree)
         .env_remove("CODEX_LOOPS_SCHEDULER_URL");
+    if !options.inherit_access_token {
+        command.env_remove("CODEX_ACCESS_TOKEN");
+    }
     if let Some(model) = options.model {
         command.arg("--model").arg(model);
         command.env("CODEX_LOOPS_CODEX_MODEL", model);
@@ -100,6 +104,7 @@ mod tests {
             journal: &root.path().join("journal.sqlite"),
             port: 47_125,
             model: Some("proof-model"),
+            inherit_access_token: false,
         };
 
         let command = scheduler_command(&options);
@@ -140,6 +145,28 @@ mod tests {
             Some(&Some(codex_home.as_os_str()))
         );
         assert!(codex_home.starts_with(&home));
+        assert_eq!(env.get(OsStr::new("CODEX_ACCESS_TOKEN")), Some(&None));
+    }
+
+    #[test]
+    fn token_authenticated_scheduler_inherits_the_existing_token_without_copying_it() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("home");
+        let options = SchedulerSpawnOptions {
+            executable: Path::new("/opt/codex-loops"),
+            worktree: &root.path().join("repo"),
+            home: &home,
+            codex_home: &home.join("codex-home"),
+            runtime: &root.path().join("runtime"),
+            journal: &root.path().join("journal.sqlite"),
+            port: 47_125,
+            model: None,
+            inherit_access_token: true,
+        };
+
+        let command = scheduler_command(&options);
+        let env: BTreeMap<_, _> = command.as_std().get_envs().collect();
+
         assert!(!env.contains_key(OsStr::new("CODEX_ACCESS_TOKEN")));
     }
 }

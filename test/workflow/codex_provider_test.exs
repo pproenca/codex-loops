@@ -19,6 +19,7 @@ defmodule Workflow.CodexProviderTest do
   alias Workflow.Provider.Activity
   alias Workflow.Provider.Codex
   alias Workflow.Provider.Codex.AppServer
+  alias Workflow.Provider.Codex.AppServer.TurnRequest
   alias Workflow.Provider.Mock
   alias Workflow.Provider.Usage
   alias Workflow.Run
@@ -151,9 +152,9 @@ defmodule Workflow.CodexProviderTest do
 
     committed = Enum.find(Journal.fold(id), &(&1.type == :agent_committed))
 
-    # The result and usage came back across the real containment boundary as the
-    # folded JSONL stream — a schemaless turn's final agent_message is the text, and
-    # usage is `input_tokens + output_tokens` from `turn.completed`.
+    # The result and usage came back across the real app-server JSONL boundary —
+    # a schemaless turn's final agent_message is the text, and usage is
+    # `input_tokens + output_tokens` from `turn.completed`.
     assert committed.payload.result == "say hello"
     assert committed.payload.usage.total_tokens == 8
     assert committed.payload.address == [0]
@@ -662,6 +663,57 @@ defmodule Workflow.CodexProviderTest do
     assert detail["maxBytes"] == 16 * 1_024 * 1_024
   end
 
+  test "a bounded admission timeout cancels its late mailbox request without retrying", ctx do
+    previous = Application.get_env(:codex_loops, :codex_app_server_admission_timeout)
+    Application.put_env(:codex_loops, :codex_app_server_admission_timeout, 25)
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_admission_timeout, previous)
+      AppServer.reset()
+    end)
+
+    key = %Workflow.IdempotencyKey{run_id: "admission-timeout", node_path: [0], iteration: 0}
+    :ok = :sys.suspend(AppServer)
+
+    reason =
+      try do
+        catch_exit(
+          Codex.run_agent(
+            "prompt",
+            nil,
+            key,
+            elem(codex(ctx, "echo"), 1)
+          )
+        )
+      after
+        :ok = :sys.resume(AppServer)
+      end
+
+    assert {:codex_turn_outcome_unknown, detail} = reason
+    assert detail["message"] == "Codex app-server admission timed out"
+    assert detail["timeoutMs"] == 25
+    wait_for_no_codex_requests()
+  end
+
+  test "configured admission and JSON line limits cannot exceed their hard bounds" do
+    previous_pending = Application.get_env(:codex_loops, :codex_app_server_max_pending)
+    previous_line = Application.get_env(:codex_loops, :codex_app_server_max_line_bytes)
+    Application.put_env(:codex_loops, :codex_app_server_max_pending, 1_000_000)
+    Application.put_env(:codex_loops, :codex_app_server_max_line_bytes, 16_000_000)
+
+    on_exit(fn ->
+      restore_env(:codex_app_server_max_pending, previous_pending)
+      restore_env(:codex_app_server_max_line_bytes, previous_line)
+      AppServer.reset()
+    end)
+
+    AppServer.reset()
+    state = :sys.get_state(AppServer)
+
+    assert state.max_pending == 64
+    assert state.max_line_bytes == 1_048_576
+  end
+
   test "an interrupt that never completes recycles the transport before admitting more work", ctx do
     previous_active = Application.get_env(:codex_loops, :codex_app_server_max_active)
     previous_interrupt = Application.get_env(:codex_loops, :codex_app_server_interrupt_timeout)
@@ -735,7 +787,7 @@ defmodule Workflow.CodexProviderTest do
       AppServer.reset()
     end)
 
-    request = %{
+    request = %TurnRequest{
       prompt: "prompt",
       cwd: File.cwd!(),
       thread_sandbox: "danger-full-access",
@@ -784,6 +836,19 @@ defmodule Workflow.CodexProviderTest do
       _other ->
         Process.sleep(5)
         wait_for_request_phase(ref, phase, attempts - 1)
+    end
+  end
+
+  defp wait_for_no_codex_requests(attempts \\ 100)
+
+  defp wait_for_no_codex_requests(0), do: flunk("Codex admission request was not cancelled")
+
+  defp wait_for_no_codex_requests(attempts) do
+    if map_size(:sys.get_state(AppServer).requests) == 0 do
+      :ok
+    else
+      Process.sleep(5)
+      wait_for_no_codex_requests(attempts - 1)
     end
   end
 end

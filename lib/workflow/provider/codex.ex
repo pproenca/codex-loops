@@ -15,6 +15,7 @@ defmodule Workflow.Provider.Codex do
   @behaviour Workflow.Provider
 
   alias Workflow.Provider.Codex.AppServer
+  alias Workflow.Provider.Codex.AppServer.TurnRequest
   alias Workflow.Provider.Codex.StreamAccumulator
   alias Workflow.Schema
 
@@ -32,7 +33,7 @@ defmodule Workflow.Provider.Codex do
          {:ok, command} <- command(opts),
          {:ok, execution} <- execution(opts),
          {:ok, ref, owner} <-
-           AppServer.start_turn(%{
+           AppServer.start_turn(%TurnRequest{
              prompt: prompt,
              schema: schema && Schema.strict_map(schema),
              cwd: execution.cwd,
@@ -52,6 +53,9 @@ defmodule Workflow.Provider.Codex do
     else
       {:error, {:provider_failure, _kind, _detail, _usage, _activity} = failure} ->
         {:error, failure}
+
+      {:error, :outcome_unknown, detail} ->
+        exit({:codex_turn_outcome_unknown, detail})
 
       {:error, kind, detail} when kind in [:unavailable, :backend] ->
         {:error, provider_failure(accumulator, kind, detail)}

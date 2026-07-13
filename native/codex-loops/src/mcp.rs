@@ -494,8 +494,24 @@ async fn workspace_root(
 }
 
 async fn select_workspace_root(roots: Vec<PathBuf>, script_path: Option<&Path>) -> Option<PathBuf> {
-    let Some(script_path) = script_path.filter(|path| path.is_absolute()) else {
-        return roots.into_iter().next();
+    let script_path = match script_path {
+        Some(script_path) => script_path,
+        None => return roots.into_iter().next(),
+    };
+    if !script_path.is_absolute() {
+        let mut fallback = None;
+        for root in roots {
+            let canonical_root = tokio::fs::canonicalize(&root).await.ok();
+            let candidate = canonical_root.as_deref().unwrap_or(&root);
+            fallback.get_or_insert_with(|| candidate.to_path_buf());
+            if tokio::fs::canonicalize(candidate.join(script_path))
+                .await
+                .is_ok()
+            {
+                return Some(candidate.to_path_buf());
+            }
+        }
+        return fallback;
     };
     let canonical_script = tokio::fs::canonicalize(script_path).await.ok();
     let mut selected = None;
@@ -836,6 +852,27 @@ mod tests {
                 .unwrap();
 
         assert_eq!(selected, tokio::fs::canonicalize(nested).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn relative_scripts_choose_the_first_client_root_that_contains_them() {
+        let root = tempfile::tempdir().unwrap();
+        let missing = root.path().join("missing-workspace");
+        let workspace = root.path().join("workspace");
+        let relative = Path::new(".codex/workflows/review.exs");
+        tokio::fs::create_dir_all(&missing).await.unwrap();
+        tokio::fs::create_dir_all(workspace.join(".codex/workflows"))
+            .await
+            .unwrap();
+        tokio::fs::write(workspace.join(relative), "workflow \"test\" do\nend\n")
+            .await
+            .unwrap();
+
+        let selected = select_workspace_root(vec![missing, workspace.clone()], Some(relative))
+            .await
+            .unwrap();
+
+        assert_eq!(selected, tokio::fs::canonicalize(workspace).await.unwrap());
     }
 
     #[test]

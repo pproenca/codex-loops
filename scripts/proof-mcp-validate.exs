@@ -60,6 +60,7 @@ defmodule ProofMCPValidate do
     missing_path = Path.join(temp_root, "missing-workflow.exs")
     journal_path = Path.join(temp_root, "runs.sqlite")
     runtime_dir = Path.join(temp_root, "runtime")
+    hold_file = Path.join(temp_root, "release-running-proof")
     run_id = "mcp:proof_#{System.unique_integer([:positive])}"
     running_run_id = "mcp:proof_running_#{System.unique_integer([:positive])}"
     unknown_run_id = "mcp:proof_missing_#{System.unique_integer([:positive])}"
@@ -111,7 +112,7 @@ defmodule ProofMCPValidate do
             "MCP should report that an explicitly managed scheduler is unavailable"
           )
 
-          start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root)
+          start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root, hold_file)
           assert_scheduler_running!(scheduler_url)
 
           relative_path = ".codex/workflows/conformance_core.exs"
@@ -152,6 +153,7 @@ defmodule ProofMCPValidate do
             })
 
           assert_already_running_resume!(already_running, running_run_id)
+          File.write!(hold_file, "release")
           {client, _running_status_payload} = poll_terminal_status!(client, running_run_id, 7)
 
           {start, client} =
@@ -544,9 +546,9 @@ defmodule ProofMCPValidate do
 
   defp workflow_source do
     """
-    workflow "mcp-lifecycle-proof" do
+    workflow "mcp-transport-proof" do
       phase "proof"
-      log "mcp lifecycle proof"
+      log "mcp transport proof"
       agent "Reply with proof-ok"
       return :ok
     end
@@ -646,7 +648,7 @@ defmodule ProofMCPValidate do
 
   defp assert_tools_list!(message), do: raise("tools/list response was not valid: #{inspect(message)}")
 
-  defp assert_successful_validation!(response, workflow_path, workflow_name \\ "mcp-lifecycle-proof") do
+  defp assert_successful_validation!(response, workflow_path, workflow_name \\ "mcp-transport-proof") do
     payload = successful_tool_payload!(response, "workflow_validate")
 
     assert!(
@@ -760,9 +762,9 @@ defmodule ProofMCPValidate do
 
     assert!(data["runId"] == run_id, "workflow_status should preserve run id")
     assert!(data["state"] == "completed", "workflow_status should report completion")
-    assert!(data["treeName"] == "mcp-lifecycle-proof", "workflow name should be projected")
+    assert!(data["treeName"] == "mcp-transport-proof", "workflow name should be projected")
     assert!(data["phase"] == "proof", "phase should be projected")
-    assert!(data["logs"] == ["mcp lifecycle proof"], "logs should be projected")
+    assert!(data["logs"] == ["mcp transport proof"], "logs should be projected")
     assert!(data["agentCount"] == 1, "agentCount should be projected")
     assert!(data["eventCount"] == 6, "eventCount should be projected")
     assert!(data["result"] == "ok", "result should be projected")
@@ -957,7 +959,7 @@ defmodule ProofMCPValidate do
     )
   end
 
-  defp start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root) do
+  defp start_scheduler!(entrypoint, runtime_dir, journal_path, port, temp_root, hold_file) do
     {output, status} =
       System.cmd(
         entrypoint,
@@ -976,6 +978,7 @@ defmodule ProofMCPValidate do
           {"CODEX_LOOPS_SCHEDULER_HOST", "127.0.0.1"},
           {"CODEX_LOOPS_SCHEDULER_PORT", to_string(port)},
           {"CODEX_LOOPS_JOURNAL_PATH", journal_path},
+          {"CODEX_LOOPS_CONFORMANCE_HOLD_FILE", hold_file},
           {"HOME", Path.join(temp_root, "home")}
         ],
         stderr_to_stdout: true

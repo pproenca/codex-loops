@@ -2,6 +2,7 @@
 """Deterministic Codex app-server stub for packaged conformance proofs."""
 
 import json
+import os
 import sys
 import threading
 import time
@@ -66,7 +67,12 @@ def run_turn(thread_id, turn_id, params):
     schema = params.get("outputSchema")
 
     if HOLD_LEASE_MARKER in prompt:
-        time.sleep(2)
+        hold_file = os.environ.get("CODEX_LOOPS_CONFORMANCE_HOLD_FILE")
+        if hold_file:
+            while not os.path.exists(hold_file):
+                time.sleep(0.01)
+        else:
+            time.sleep(2)
 
     if schema:
         message = json.dumps(example(schema), separators=(",", ":"))

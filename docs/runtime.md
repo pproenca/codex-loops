@@ -139,7 +139,7 @@ blobs are size-bounded and decoded with OTP's safe term option.
 ## Provider Effects And Resume
 
 Provider attempts are at-most-once. The writer commits `agent_started`, including
-the attempt identity, before launching a provider subprocess. A matching
+the attempt identity, before submitting work to the provider. A matching
 `agent_committed`, `agent_attempt_rejected`, or `agent_failed` settles that
 attempt. Completed and rejected attempts replay from the journal on resume.
 
@@ -173,9 +173,13 @@ lexical path plus exact version. The native launcher passes that path into
 runtime configuration. The provider consumes normalized application
 configuration and never searches PATH or reads process environment.
 
-The app-server protocol is bounded: JSON lines and pending admission have fixed
-limits, the default turn deadline is 30 minutes, and a timeout interrupts only
-its turn. At most eight live turns share the connection across all runs.
+The app-server protocol is bounded: JSON lines are limited to 1 MiB, prompts and
+aggregate per-turn notifications to 16 MiB, each turn to 10,000 notifications,
+and pending admission to 64 requests. Admission waits at most five seconds; an
+expired admission is conservatively `outcome_unknown` because its mailbox request
+may already have been accepted. The default turn deadline is 30 minutes, and a
+turn timeout interrupts and drains only that turn. At most eight live turns share
+the connection across all runs.
 Concurrent workflow work is also capped at eight tasks, fanout width at 64
 lanes, and requested per-node limits may reduce those caps further. Agent
 retries are limited to five and loop bounds to 1000 iterations. Refine reviewers

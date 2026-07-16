@@ -12,6 +12,8 @@ Rust runtime, stdio bridge, or second application server.
 - `docs/runtime.md`: runtime architecture, bundle, journal, and providers.
 - `docs/workflow-authoring.md`: executable `.exs` workflows and testing gates.
 - `docs/operations.md`: development, installation, proofs, and release work.
+- `docs/plans/reactor-execution-refactor.md`: implementation, rollback, and
+  live-verification plan for adopting Reactor as the internal execution engine.
 - `docs/adr/`: accepted and superseded architecture decisions.
 - `docs/adr/0006-single-otp-service-and-streamable-http-mcp.md`: current
   deployment and ownership decision; it supersedes ADRs 0003 through 0005.

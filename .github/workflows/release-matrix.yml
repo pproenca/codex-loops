@@ -108,8 +108,9 @@ jobs:
       - name: Create and verify the signed target archive
         run: |
           version=$(tr -d '[:space:]' < VERSION)
-          make dist DIST_DIR="$(pwd)/_build/dist"
-          archive="$(pwd)/_build/dist/codex-loops-$version-$DIST_TARGET.tar.gz"
+          dist_dir="$(pwd)/_release-dist"
+          make dist DIST_DIR="$dist_dir"
+          archive="$dist_dir/codex-loops-$version-$DIST_TARGET.tar.gz"
           scripts/verify-dist-artifact.sh \
             "$archive" \
             "$archive.sha256" \
@@ -123,9 +124,9 @@ jobs:
         with:
           name: release-${{ matrix.target }}
           path: |
-            _build/dist/codex-loops-*.tar.gz
-            _build/dist/codex-loops-*.tar.gz.sha256
-            _build/dist/codex-loops-*.tar.gz.minisig
+            _release-dist/codex-loops-*.tar.gz
+            _release-dist/codex-loops-*.tar.gz.sha256
+            _release-dist/codex-loops-*.tar.gz.minisig
           if-no-files-found: error
           retention-days: 14
 

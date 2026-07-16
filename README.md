@@ -96,14 +96,19 @@ make build        # compile from a clean checkout
 make ci           # complete deterministic gate
 make dev-bundle   # assemble the fixed runnable layout
 MINISIGN_SECRET_KEY=/path/to/key make dist # create checksum and signed target archive
+make verify-dist                         # verify signature, checksum, target, and layout
 # after collecting all four target artifacts in DIST_DIR:
 make homebrew-formula
 ```
 
 `make dist` fails unless it can produce the minisign signature required for a
-canonical release. Release CI runs it once for each supported target. After all
-four archive/checksum/signature triples are collected, `make homebrew-formula`
-validates them and emits the one cross-platform Homebrew formula. Each archive
+canonical release. `.github/workflows/release-matrix.yml` runs natively on all
+four supported OS/architecture pairs. Pull requests and `master` prove the full
+pipeline with ephemeral keys; `v*` tags and canonical manual dispatches require
+the permanent `MINISIGN_SECRET_KEY` Actions secret and prove it matches
+`release/minisign.pub`. After all four archive/checksum/signature triples are
+collected, `make homebrew-formula` validates them and emits the one
+cross-platform Homebrew formula. Each archive
 also contains the one-action `install`; after
 signature and checksum verification, it installs the bundle under
 `~/.local/share/codex-loops/<version>`, atomically switches `current`, exposes

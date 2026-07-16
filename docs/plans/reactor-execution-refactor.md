@@ -189,7 +189,8 @@ to `Workflow.Application`.
       Streamable HTTP MCP using one real Codex turn.
 - [x] Adversarial BEAM and Elixir reviews both pass after the final diff.
 - [x] Release-size delta is recorded.
-- [ ] The four supported distribution targets remain buildable in release CI.
+- [x] The four supported distribution targets are native build/sign/install
+      jobs in the signed release matrix.
 - [x] The final diff is approved for commit to `master` after all applicable
       gates.
 
@@ -201,8 +202,9 @@ Size evidence from the same macOS build:
   delta: +4,648 KiB (+12.5%);
 - dev-bundle file count: 1,726 to 2,237 (+511).
 
-The current repository CI has one Ubuntu job. Four-target buildability remains
-an external release gate and is not claimed by this local verification.
+The deterministic CI remains one Ubuntu job. The separate release matrix runs
+native build, release boot, install, signing, archive verification, and formula
+aggregation jobs for both macOS and both Linux architectures.
 
 ## Deterministic verification matrix
 

@@ -7,6 +7,7 @@ make build
 make ci
 make dev-bundle
 MINISIGN_SECRET_KEY=/path/to/key make dist
+make verify-dist
 ```
 
 `make build` installs missing dependencies and compiles with warnings as
@@ -16,6 +17,12 @@ the skill under `_build/dev-bundle/`. `make dist` signs and packages that exact
 layout under `_build/dist/`; it deliberately fails without a minisign key.
 `.tool-versions` pins the known-good Erlang, Elixir, and frontend toolchain for
 `mise`/`asdf`. Rust and Cargo are not part of the build.
+
+GitHub's `Release Matrix` workflow proves native buildability and signed
+packaging for both macOS architectures and both Linux architectures. Branch and
+pull-request runs use disposable signing keys. Version tags and canonical
+manual runs require the repository's permanent `MINISIGN_SECRET_KEY` secret and
+verify it against `release/minisign.pub` before any artifact is signed.
 
 After `make ci`, maintainers may perform a separate authenticated dogfood run
 from a fresh Codex task when a release changes the real-provider boundary.

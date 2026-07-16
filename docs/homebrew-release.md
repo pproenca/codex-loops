@@ -8,8 +8,9 @@ reconstruct the OTP release independently.
 
 ```sh
 make ci
-# Run once in each supported target job.
+# Run locally for the host target.
 MINISIGN_SECRET_KEY=/path/to/key make dist
+make verify-dist
 
 # After collecting all four target artifact triples under DIST_DIR.
 make homebrew-formula DIST_DIR=/path/to/collected-artifacts
@@ -21,6 +22,15 @@ signature; an unsigned canonical artifact cannot be produced. Run that signed
 step for `aarch64-apple-darwin`, `x86_64-apple-darwin`,
 `aarch64-unknown-linux-gnu`, and `x86_64-unknown-linux-gnu`, then collect each
 archive, `.sha256`, and `.minisig` file into one directory.
+
+The `Release Matrix` GitHub Actions workflow is the canonical native build
+gate. It runs on `macos-15`, `macos-15-intel`, `ubuntu-24.04-arm`, and
+`ubuntu-24.04`, asserts the detected target, boots the packaged release, proves
+the one-action installer, signs the archive, verifies its signature/checksum
+and fixed layout, and aggregates all four triples into one formula. Pull
+requests and `master` use per-job ephemeral keys. A `v*` tag or a manual run
+with `canonical=true` fails unless the `MINISIGN_SECRET_KEY` Actions secret is
+present and derives the committed `release/minisign.pub` identity.
 
 `make homebrew-formula` is the deterministic aggregation step. It requires all
 four immutable triples, verifies each archive against its recorded checksum,

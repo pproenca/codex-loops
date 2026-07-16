@@ -1,0 +1,165 @@
+name: Release Matrix
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      canonical:
+        description: Sign with the permanent release key
+        required: true
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    name: Package ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+    env:
+      DIST_TARGET: ${{ matrix.target }}
+      CANONICAL_SIGNING: ${{ startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.canonical) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          otp-version: "28"
+          elixir-version: "1.19"
+
+      - name: Restore target build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ matrix.target }}-mix-${{ hashFiles('mix.lock') }}
+          restore-keys: ${{ matrix.target }}-mix-
+
+      - name: Install minisign on Linux
+        if: runner.os == 'Linux'
+        run: |
+          if ! command -v minisign >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes minisign
+          fi
+
+      - name: Install minisign on macOS
+        if: runner.os == 'macOS'
+        run: |
+          if ! command -v minisign >/dev/null 2>&1; then
+            brew install minisign
+          fi
+
+      - name: Build the native release bundle
+        run: make dev-bundle
+
+      - name: Prove the native target and packaged runtime
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          test "$(scripts/distribution-target.sh)" = "$DIST_TARGET"
+          jq --exit-status --arg version "$version" --arg target "$DIST_TARGET" \
+            '.package_version == $version and .target == $target' \
+            _build/dev-bundle/share/codex-loops/runtime.json >/dev/null
+          scripts/proof-release.sh
+          scripts/proof-dist-install.sh "$(pwd)/_build/dev-bundle"
+
+      - name: Generate an ephemeral CI signing identity
+        if: env.CANONICAL_SIGNING != 'true'
+        run: |
+          minisign -G -W \
+            -p "$RUNNER_TEMP/minisign.pub" \
+            -s "$RUNNER_TEMP/minisign.key"
+          printf 'MINISIGN_SECRET_KEY=%s\n' "$RUNNER_TEMP/minisign.key" >>"$GITHUB_ENV"
+          printf 'MINISIGN_PUBLIC_KEY=%s\n' "$RUNNER_TEMP/minisign.pub" >>"$GITHUB_ENV"
+
+      - name: Materialize the permanent release signing identity
+        if: env.CANONICAL_SIGNING == 'true'
+        env:
+          RELEASE_MINISIGN_SECRET_KEY: ${{ secrets.MINISIGN_SECRET_KEY }}
+        run: |
+          test -n "$RELEASE_MINISIGN_SECRET_KEY"
+          umask 077
+          printf '%s' "$RELEASE_MINISIGN_SECRET_KEY" >"$RUNNER_TEMP/minisign.key"
+          minisign -R \
+            -s "$RUNNER_TEMP/minisign.key" \
+            -p "$RUNNER_TEMP/derived-minisign.pub"
+          cmp release/minisign.pub "$RUNNER_TEMP/derived-minisign.pub"
+          printf 'MINISIGN_SECRET_KEY=%s\n' "$RUNNER_TEMP/minisign.key" >>"$GITHUB_ENV"
+          printf 'MINISIGN_PUBLIC_KEY=%s\n' "$(pwd)/release/minisign.pub" >>"$GITHUB_ENV"
+
+      - name: Create and verify the signed target archive
+        run: |
+          version=$(tr -d '[:space:]' < VERSION)
+          make dist DIST_DIR="$(pwd)/_build/dist"
+          archive="$(pwd)/_build/dist/codex-loops-$version-$DIST_TARGET.tar.gz"
+          scripts/verify-dist-artifact.sh \
+            "$archive" \
+            "$archive.sha256" \
+            "$archive.minisig" \
+            "$MINISIGN_PUBLIC_KEY" \
+            "$DIST_TARGET" \
+            "$version"
+
+      - name: Upload the target artifact triple
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.target }}
+          path: |
+            _build/dist/codex-loops-*.tar.gz
+            _build/dist/codex-loops-*.tar.gz.sha256
+            _build/dist/codex-loops-*.tar.gz.minisig
+          if-no-files-found: error
+          retention-days: 14
+
+  aggregate:
+    name: Aggregate four-target formula
+    needs: package
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download all target artifact triples
+        uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: _build/dist
+          merge-multiple: true
+
+      - name: Verify the complete matrix and generate the formula
+        run: |
+          make homebrew-formula DIST_DIR="$(pwd)/_build/dist"
+          ruby -c _build/dist/codex-loops.rb
+          test "$(find _build/dist -maxdepth 1 -name 'codex-loops-*.tar.gz' | wc -l)" -eq 4
+          test "$(find _build/dist -maxdepth 1 -name 'codex-loops-*.tar.gz.sha256' | wc -l)" -eq 4
+          test "$(find _build/dist -maxdepth 1 -name 'codex-loops-*.tar.gz.minisig' | wc -l)" -eq 4
+
+      - name: Upload the complete release candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-matrix-${{ github.sha }}
+          path: |
+            _build/dist/codex-loops-*.tar.gz
+            _build/dist/codex-loops-*.tar.gz.sha256
+            _build/dist/codex-loops-*.tar.gz.minisig
+            _build/dist/codex-loops.rb
+          if-no-files-found: error
+          retention-days: 30

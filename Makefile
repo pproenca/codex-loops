@@ -1,4 +1,4 @@
-.PHONY: build ci release setup assets-build format-check quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint dev-bundle dist homebrew-formula proof-dist-install proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
+.PHONY: build ci release setup assets-build format-check quality credo-check security-check audit-check package-version-check install-docs-check dialyzer-check browser-e2e-setup browser-e2e test spec-lint dev-bundle dist verify-dist homebrew-formula proof-dist-install proof proof-live proof-mcp proof-mcp-live verify-plugin-package dogfood clean-release
 
 RELEASE_NAME ?= agent_loops
 RELEASE_CTL = _build/prod/rel/$(RELEASE_NAME)/bin/$(RELEASE_NAME)
@@ -82,6 +82,12 @@ dev-bundle: release
 
 dist: dev-bundle
 	scripts/package-dist.sh "$(abspath $(DEV_BUNDLE_DIR))" "$(abspath $(DIST_DIR))" "$$(tr -d '[:space:]' < VERSION)"
+
+verify-dist:
+	@target="$${DIST_TARGET:-$$(scripts/distribution-target.sh)}"; \
+	version="$$(tr -d '[:space:]' < VERSION)"; \
+	archive="$(abspath $(DIST_DIR))/codex-loops-$$version-$$target.tar.gz"; \
+	scripts/verify-dist-artifact.sh "$$archive" "$$archive.sha256" "$$archive.minisig" "$${MINISIGN_PUBLIC_KEY:-release/minisign.pub}" "$$target" "$$version"
 
 # Run after the four target-specific CI jobs have collected their immutable
 # archive/checksum/signature triples under DIST_DIR.

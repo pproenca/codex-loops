@@ -7,6 +7,12 @@
       "skillPath": "skills/.experimental/adversarial-beam/SKILL.md",
       "computedHash": "a33d9d1eb3e5da93cb03beaf957aa68f66a79072a5317d6dcbcd5d1b29007c97"
     },
+    "adversarial-ddd": {
+      "source": "pproenca/dot-skills",
+      "sourceType": "github",
+      "skillPath": "skills/.experimental/adversarial-ddd/SKILL.md",
+      "computedHash": "23fbc5cf5f285850375a8fa637478e5648f355a35747430a8b7e4eafafc241fd"
+    },
     "adversarial-elixir": {
       "source": "pproenca/dot-skills",
       "sourceType": "github",

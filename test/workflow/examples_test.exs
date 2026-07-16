@@ -182,6 +182,49 @@ defmodule Workflow.ExamplesTest do
            } = Enum.find(onboarding_nodes, &match?(%GenericFanout{}, &1))
   end
 
+  test "change-risk review preserves blind finders until a single adjudication barrier" do
+    %Tree{nodes: nodes} = load_example!("change_risk_report.exs")
+
+    assert %GenericFanout{
+             address: fanout_address,
+             bind: :work,
+             width: 5,
+             max_concurrency: 5,
+             lanes: {:explicit, lanes}
+           } = fanout = Enum.find(nodes, &match?(%GenericFanout{}, &1))
+
+    assert length(lanes) == 5
+    assert Enum.all?(lanes, &(length(&1) == 1))
+
+    finder_agents = Enum.map(lanes, &hd/1)
+    assert Enum.all?(finder_agents, &match?(%Agent{}, &1))
+
+    assert Enum.map(finder_agents, & &1.label) == [
+             "find:line-scan",
+             "find:removed-invariants",
+             "find:cross-file",
+             "find:runtime-risk",
+             "find:proof-operations"
+           ]
+
+    assert finder_agents |> Enum.map(& &1.prompt) |> Enum.uniq() |> length() == length(lanes)
+    assert Enum.all?(finder_agents, &String.contains?(String.downcase(&1.prompt), "read-only"))
+
+    assert %Agent{
+             label: "analyze:change-failure-modes",
+             bindings: %{rows: {:node, _rows_address}, work: {:fanout, ^fanout_address, :global}}
+           } = adjudicator = Enum.find(nodes, &match?(%Agent{label: "analyze:change-failure-modes"}, &1))
+
+    fanout_index = Enum.find_index(nodes, &(&1 == fanout))
+    adjudicator_index = Enum.find_index(nodes, &(&1 == adjudicator))
+    adjudicator_text = Enum.join(adjudicator.prompt.segments)
+
+    assert fanout_index < adjudicator_index
+    assert String.contains?(adjudicator_text, "Deduplicate against the complete finder pool")
+    assert String.contains?(adjudicator_text, "Try to refute every candidate")
+    assert adjudicator_text =~ ~r/coverage\s+limit/
+  end
+
   test "the current-diff refinement cold-reads and repairs through a second fail-closed panel" do
     %Tree{nodes: nodes} = load_example!("current_diff_refine.exs")
     assert [first_panel, cold_read_panel] = Enum.filter(nodes, &match?(%Refine{}, &1))

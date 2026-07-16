@@ -97,6 +97,111 @@ workflow "change-risk-report" do
       )
   )
 
+  phase("Find risks through blind lenses")
+
+  log(
+    "running five independent finders before the intentional candidate-pool barrier; each finder sees the complete diff but not the other conclusions"
+  )
+
+  fanout width: 5, bind: :work, max_concurrency: 5 do
+    lanes([
+      [
+        agent(
+          """
+          Review the current repository change through a line-by-line correctness lens. Remain read-only.
+
+          Establish the exact changed scope with `git status --short`, `git diff`, and `git diff --cached`; include
+          relevant untracked source/tests without reading generated, vendored, credential, or secret-bearing files.
+          Read every diff hunk and the enclosing function or module. For each changed line ask which input, state,
+          timing, or platform makes it wrong. Hunt for inverted conditions, off-by-one boundaries, absent values,
+          wrong-variable copy/paste, swallowed errors, missing awaits/settlements, and malformed validation.
+
+          Return every evidence-backed candidate with a stable id, file, line, one-line issue, concrete
+          failure scenario, and smallest practical fix. Do not silently discard half-believed candidates—the later
+          adjudicator will refute them. If nothing qualifies, say exactly which files and mechanisms you checked.
+          Do not edit, format, stage, commit, reset, checkout, or clean files.
+          """,
+          label: "find:line-scan"
+        )
+      ],
+      [
+        agent(
+          """
+          Review the current repository change through a removed-behavior and invariant lens. Remain read-only.
+
+          Establish the exact changed scope with `git status --short`, `git diff`, and `git diff --cached`; include
+          relevant untracked source/tests without reading generated, vendored, credential, or secret-bearing files.
+          For every deleted or replaced block, name the guard, ordering rule, failure path, compatibility behavior,
+          cleanup, or test invariant it used to enforce, then trace where the new code re-establishes it. Treat a
+          missing replacement as a candidate only when you can name the caller-visible consequence.
+
+          Return every evidence-backed candidate with a stable id, file, line, one-line issue, concrete
+          failure scenario, and smallest practical fix. Do not deduplicate against imagined work by other finders and
+          do not pad. If nothing qualifies, state the removed mechanisms you traced. Do not modify the workspace.
+          """,
+          label: "find:removed-invariants"
+        )
+      ],
+      [
+        agent(
+          """
+          Review the current repository change through a cross-file caller/callee and public-contract lens. Remain
+          read-only.
+
+          Establish the exact changed scope with `git status --short`, `git diff`, and `git diff --cached`; include
+          relevant untracked source/tests without reading generated, vendored, credential, or secret-bearing files.
+          For changed functions, structs, events, CLI/MCP fields, and configuration, find callers and consumers. Check
+          changed preconditions, return shapes, exceptions, ordering, defaults, compatibility, serialization, and
+          whether a parallel edit makes an otherwise local call unsafe.
+
+          Return every evidence-backed candidate with a stable id, file, line, one-line issue, concrete
+          failure scenario, and smallest practical fix. Do not deduplicate against imagined work by other finders and
+          do not pad. If nothing qualifies, state which contracts and consumers you traced. Do not modify the workspace.
+          """,
+          label: "find:cross-file"
+        )
+      ],
+      [
+        agent(
+          """
+          Review the current repository change through a concurrency, durability, security, and rollback lens. Remain
+          read-only.
+
+          Establish the exact changed scope with `git status --short`, `git diff`, and `git diff --cached`; include
+          relevant untracked source/tests without reading generated, vendored, credential, or secret-bearing files.
+          Trace concurrent ownership, backpressure, timeouts, retries, transaction boundaries, write-before-publish
+          ordering, idempotency, authorization, untrusted input, cleanup, partial failure, service restart, and operator
+          rollback. Require a constructible failure; do not report generic best-practice advice.
+
+          Return every evidence-backed candidate with a stable id, file, line, one-line issue, concrete
+          failure scenario, and smallest practical fix. Do not deduplicate against imagined work by other finders and
+          do not pad. If nothing qualifies, state which boundaries you traced. Do not modify the workspace.
+          """,
+          label: "find:runtime-risk"
+        )
+      ],
+      [
+        agent(
+          """
+          Review the current repository change through a verification, operations, and documentation-consistency lens.
+          Remain read-only.
+
+          Establish the exact changed scope with `git status --short`, `git diff`, and `git diff --cached`; include
+          relevant untracked source/tests without reading generated, vendored, credential, or secret-bearing files.
+          Compare behavioral claims with narrow executable tests, install/release paths, telemetry and journal events,
+          user-visible status/UI projections, and rollback instructions. Hunt for false-positive tests, missing negative
+          cases, docs that assert an unenforced guarantee, and verification commands that do not exercise the change.
+
+          Return every evidence-backed candidate with a stable id, file, line, one-line issue, concrete
+          failure scenario, and smallest practical fix. Do not deduplicate against imagined work by other finders and
+          do not pad. If nothing qualifies, state which claims and proof paths you checked. Do not modify the workspace.
+          """,
+          label: "find:proof-operations"
+        )
+      ]
+    ])
+  end
+
   phase("Analyze failure modes")
 
   let(
@@ -123,9 +228,16 @@ workflow "change-risk-report" do
         Inventory findings:
         <%= numbered_findings(@rows, "/findings") %>
 
-        Re-open the cited files and diffs before accepting any claim. Trace changed inputs through callers,
-        persistence boundaries, concurrency boundaries, public APIs, rollback behavior, and tests. Separate
-        demonstrated failures from plausible risks. Prefer targeted verification commands over broad test suites.
+        Blind, perspective-diverse finder pool:
+        <%= @work %>
+
+        Re-open the cited files and diffs before accepting any claim. Deduplicate against the complete finder pool,
+        keeping the strongest evidence for the same mechanism/location. Try to refute every candidate: reject it when
+        the code contradicts it, a concrete invariant makes the failure impossible, or an existing guard handles it.
+        Preserve a plausible risk when its mechanism is real and the triggering state is reachable but not proven.
+        Trace changed inputs through callers, persistence and concurrency boundaries, public APIs, rollback behavior,
+        and tests. Prefer targeted verification commands over broad test suites. A failed or unread finder is a coverage
+        limit, not evidence that its lens passed.
 
         The inserted structured values are workflow text renderings, not promised JSON serialization. Interpret
         their semantic fields and verify them against the workspace rather than parsing their textual appearance.

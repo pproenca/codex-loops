@@ -222,6 +222,42 @@ forms remain unavailable.
 5. For mutating workflows, include an adversarial verification phase and a final
    build/test gate in the workflow design.
 
+## Pipeline, Barrier, And Review Discipline
+
+Default to per-lane progress when work has several stages. Use `pipeline` when
+each static lane can advance independently; use `parallel` or a bound `fanout`
+as a barrier only when the next node truly needs the complete preceding result
+set. Global deduplication, an all-empty early exit, and comparing one finding
+against every other finding are valid barriers. Flattening, filtering, or merely
+giving stages different names are not.
+
+The shipped `pipeline` is intentionally narrower than a JavaScript callback
+pipeline: its literal item is a journal label, and a stage receives neither the
+item nor the previous stage result. Keep every stage prompt self-contained. Do
+not describe a workflow as item-mapped dataflow until the language has inert,
+closed item/previous-result bindings.
+
+For exhaustive review, compose these patterns rather than relying on one broad
+agent:
+
+1. Run perspective-diverse finders over the same explicit scope.
+2. Join only when the complete candidate pool is needed.
+3. Deduplicate against every candidate already seen, not only confirmed ones.
+4. Ask independent reviewers to refute candidates and preserve a distinct
+   unverified state when a reviewer fails.
+5. Synthesize by stable finding ids or indices so prose generation cannot erase
+   evidence.
+6. Run a fresh completeness critic that looks only for missed modalities,
+   unread evidence, or unverified claims.
+
+Every bound must be honest. If a workflow samples, keeps only top-N, exhausts a
+budget, skips failed lanes, or stops after a retry cap, log what coverage was
+dropped. Infrastructure failure is not refutation, and an empty result is not
+proof that the reviewed scope passed.
+
+The detailed source analysis behind these rules is in
+[`docs/research/claude-code-2.1.211-ultracode-workflows.md`](research/claude-code-2.1.211-ultracode-workflows.md).
+
 ## Testing Gate
 
 ```text

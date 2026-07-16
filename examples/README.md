@@ -13,7 +13,7 @@ before spending a live Codex turn.
 
 | Workflow | Problem it solves | Main language surfaces | Workspace effect |
 | --- | --- | --- | --- |
-| `change_risk_report.exs` | Turns the current diff into an evidence-backed change-risk and mitigation report. | Strict schemas, sequential `let` dataflow, `~P`, render helpers, `emit` | Read-only |
+| `change_risk_report.exs` | Turns the current diff into an evidence-backed change-risk and mitigation report. | Scout-first scope, blind heterogeneous `fanout`, full-pool adjudication, `~P`, `emit` | Read-only |
 | `release_readiness_panel.exs` | Produces a cross-functional release recommendation from independent build, security, migration, and operations reviews. | Explicit heterogeneous `fanout`, bound lane results, structured aggregation | Read-only |
 | `dependency_upgrade_swarm.exs` | Inventories dependency upgrades, scales independent whole-inventory reviews to the inventory size, and consolidates upgrade risk. | `path_count` width, repeated `fanout`, bindings, `emit` | Read-only |
 | `budgeted_codebase_onboarding.exs` | Uses the available token budget to sample several independent codebase maps, then creates an onboarding guide. | `budget_slices`, `on_zero`, bounded concurrency, bound fanout | Read-only; requires a finite run budget |
@@ -93,3 +93,9 @@ the Codex provider.
 These limitations are intentional parts of the current language contract. An
 example should expose them plainly rather than imply dataflow that does not
 exist.
+
+The examples use the scout → diverse finders → intentional barrier →
+adjudication → completeness pattern where the domain warrants it. The detailed
+reverse-engineering basis and the differences from Claude's callback pipeline
+are recorded in
+[`docs/research/claude-code-2.1.211-ultracode-workflows.md`](../docs/research/claude-code-2.1.211-ultracode-workflows.md).

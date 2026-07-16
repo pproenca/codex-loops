@@ -218,7 +218,9 @@ defmodule Workflow.Run.Writer do
               prior,
               options.budget,
               options.script_path,
-              options.workspace_root
+              options.workspace_root,
+              options.args,
+              options.tree_fingerprint
             )
         end
     end
@@ -259,7 +261,7 @@ defmodule Workflow.Run.Writer do
 
   defp failed_turn_result(address, reason), do: {:malformed_output, address, reason}
 
-  defp run_tree(run_id, tree, provider, prior, budget, script_path, workspace_root) do
+  defp run_tree(run_id, tree, provider, prior, budget, script_path, workspace_root, args, tree_fingerprint) do
     seq = Journal.last_seq(run_id) + 1
 
     # A fresh run gets its start marker (carrying the budget target, source path,
@@ -268,7 +270,12 @@ defmodule Workflow.Run.Writer do
     # already owns.
     seq =
       if prior == [],
-        do: commit(run_id, seq, Event.run_started(tree, budget, script_path, workspace_root)),
+        do:
+          commit(
+            run_id,
+            seq,
+            Event.run_started(tree, budget, script_path, workspace_root, args, tree_fingerprint)
+          ),
         else: seq
 
     ctx = %{seq: seq, return: nil, last_result: nil, iteration: 0, seen_by: [], loop_address: nil}
@@ -2122,6 +2129,8 @@ defmodule Workflow.Run.Writer do
   end
 
   defp resolve_binding_ref(events, ref, iteration \\ nil)
+
+  defp resolve_binding_ref(events, :run_input, _iteration), do: BoundValue.fold(events, :run_input)
 
   defp resolve_binding_ref(events, {:node, _address} = ref, _iteration), do: BoundValue.fold(events, ref)
 

@@ -124,6 +124,23 @@ defmodule Workflow.Web.SchedulerAPITest do
     )
   end
 
+  defp input_workflow do
+    write_script(
+      ~S"""
+      workflow "input-backed-api",
+        inputs: %{
+          "type" => "object",
+          "properties" => %{"topic" => %{"type" => "string"}},
+          "required" => ["topic"]
+        } do
+        agent ~P|Summarize <%= path(@args, "/topic") %>|
+        return :ok
+      end
+      """,
+      "wf_input"
+    )
+  end
+
   defp json_conn do
     build_conn()
     |> then(&%{&1 | host: "localhost", port: 47_125})
@@ -272,6 +289,31 @@ defmodule Workflow.Web.SchedulerAPITest do
                "ui_url" => "/runs/" <> ^id
              }
            } = json_response(conn, 200)
+  end
+
+  test "POST /api/runs accepts structured args and GET projects their immutable identity" do
+    path = input_workflow()
+    id = run_id("scheduler_api_args")
+    args = %{"topic" => "payments"}
+
+    conn =
+      post_json(json_conn(), "/api/runs", %{
+        script_path: path,
+        run_id: id,
+        provider: "mock",
+        args: args
+      })
+
+    assert %{"data" => %{"run_id" => ^id}} = json_response(conn, 200)
+
+    assert %{
+             "args" => ^args,
+             "argsDigest" => args_digest,
+             "treeFingerprint" => tree_fingerprint
+           } = wait_for_api_projection(id)
+
+    assert is_binary(args_digest)
+    assert is_binary(tree_fingerprint)
   end
 
   test "POST /api/runs validates and projects the canonical workspace root" do

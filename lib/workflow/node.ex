@@ -12,7 +12,8 @@ defmodule Workflow.Node do
   @type address :: [non_neg_integer()]
   @type fanout_scope :: :global | {:loop_local, address()}
   @type binding_ref ::
-          {:node, address()}
+          :run_input
+          | {:node, address()}
           | {:map, address()}
           | {:refine, address()}
           | {:fanout, address(), fanout_scope()}

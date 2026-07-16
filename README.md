@@ -46,10 +46,15 @@ restarts it according to the host service policy.
 ## Workflow Example
 
 ```elixir
-workflow "audit-workflow" do
+workflow "audit-workflow",
+  inputs: %{
+    "type" => "object",
+    "properties" => %{"scope" => %{"type" => "string"}},
+    "required" => ["scope"]
+  } do
   phase "audit"
   log "starting audit"
-  agent "Inspect the auth boundary and report the highest-risk issue."
+  agent ~P|Inspect <%= path(@args, "/scope") %> and report the highest-risk issue.|
   return :ok
 end
 ```
@@ -76,8 +81,8 @@ The one-action installer starts the service before registering MCP. If it was
 stopped later, run `codex-loops serve` before using the tools.
 
 ```text
-workflow_validate script_path=.codex/workflows/audit_workflow.exs workspace_root=/absolute/path/to/repo
-workflow_start    script_path=.codex/workflows/audit_workflow.exs workspace_root=/absolute/path/to/repo run_id=run_audit provider=mock
+workflow_validate script_path=.codex/workflows/audit_workflow.exs workspace_root=/absolute/path/to/repo args={"scope":"the auth boundary"}
+workflow_start    script_path=.codex/workflows/audit_workflow.exs workspace_root=/absolute/path/to/repo run_id=run_audit provider=mock args={"scope":"the auth boundary"}
 workflow_status   run_id=run_audit
 workflow_inspect  run_id=run_audit
 workflow_open_ui  run_id=run_audit
@@ -88,6 +93,10 @@ Relative MCP `script_path` values require an explicit absolute existing
 the root (including through symlinks), journals the root, and uses it as the
 Codex working directory. An absolute `script_path` may omit `workspace_root`.
 Run live only after the mock gate is clean by selecting `provider=codex`.
+`args` is a real JSON value, not a JSON-encoded string. A workflow may declare a
+literal `inputs:` JSON Schema and read the immutable journaled value through
+`@args`; arguments are non-secret, limited to 64 KiB, and cannot be changed on
+resume. Resume also rejects a changed compiled workflow by fingerprint.
 
 ## Development And Distribution
 

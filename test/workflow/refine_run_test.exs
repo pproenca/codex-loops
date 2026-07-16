@@ -17,8 +17,6 @@ defmodule Workflow.RefineRunTest do
   alias Workflow.Test.ScriptedProvider
 
   @moduletag :capture_log
-  @receive_timeout 1_000
-
   defp activity_fields(%Activity{} = activity) do
     activity
     |> Map.from_struct()
@@ -823,20 +821,6 @@ defmodule Workflow.RefineRunTest do
     |> Enum.map(& &1.type)
   end
 
-  defp await_lease_released(run_id, tries \\ 200) do
-    cond do
-      Registry.lookup(Workflow.Run.Registry, run_id) == [] ->
-        :ok
-
-      tries == 0 ->
-        flunk("lease for #{run_id} was never released")
-
-      true ->
-        Process.sleep(5)
-        await_lease_released(run_id, tries - 1)
-    end
-  end
-
   defp flush_agent_calls do
     receive do
       {:agent_called, _, _} -> flush_agent_calls()
@@ -899,15 +883,6 @@ defmodule Workflow.RefineRunTest do
       iteration: iteration,
       attempt: attempt
     }
-  end
-
-  defp assert_next_reviewer(address, iteration) do
-    assert_receive {:reviewer_entered, prompt, key, pid}, @receive_timeout
-    assert key.node_path == address
-    assert key.iteration == iteration
-    refute_receive {:reviewer_entered, _, _, _}, 50
-    send(pid, :release_reviewer)
-    prompt
   end
 
   test "inline producer converges in round 0 without invoking the reviser" do
@@ -1437,7 +1412,7 @@ defmodule Workflow.RefineRunTest do
     assert completed.converged == true
   end
 
-  test "resume replays refine_started descriptors instead of changed compiled source" do
+  test "resume rejects changed compiled refine descriptors before replay" do
     id = run_id()
     node = hd(InlineConverges.tree().nodes)
 
@@ -1451,77 +1426,16 @@ defmodule Workflow.RefineRunTest do
       seq + 1
     end)
 
-    assert {:ok, ^id, _pid} =
+    before_events = events(id)
+
+    assert {:error, {:tree_fingerprint_mismatch, _recorded, _current}} =
              Run.start(ChangedInlineConverges.tree(),
                run_id: id,
                provider: {ReplayStartedProvider, sink: self()}
              )
 
-    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 0}}, @receive_timeout
-    assert_receive {:agent_called, "Draft.", %{node_path: [0, 0], attempt: 1}}, @receive_timeout
-
-    round0_spec_prompt = assert_next_reviewer([0, 1, 0], 0)
-    assert round0_spec_prompt =~ "Check the spec."
-    assert round0_spec_prompt =~ "artifact:\ndraft-v1"
-
-    round0_runtime_prompt = assert_next_reviewer([0, 1, 1], 0)
-    assert round0_runtime_prompt =~ "Check the runtime."
-    assert round0_runtime_prompt =~ "artifact:\ndraft-v1"
-
-    assert_receive {:agent_called, reviser_prompt, %{node_path: [0, 2], attempt: 0}}, @receive_timeout
-
-    assert_receive {:agent_called, ^reviser_prompt, %{node_path: [0, 2], attempt: 1}},
-                   @receive_timeout
-
-    assert reviser_prompt =~ "Fix."
-    assert reviser_prompt =~ "current-artifact:\ndraft-v1"
-    assert reviser_prompt =~ "id:\nspec-gap"
-
-    round1_spec_prompt = assert_next_reviewer([0, 1, 0], 1)
-    assert round1_spec_prompt =~ "Check the spec."
-    assert round1_spec_prompt =~ "artifact:\ndraft-v2"
-
-    round1_runtime_prompt = assert_next_reviewer([0, 1, 1], 1)
-    assert round1_runtime_prompt =~ "Check the runtime."
-    assert round1_runtime_prompt =~ "artifact:\ndraft-v2"
-
-    await_lease_released(id)
-
-    refute_received {:reviewer_entered, _, %{node_path: [0, 1, 2]}, _}
-
-    committed =
-      id
-      |> events()
-      |> Enum.filter(&(&1.type == :agent_committed))
-
-    assert Enum.map(committed, & &1.payload.address) == [
-             [0, 0],
-             [0, 1, 0],
-             [0, 1, 1],
-             [0, 2],
-             [0, 1, 0],
-             [0, 1, 1]
-           ]
-
-    assert Enum.map(committed, & &1.payload.label) == [
-             "stable-producer",
-             "stable-spec",
-             "stable-runtime",
-             "stable-reviser",
-             "stable-spec",
-             "stable-runtime"
-           ]
-
-    assert Enum.count(events(id), &(&1.type == :agent_attempt_rejected)) == 2
-
-    prompts =
-      id
-      |> events()
-      |> Enum.filter(&(&1.type in [:agent_committed, :agent_attempt_rejected]))
-      |> Enum.map(& &1.payload.prompt)
-
-    refute Enum.any?(prompts, &String.contains?(&1, "Changed"))
-    assert Status.of(id).state == :completed
+    assert events(id) == before_events
+    refute_received {:agent_called, _, _}
   end
 
   test "refine reviewer activity is durably streamed without terminal-event duplication" do
@@ -2569,7 +2483,7 @@ defmodule Workflow.RefineRunTest do
     assert Status.of(id).failure.reason == {:did_not_converge, [0], {:gate, predicate}}
   end
 
-  test "journaled gate decisions replay instead of recomputing edited predicates" do
+  test "resume rejects edited gate predicates before replaying journaled decisions" do
     id = run_id()
     tree = GateReplayColdTrue.tree()
     node = hd(tree.nodes)
@@ -2653,7 +2567,9 @@ defmodule Workflow.RefineRunTest do
       seq + 1
     end)
 
-    assert {:ok, ^id} =
+    before_events = events(id)
+
+    assert {:error, {:tree_fingerprint_mismatch, _recorded, _current}} =
              Run.run(GateReplayColdFalseEdit.tree(),
                run_id: id,
                provider:
@@ -2667,14 +2583,8 @@ defmodule Workflow.RefineRunTest do
                   sink: self()}
              )
 
-    assert_received {:agent_called, cold_prompt, %{node_path: [0, 3], iteration: 0}}
-    assert cold_prompt =~ "Journaled cold read."
-    refute cold_prompt =~ "Changed cold read."
-
-    assert Enum.count(types(id), &(&1 == :refine_gate_evaluated)) == 1
-
-    assert Enum.find(events(id), &(&1.type == :refine_completed)).payload.cold_read.state ==
-             :completed
+    assert events(id) == before_events
+    refute_received {:agent_called, _, _}
   end
 
   test "non-convergence fail mode journals terminal refine_non_converged and resumes same error" do

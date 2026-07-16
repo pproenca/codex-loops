@@ -14,6 +14,7 @@ defmodule Workflow.Scheduler do
   alias Workflow.Provider.Codex
   alias Workflow.Provider.Mock
   alias Workflow.Run
+  alias Workflow.Run.Input
   alias Workflow.Run.Options, as: RunOptions
   alias Workflow.Scheduler.Error
   alias Workflow.Scheduler.Health
@@ -52,6 +53,7 @@ defmodule Workflow.Scheduler do
          {:ok, run_id} <- run_id(params),
          {:ok, provider} <- run_provider(params),
          {:ok, budget} <- run_budget(params),
+         {:ok, args} <- run_args(params),
          {:ok, requested_workspace_root} <- run_workspace_root(params),
          {:ok, workspace} <- Workspace.resolve(path, requested_workspace_root),
          {:ok, tree} <- Script.load_tree(workspace.script_path) do
@@ -59,23 +61,12 @@ defmodule Workflow.Scheduler do
         run_id: run_id,
         provider: provider_with_workspace(provider, workspace.workspace_root),
         budget: budget,
+        args: args,
         script_path: workspace.script_path,
         workspace_root: workspace.workspace_root
       }
 
-      case Run.start(tree, options) do
-        {:ok, started_run_id, _pid} ->
-          {:ok, RunStart.accepted(started_run_id)}
-
-        {:error, {:already_running, _pid}} ->
-          {:error, Error.run_already_running(run_id)}
-
-        {:error, {:capacity_exceeded, max_active_runs}} ->
-          {:error, Error.run_capacity_exceeded(max_active_runs)}
-
-        {:error, reason} ->
-          {:error, Error.run_start_failed(reason)}
-      end
+      start_result(Run.start(tree, options), run_id)
     else
       {:error, %Workflow.Script.Error{} = error} -> {:error, Error.workflow_validation(error)}
       {:error, %Error{} = error} -> {:error, error}
@@ -90,6 +81,7 @@ defmodule Workflow.Scheduler do
   def resume_run(run_id, params) when is_binary(run_id) and is_map(params) do
     with {:ok, run_id} <- route_safe_run_id(run_id),
          :ok <- ensure_run_exists(run_id),
+         :ok <- ensure_resume_args_absent(params),
          {:ok, provider} <- run_provider(params),
          {:ok, path} <- resume_script_path(run_id, params),
          {:ok, requested_workspace_root} <- resume_workspace_root(run_id, params),
@@ -103,19 +95,7 @@ defmodule Workflow.Scheduler do
         workspace_root: workspace.workspace_root
       }
 
-      case Run.start(tree, options) do
-        {:ok, ^run_id, _pid} ->
-          {:ok, RunStart.accepted(run_id)}
-
-        {:error, {:already_running, _pid}} ->
-          {:error, Error.run_already_running(run_id)}
-
-        {:error, {:capacity_exceeded, max_active_runs}} ->
-          {:error, Error.run_capacity_exceeded(max_active_runs)}
-
-        {:error, reason} ->
-          {:error, Error.run_start_failed(reason)}
-      end
+      start_result(Run.start(tree, options), run_id)
     else
       {:error, %Workflow.Script.Error{} = error} -> {:error, Error.workflow_validation(error)}
       {:error, %Error{} = error} -> {:error, error}
@@ -168,8 +148,9 @@ defmodule Workflow.Scheduler do
     with {:ok, path} <- run_script_path(params),
          {:ok, requested_workspace_root} <- run_workspace_root(params),
          {:ok, workspace} <- Workspace.resolve(path, requested_workspace_root),
-         {:ok, tree} <- Script.load_tree(workspace.script_path) do
-      {:ok, Validation.from_tree(tree, workspace.script_path)}
+         {:ok, tree} <- Script.load_tree(workspace.script_path),
+         :ok <- validate_supplied_args(tree, params) do
+      {:ok, Validation.from_tree(tree, workspace.script_path, arguments_validated: supplied_args?(params))}
     else
       {:error, %Workflow.Script.Error{} = error} -> {:error, Error.workflow_validation(error)}
       {:error, %Error{} = error} -> {:error, error}
@@ -340,6 +321,54 @@ defmodule Workflow.Scheduler do
       {:ok, _invalid} -> {:error, Error.invalid_budget()}
     end
   end
+
+  defp run_args(params) do
+    case fetch_param(params, :args, "args") do
+      :missing -> {:ok, :not_provided}
+      {:ok, args} -> {:ok, args}
+    end
+  end
+
+  defp validate_supplied_args(tree, params) do
+    case run_args(params) do
+      {:ok, :not_provided} ->
+        :ok
+
+      {:ok, args} ->
+        with {:ok, args} <- Input.normalize(args),
+             :ok <- Input.validate(tree.input_schema, args) do
+          :ok
+        else
+          {:error, reason} -> {:error, Error.invalid_run_args(reason)}
+        end
+    end
+  end
+
+  defp ensure_resume_args_absent(params) do
+    case fetch_param(params, :args, "args") do
+      :missing -> :ok
+      {:ok, _args} -> {:error, Error.resume_args_immutable()}
+    end
+  end
+
+  defp supplied_args?(params), do: fetch_param(params, :args, "args") != :missing
+
+  defp start_result({:ok, started_run_id, _pid}, _requested_run_id), do: {:ok, RunStart.accepted(started_run_id)}
+
+  defp start_result({:error, {:already_running, _pid}}, run_id), do: {:error, Error.run_already_running(run_id)}
+
+  defp start_result({:error, {:capacity_exceeded, max_active_runs}}, _run_id),
+    do: {:error, Error.run_capacity_exceeded(max_active_runs)}
+
+  defp start_result({:error, {:invalid_run_args, reason}}, _run_id), do: {:error, Error.invalid_run_args(reason)}
+
+  defp start_result({:error, {:tree_fingerprint_mismatch, recorded, current}}, run_id),
+    do: {:error, Error.workflow_changed(run_id, recorded, current)}
+
+  defp start_result({:error, {:run_args_mismatch, recorded, supplied}}, run_id),
+    do: {:error, Error.run_args_mismatch(run_id, recorded, supplied)}
+
+  defp start_result({:error, reason}, _run_id), do: {:error, Error.run_start_failed(reason)}
 
   defp fetch_param(params, atom_key, string_key) do
     cond do

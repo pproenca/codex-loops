@@ -63,11 +63,15 @@ and spend a turn.
 Author executable workflows as Elixir `.exs` files containing exactly one bare,
 top-level `workflow "name" do ... end` declaration. The scheduler parses the
 declaration as inert data; workflow files do not define modules or use macros.
+Parameterized workflows may declare a literal `inputs:` JSON Schema and read the
+non-secret, immutable invocation JSON through `@args`. Pass `args` as structured
+JSON to validate/start; resume reuses the journaled value and verifies the
+compiled tree fingerprint.
 Agents should validate and mock-run through the MCP tools before live execution:
 
 ```text
-workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo
-workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock
+workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo args={...}
+workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock args={...}
 workflow_status   run_id=<id>
 workflow_inspect  run_id=<id>
 workflow_open_ui  run_id=<id>

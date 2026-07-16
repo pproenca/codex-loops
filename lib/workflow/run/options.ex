@@ -4,20 +4,23 @@ defmodule Workflow.Run.Options do
   alias Workflow.Provider
 
   @enforce_keys [:run_id, :provider, :budget, :script_path]
-  defstruct @enforce_keys ++ [workspace_root: nil]
+  defstruct @enforce_keys ++ [workspace_root: nil, args: :not_provided, tree_fingerprint: nil]
 
   @type t :: %__MODULE__{
           run_id: String.t(),
           provider: Provider.t(),
           budget: non_neg_integer() | nil,
           script_path: String.t() | nil,
-          workspace_root: String.t() | nil
+          workspace_root: String.t() | nil,
+          args: term() | :not_provided,
+          tree_fingerprint: String.t() | nil
         }
 
   @type option ::
           {:run_id, String.t()}
           | {:provider, Provider.t()}
           | {:budget, non_neg_integer()}
+          | {:args, term()}
           | {:script_path, String.t()}
           | {:workspace_root, String.t()}
 
@@ -26,6 +29,7 @@ defmodule Workflow.Run.Options do
     with {:ok, run_id} <- run_id(Keyword.get(options, :run_id)),
          {:ok, provider} <- Provider.resolve(Keyword.get(options, :provider)),
          {:ok, budget} <- budget(Keyword.get(options, :budget)),
+         {:ok, args} <- args(options),
          {:ok, script_path} <- script_path(Keyword.get(options, :script_path)),
          {:ok, workspace_root} <- workspace_root(Keyword.get(options, :workspace_root)) do
       {:ok,
@@ -33,6 +37,7 @@ defmodule Workflow.Run.Options do
          run_id: run_id,
          provider: provider,
          budget: budget,
+         args: args,
          script_path: script_path,
          workspace_root: workspace_root
        }}
@@ -49,6 +54,12 @@ defmodule Workflow.Run.Options do
   defp budget(nil), do: {:ok, nil}
   defp budget(budget) when is_integer(budget) and budget >= 0, do: {:ok, budget}
   defp budget(_invalid), do: {:error, {:usage, :budget}}
+
+  defp args(options) do
+    if Keyword.has_key?(options, :args),
+      do: {:ok, Keyword.fetch!(options, :args)},
+      else: {:ok, :not_provided}
+  end
 
   defp script_path(nil), do: {:ok, nil}
   defp script_path(path) when is_binary(path) and byte_size(path) > 0, do: {:ok, :binary.copy(path)}

@@ -131,13 +131,24 @@ defmodule Workflow.Compiler do
   @spec compile(String.t(), Macro.t(), Macro.Env.t()) ::
           {:ok, Tree.t()} | {:error, Finding.t()}
   def compile(name, block, env) when is_binary(name) do
-    with {:ok, nodes} <- build(statements(block), 0, [], %{}, env, %{}),
-         :ok <- validate_tree(nodes, env) do
-      {:ok, %Tree{name: name, nodes: nodes}}
-    end
+    compile(name, block, env, [])
   end
 
   def compile(name, block, env) do
+    {:error, Finding.at(env, block, "workflow name must be a string literal, got: #{Macro.to_string(name)}")}
+  end
+
+  @spec compile(String.t(), Macro.t(), Macro.Env.t(), keyword()) ::
+          {:ok, Tree.t()} | {:error, Finding.t()}
+  def compile(name, block, env, workflow_opts) when is_binary(name) do
+    with {:ok, input_schema} <- workflow_input_schema(workflow_opts, block, env),
+         {:ok, nodes} <- build(statements(block), 0, [], %{}, env, %{args: :run_input}),
+         :ok <- validate_tree(nodes, env) do
+      {:ok, %Tree{name: name, input_schema: input_schema, nodes: nodes}}
+    end
+  end
+
+  def compile(name, block, env, _workflow_opts) do
     {:error, Finding.at(env, block, "workflow name must be a string literal, got: #{Macro.to_string(name)}")}
   end
 
@@ -210,6 +221,7 @@ defmodule Workflow.Compiler do
 
   defp let_node({:let, _meta, [{:=, _eq_meta, [name, producer]}]} = form, address, env, binding_env) do
     with :ok <- binding_name(name, form, env),
+         :ok <- available_binding_name(name, binding_env, form, env),
          {:ok, node} <- node(producer, address, env, binding_env),
          :ok <- bindable_producer(node, form, env) do
       {:ok, node, Map.put(binding_env, name, binding_ref(node, address))}
@@ -241,6 +253,11 @@ defmodule Workflow.Compiler do
   defp binding_name(_name, form, env) do
     {:error, Finding.at(env, form, "`let` binding name must be an atom literal")}
   end
+
+  defp available_binding_name(:args, _binding_env, form, env),
+    do: {:error, Finding.at(env, form, "binding name :args is reserved for workflow inputs")}
+
+  defp available_binding_name(_name, _binding_env, _form, _env), do: :ok
 
   defp bindable_producer(%Agent{}, _form, _env), do: :ok
   defp bindable_producer(%Synthesize{}, _form, _env), do: :ok
@@ -752,8 +769,8 @@ defmodule Workflow.Compiler do
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {branch, i}, {:ok, acc} ->
       case node(branch, address ++ [i], env, binding_env) do
-        {:ok, %Agent{prompt: %Template{}}} ->
-          {:halt, {:error, nested_template_prompt_finding(env, branch, "parallel branches")}}
+        {:ok, %Agent{prompt: %Template{}} = agent} ->
+          nested_template_agent(agent, env, branch, "parallel branches", acc)
 
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
@@ -822,8 +839,8 @@ defmodule Workflow.Compiler do
     stages
     |> Enum.reduce_while({:ok, []}, fn stage, {:ok, acc} ->
       case node(stage, address, env, binding_env) do
-        {:ok, %Agent{prompt: %Template{}}} ->
-          {:halt, {:error, nested_template_prompt_finding(env, stage, "pipeline stages")}}
+        {:ok, %Agent{prompt: %Template{}} = agent} ->
+          nested_template_agent(agent, env, stage, "pipeline stages", acc)
 
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
@@ -1043,8 +1060,10 @@ defmodule Workflow.Compiler do
 
   defp body_node(stmt, address, env, binding_env, _mode) do
     case node(stmt, address, env, binding_env) do
-      {:ok, %Agent{prompt: %Template{}}} ->
-        {:error, nested_template_prompt_finding(env, stmt, "loop body")}
+      {:ok, %Agent{prompt: %Template{}} = agent} ->
+        if run_input_only_template?(agent),
+          do: {:ok, agent},
+          else: {:error, nested_template_prompt_finding(env, stmt, "loop body")}
 
       other ->
         other
@@ -2001,6 +2020,8 @@ defmodule Workflow.Compiler do
 
   defp optional_positive_width_integer(value, key, form, env), do: positive_width_integer(value, key, form, env)
 
+  defp binding_ref?(:run_input), do: true
+
   defp binding_ref?({kind, address}) when kind in [:node, :map, :refine] and is_list(address), do: address?(address)
 
   defp binding_ref?({:fanout, address, :global}) when is_list(address), do: address?(address)
@@ -2172,8 +2193,8 @@ defmodule Workflow.Compiler do
     |> Enum.with_index()
     |> Enum.reduce_while({:ok, []}, fn {stmt, stage_index}, {:ok, acc} ->
       case node(stmt, address_for.(stage_index), env, binding_env) do
-        {:ok, %Agent{prompt: %Template{}}} ->
-          {:halt, {:error, nested_template_prompt_finding(env, stmt, "#{combinator} body")}}
+        {:ok, %Agent{prompt: %Template{}} = agent} ->
+          nested_template_agent(agent, env, stmt, "#{combinator} body", acc)
 
         {:ok, %Agent{} = agent} ->
           {:cont, {:ok, [agent | acc]}}
@@ -2298,6 +2319,7 @@ defmodule Workflow.Compiler do
 
   defp binding_kind({:node, _address}), do: "agent"
   defp binding_kind({:refine, _address}), do: "refine"
+  defp binding_kind(:run_input), do: "run input"
   defp binding_kind({:map, _address}), do: "map"
   defp binding_kind({:fanout, _address, _scope}), do: "fanout"
 
@@ -2308,6 +2330,56 @@ defmodule Workflow.Compiler do
       "template prompts are only allowed on top-level agents, not in #{context}",
       hint: "move this `~P` prompt out of #{context} and bind its inputs with `let` first"
     )
+  end
+
+  defp nested_template_agent(agent, env, form, context, acc) do
+    if run_input_only_template?(agent) do
+      {:cont, {:ok, [agent | acc]}}
+    else
+      {:halt, {:error, nested_template_prompt_finding(env, form, context)}}
+    end
+  end
+
+  defp run_input_only_template?(%Agent{bindings: bindings}) do
+    Enum.all?(bindings, fn {_name, ref} -> ref == :run_input end)
+  end
+
+  defp workflow_input_schema(opts, form, env) do
+    cond do
+      not (keyword_literal?(opts) and Keyword.keyword?(opts)) ->
+        {:error, Finding.at(env, form, "workflow options must be a literal keyword list")}
+
+      Keyword.keys(opts) -- [:inputs] != [] ->
+        {:error, Finding.at(env, form, "unknown workflow option", hint: "the only workflow option is `inputs:`")}
+
+      Keyword.keys(opts) != Enum.uniq(Keyword.keys(opts)) ->
+        {:error, Finding.at(env, form, "workflow option `inputs:` may appear at most once")}
+
+      true ->
+        materialize_input_schema(Keyword.get(opts, :inputs), form, env)
+    end
+  end
+
+  defp materialize_input_schema(nil, _form, _env), do: {:ok, nil}
+
+  defp materialize_input_schema({:%{}, _, _pairs} = ast, form, env) do
+    if Macro.quoted_literal?(ast) do
+      case JSONValue.from_literal(ast) do
+        {:ok, schema} -> {:ok, Schema.new(schema)}
+        {:error, _reason} -> invalid_input_schema(form, env)
+      end
+    else
+      invalid_input_schema(form, env)
+    end
+  end
+
+  defp materialize_input_schema(_schema, form, env), do: invalid_input_schema(form, env)
+
+  defp invalid_input_schema(form, env) do
+    {:error,
+     Finding.at(env, form, "workflow `inputs:` must be a literal JSON Schema map",
+       hint: ~s|use inputs: %{"type" => "object", "properties" => %{...}}|
+     )}
   end
 
   # --- Suggestions from the closed vocabulary ---

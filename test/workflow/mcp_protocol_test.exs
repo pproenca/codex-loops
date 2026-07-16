@@ -79,6 +79,11 @@ defmodule Workflow.MCPProtocolTest do
            end)
 
     resume = Enum.find(tools, &(&1["name"] == "workflow_resume"))
+    validate = Enum.find(tools, &(&1["name"] == "workflow_validate"))
+    start = Enum.find(tools, &(&1["name"] == "workflow_start"))
+
+    assert validate["inputSchema"]["properties"]["args"] == %{}
+    assert start["inputSchema"]["properties"]["args"] == %{}
 
     assert resume["inputSchema"]["properties"]["script"] ==
              resume["inputSchema"]["properties"]["script_path"]

@@ -56,10 +56,12 @@ MCP behavior:
   `2025-11-25`; subsequent calls validate `MCP-Protocol-Version`, defaulting a
   missing header to `2025-03-26`
 - `workflow_validate` input schema requires `script_path` and accepts optional
-  absolute `workspace_root`
+  absolute `workspace_root` and optional structured JSON `args`; when present,
+  the concrete invocation is validated
 - `workflow_start` input schema requires `script_path` and accepts optional
   absolute `workspace_root`, optional `run_id`, optional `provider` (`mock` or
-  `codex`), and optional non-negative integer `budget`. The scheduler defaults
+  `codex`), optional non-negative integer `budget`, and optional structured JSON
+  `args`. The scheduler defaults
   to `mock`; selecting `codex` spends a real Codex provider turn.
 - `workflow_status` input schema requires `run_id`
 - `workflow_inspect` input schema requires `run_id`
@@ -115,10 +117,15 @@ MCP behavior:
 Workflow scripts are Elixir files:
 
 ```elixir
-workflow "example" do
+workflow "example",
+  inputs: %{
+    "type" => "object",
+    "properties" => %{"scope" => %{"type" => "string"}},
+    "required" => ["scope"]
+  } do
   phase "scout"
   log "starting"
-  agent "Inspect README.md and summarize the project goal."
+  agent ~P|Inspect <%= path(@args, "/scope") %>.|
   return :ok
 end
 ```
@@ -131,6 +138,7 @@ Schema maps.
 Useful forms:
 
 - `workflow "name" do ... end`
+- `workflow "name", inputs: %{...} do ... end`
 - `phase "title"`
 - `log "message"`
 - `agent "prompt"`
@@ -191,10 +199,15 @@ a final `emit_result(:name)` returns a structured public projection from a
 result-capable binding. The shipped result-capable producer is `refine`.
 
 Template prompts remain narrow: no Elixir string interpolation, no arbitrary
-helper calls, and no template prompts inside nested agents such as `parallel`,
-`pipeline`, `fanout`, `fan_out`, or loop bodies. `gather` and `map` are reserved
+helper calls, and nested prompts may template only over predefined `@args`.
+Templates over prior agent results remain top-level only. `gather` and `map` are reserved
 §10.9 future forms and must not be presented as executable plugin workflow
 syntax.
+
+`args` is an actual JSON value, not a JSON-encoded string. It defaults to `{}`
+when omitted, is limited to 64 KiB, validates before provider work, and is
+journaled and visible rather than secret. Resume reuses it, accepts no
+replacement, and rejects a changed compiled tree by fingerprint.
 
 Expected authoring loop:
 
@@ -277,8 +290,8 @@ credential-free, and does not spend a real Codex turn.
 Every executable workflow must pass:
 
 ```text
-workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo
-workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock
+workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo args={"scope":"auth"}
+workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock args={"scope":"auth"}
 workflow_status   run_id=<id>
 workflow_inspect  run_id=<id>
 ```

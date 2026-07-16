@@ -12,10 +12,15 @@ directly.
 Author executable workflows as Elixir `.exs` files:
 
 ```elixir
-workflow "example" do
+workflow "example",
+  inputs: %{
+    "type" => "object",
+    "properties" => %{"topic" => %{"type" => "string"}},
+    "required" => ["topic"]
+  } do
   phase "scout"
   log "starting"
-  agent "Inspect README.md and summarize the project goal."
+  agent ~P|Inspect README.md and relate it to <%= path(@args, "/topic") %>.|
   return :ok
 end
 ```
@@ -31,7 +36,9 @@ known atoms; arbitrary source text cannot mint atoms in the scheduler VM.
 
 ## DSL
 
-- `workflow "name" do ... end` defines the workflow.
+- `workflow "name" do ... end` defines an unparameterized workflow.
+- `workflow "name", inputs: %{...} do ... end` declares an optional literal
+  JSON Schema contract for invocation arguments.
 - `phase "title"` records progress.
 - `log "message"` records a journal log.
 - `agent "prompt"` runs one provider turn.
@@ -41,9 +48,12 @@ known atoms; arbitrary source text cannot mint atoms in the scheduler VM.
 - `let :name = agent(...)`, `let :name = synthesize(...)`, and
   `let :name = refine(...)` bind a top-level producer's journaled output for
   later dataflow rendering.
+- `@args` is the immutable JSON value supplied when the run starts. It is in
+  scope from the first statement and may be inspected with template formatters,
+  predicates, and `path_count(:args, ...)` fanout widths.
 - `agent(~P"... <%= @name %> ...")` injects earlier explicit bindings into a
-  later top-level agent prompt. Template prompts are not allowed in nested
-  agents such as `parallel`, `pipeline`, `fanout`, `fan_out`, or loop bodies.
+  later top-level agent prompt. Nested agents may use templates only when every
+  hole reads `@args`; templates over prior agent results remain top-level only.
 - `emit(~P"... <%= @name %> ...")` sets the final terminal value to rendered
   text from earlier bindings.
 - `emit_result(:name)` sets the final terminal value to a structured public
@@ -61,6 +71,45 @@ known atoms; arbitrary source text cannot mint atoms in the scheduler VM.
   `loop`, generic `fanout`, and closed predicates first.
 - `gather` and `map` are specified for a future dataflow extension but are not
   available in the shipped compiler. Keep them out of executable workflows.
+
+## Workflow Inputs
+
+Pass arguments as a JSON value in the `args` field of `workflow_validate` or
+`workflow_start`; do not JSON-encode the value into a string. The declaration is
+optional: without `inputs:`, any JSON value is accepted. When omitted at
+invocation, `args` defaults to `%{}`. An explicit JSON `null` remains `null`.
+
+```elixir
+workflow "targeted-review",
+  inputs: %{
+    "type" => "object",
+    "properties" => %{
+      "scope" => %{"type" => "string"},
+      "files" => %{"type" => "array", "items" => %{"type" => "string"}}
+    },
+    "required" => ["scope", "files"]
+  } do
+  fanout width: path_count(:args, "/files", max: 32) do
+    agent ~P|Review <%= path(@args, "/scope") %>. Files: <%= flatten(@args, "/files") %>|
+  end
+
+  return :ok
+end
+```
+
+The schema uses the same structured-output subset as agent schemas: object,
+array, string, integer, number, and boolean types, including object
+`required`/`properties` and array `items`. Arguments are normalized as JSON,
+limited to 64 KiB, validated before a writer is registered or a provider is
+called, and journaled in `run_started`. They are intentionally non-secret and
+are visible in status/inspect projections.
+
+Arguments are immutable for a `run_id`. Resume takes no `args`; it reuses the
+journaled value. The scheduler also journals an argument digest and a compiled
+tree fingerprint. If the workflow source recompiles to a different tree,
+resume fails with `scheduler.run.workflow_changed` before provider work rather
+than replaying address-keyed events against different code. Journals created
+before fingerprints were introduced remain resumable.
 
 ## Generic Loop And Fanout Core
 
@@ -261,11 +310,14 @@ The detailed source analysis behind these rules is in
 ## Testing Gate
 
 ```text
-workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo
-workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock
+workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo args={"scope":"auth","files":["lib/auth.ex"]}
+workflow_start    script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock args={"scope":"auth","files":["lib/auth.ex"]}
 workflow_status   run_id=<id>
 workflow_inspect  run_id=<id>
 ```
+
+Supplying `args` to `workflow_validate` checks that concrete invocation. Omitting
+it validates only the workflow source and declared input schema.
 
 Relative MCP script paths require an explicit absolute existing
 `workspace_root`. An absolute `script_path` may omit it.
@@ -295,6 +347,9 @@ settled attempts and deterministic control-flow markers:
 workflow_resume run_id=<id> provider=codex
 workflow_status run_id=<id>
 ```
+
+Resume reuses the original args and verifies the current compiled tree against
+the fingerprint recorded at start. It never accepts replacement args.
 
 Provider effects are at-most-once. The scheduler writes `agent_started` before
 each provider call. If that marker has no matching committed, rejected, or

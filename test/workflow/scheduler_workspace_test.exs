@@ -216,7 +216,7 @@ defmodule Workflow.SchedulerWorkspaceTest do
     original_root = Path.join(base, "original")
     other_root = Path.join(base, "other")
     script = write_workflow(original_root, "resume")
-    other_script = write_workflow(other_root, "resume_override")
+    other_script = write_workflow(other_root, "resume")
     run_id = run_id("resume")
 
     assert {:ok, _start} =

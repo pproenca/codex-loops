@@ -2,8 +2,9 @@ defmodule Workflow.BoundValue do
   @moduledoc """
   Resolves a single bound value **purely by folding the journal**.
 
-  A `{:node, address}` binding points at one producer node's committed result.
-  The fold replays the latest committed result for that address and returns it as a
+  A `:run_input` binding points at the immutable args in `run_started`; a
+  `{:node, address}` binding points at one producer node's committed result. The
+  fold replays the latest committed result for that address and returns it as a
   tagged tuple, so later slices can widen prompt rendering to journaled values
   without introducing process state.
   """
@@ -18,6 +19,13 @@ defmodule Workflow.BoundValue do
   def of(run_id, ref), do: run_id |> Journal.fold() |> fold(ref)
 
   @spec fold([Event.t()], Workflow.Node.binding_ref()) :: result()
+  def fold(events, :run_input) do
+    case Enum.find(events, &match?(%Event{payload: %Payload.RunStarted{}}, &1)) do
+      %Event{payload: %Payload.RunStarted{args: args}} -> {:ok, args}
+      nil -> {:error, {:unbound, :run_input}}
+    end
+  end
+
   def fold(events, {:node, address} = ref) do
     case Enum.reduce(events, nil, &apply_event(&1, &2, address)) do
       nil -> {:error, {:unbound, ref}}

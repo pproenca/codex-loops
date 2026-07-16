@@ -169,7 +169,12 @@ defmodule Workflow.MCPHTTPTest do
     File.mkdir_p!(Path.dirname(absolute_path))
 
     File.write!(absolute_path, """
-    workflow "mcp-http" do
+    workflow "mcp-http",
+      inputs: %{
+        "type" => "object",
+        "properties" => %{"topic" => %{"type" => "string"}},
+        "required" => ["topic"]
+      } do
       log "through scheduler"
       return :ok
     end
@@ -214,7 +219,8 @@ defmodule Workflow.MCPHTTPTest do
         "script_path" => relative_path,
         "workspace_root" => root,
         "run_id" => run_id,
-        "provider" => "mock"
+        "provider" => "mock",
+        "args" => %{"topic" => "payments"}
       })
 
     assert get_in(started, ["result", "structuredContent", "data", "run_id"]) == run_id
@@ -224,6 +230,9 @@ defmodule Workflow.MCPHTTPTest do
     status_data = get_in(status, ["result", "structuredContent", "data"])
     assert status_data["runId"] == run_id
     assert status_data["state"] == "completed"
+    assert status_data["args"] == %{"topic" => "payments"}
+    assert is_binary(status_data["argsDigest"])
+    assert is_binary(status_data["treeFingerprint"])
     refute Map.has_key?(status_data, "uiUrl")
 
     inspected = call_tool(14, "workflow_inspect", %{"run_id" => run_id})

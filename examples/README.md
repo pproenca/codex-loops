@@ -13,6 +13,7 @@ before spending a live Codex turn.
 
 | Workflow | Problem it solves | Main language surfaces | Workspace effect |
 | --- | --- | --- | --- |
+| `parameterized_scope_review.exs` | Runs a caller-selected number of independent reviews over an explicit scope and file list. | `inputs:`, immutable `@args`, nested input templates, `path_count(:args, ...)`, bound fanout | Read-only |
 | `change_risk_report.exs` | Turns the current diff into an evidence-backed change-risk and mitigation report. | Scout-first scope, blind heterogeneous `fanout`, full-pool adjudication, `~P`, `emit` | Read-only |
 | `release_readiness_panel.exs` | Produces a cross-functional release recommendation from independent build, security, migration, and operations reviews. | Explicit heterogeneous `fanout`, bound lane results, structured aggregation | Read-only |
 | `dependency_upgrade_swarm.exs` | Inventories dependency upgrades, scales independent whole-inventory reviews to the inventory size, and consolidates upgrade risk. | `path_count` width, repeated `fanout`, bindings, `emit` | Read-only |
@@ -38,6 +39,17 @@ From an installed or development bundle, validate through MCP before execution:
 ```text
 workflow_validate script_path=examples/change_risk_report.exs workspace_root=/absolute/path/to/repo
 ```
+
+The parameterized example accepts structured JSON rather than requiring source
+edits:
+
+```text
+workflow_validate script_path=examples/parameterized_scope_review.exs workspace_root=/absolute/path/to/repo args={"scope":"authentication","files":["lib/auth.ex"],"replicas":["one","two","three"]}
+workflow_start    script_path=examples/parameterized_scope_review.exs workspace_root=/absolute/path/to/repo run_id=auth-review provider=mock args={"scope":"authentication","files":["lib/auth.ex"],"replicas":["one","two","three"]}
+```
+
+`replicas` controls bounded width only. Each lane deliberately reviews the same
+whole scope; no array item or lane index is injected implicitly.
 
 For a normal live run against the current workspace:
 
@@ -73,6 +85,9 @@ the Codex provider.
 ## Dataflow Rules Used Here
 
 - Top-level `let` plus `agent(~P"...")` is real sequential dataflow.
+- `@args` is immutable journaled JSON available from the first node. Nested
+  agents may template over `@args`, while templates over prior agent results
+  remain top-level only.
 - A top-level `fanout bind:` exposes the ordered last result from each lane to a
   later template. Explicit lanes are used when scopes differ.
 - Repeated fanout lanes receive the same prompt and no lane index. The dependency

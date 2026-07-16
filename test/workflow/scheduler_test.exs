@@ -163,6 +163,23 @@ defmodule Workflow.SchedulerTest do
     )
   end
 
+  defp input_workflow do
+    write_script(
+      ~S"""
+      workflow "input-backed",
+        inputs: %{
+          "type" => "object",
+          "properties" => %{"topic" => %{"type" => "string"}},
+          "required" => ["topic"]
+        } do
+        agent ~P|Summarize <%= path(@args, "/topic") %>|
+        return :ok
+      end
+      """,
+      "wf_input"
+    )
+  end
+
   test "health reports the supervised runtime boundary dependencies" do
     assert {:ok, health} = Scheduler.health()
 
@@ -703,6 +720,96 @@ defmodule Workflow.SchedulerTest do
     assert validation.node_count == 2
     assert validation.script == %{path: path}
     assert Journal.run_ids() == run_ids
+  end
+
+  test "validates concrete workflow args and returns the input contract and plan identity" do
+    path = input_workflow()
+
+    assert {:ok, source_validation} = Scheduler.validate_workflow(%{"script_path" => path})
+    assert source_validation.arguments_validated == false
+    assert source_validation.input_schema["required"] == ["topic"]
+    assert is_binary(source_validation.tree_fingerprint)
+
+    assert {:ok, invocation_validation} =
+             Scheduler.validate_workflow(%{
+               "script_path" => path,
+               "args" => %{"topic" => "payments"}
+             })
+
+    assert invocation_validation.arguments_validated == true
+    assert invocation_validation.tree_fingerprint == source_validation.tree_fingerprint
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.validate_workflow(%{
+               "script_path" => path,
+               "args" => %{"topic" => 7}
+             })
+
+    assert error.status == 422
+    assert error.code == "scheduler.run.args_schema_mismatch"
+    assert error.details.field == "args"
+  end
+
+  test "starts with args, exposes invocation identity, and keeps args immutable on resume" do
+    path = input_workflow()
+    id = run_id("scheduler_args")
+    args = %{"topic" => "payments"}
+
+    assert {:ok, %{run_id: ^id}} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock",
+               "args" => args
+             })
+
+    projection = wait_for_projection(id)
+    assert projection.args == args
+    assert is_binary(projection.args_digest)
+    assert is_binary(projection.tree_fingerprint)
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.resume_run(id, %{"args" => args})
+
+    assert error.status == 409
+    assert error.code == "scheduler.run.args_immutable"
+  end
+
+  test "rejects missing required args without creating a run" do
+    path = input_workflow()
+    id = run_id("scheduler_missing_args")
+
+    assert {:error, %Scheduler.Error{} = error} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock"
+             })
+
+    assert error.status == 422
+    assert error.code == "scheduler.run.args_schema_mismatch"
+    refute Journal.run_exists?(id)
+  end
+
+  test "resume rejects a workflow whose compiled plan changed" do
+    path = input_workflow()
+    id = run_id("scheduler_changed_plan")
+
+    assert {:ok, %{run_id: ^id}} =
+             Scheduler.start_run(%{
+               "script_path" => path,
+               "run_id" => id,
+               "provider" => "mock",
+               "args" => %{"topic" => "payments"}
+             })
+
+    wait_for_projection(id)
+    File.write!(path, String.replace(File.read!(path), "Summarize", "Rewrite"))
+
+    assert {:error, %Scheduler.Error{} = error} = Scheduler.resume_run(id)
+    assert error.status == 409
+    assert error.code == "scheduler.run.workflow_changed"
+    assert error.details.run_id == id
   end
 
   test "missing workflow scripts return a typed scheduler validation error" do

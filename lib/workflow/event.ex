@@ -26,6 +26,7 @@ defmodule Workflow.Event do
   alias Workflow.Node.Refine.HaltGate
   alias Workflow.Node.Refine.RepairGate
   alias Workflow.Node.Verify
+  alias Workflow.PlanIdentity
   alias Workflow.Provider.Activity
   alias Workflow.Refine.Artifact
   alias Workflow.Refine.ColdRead
@@ -37,6 +38,7 @@ defmodule Workflow.Event do
   alias Workflow.Refine.RoleFailure
   alias Workflow.Refine.RoundDecision
   alias Workflow.Refine.TerminalProjection
+  alias Workflow.Run.Input
   alias Workflow.Schema
 
   @schema 1
@@ -215,7 +217,18 @@ defmodule Workflow.Event do
   defp hydrate_activity(%Activity{} = activity), do: activity
   defp hydrate_activity(activity) when is_map(activity), do: Activity.normalize!(activity)
 
-  defp payload_spec(:run_started, _payload), do: {P.RunStarted, %{budget: nil, script_path: nil, workspace_root: nil}}
+  defp payload_spec(:run_started, _payload) do
+    {P.RunStarted,
+     %{
+       budget: nil,
+       script_path: nil,
+       workspace_root: nil,
+       args: %{},
+       args_digest: nil,
+       tree_fingerprint: nil
+     }}
+  end
+
   defp payload_spec(:phase_entered, _payload), do: {P.PhaseEntered, %{}}
   defp payload_spec(:log_emitted, _payload), do: {P.LogEmitted, %{}}
   defp payload_spec(:agent_started, _payload), do: {P.AgentStarted, %{label: nil}}
@@ -410,16 +423,29 @@ defmodule Workflow.Event do
   containing execution directory. Journaling both lets `resume` recover the
   workflow and the same Codex filesystem context from the run alone. Both fields
   are additive; older runs hydrate them to `nil` and can derive a safe root from a
-  recovered script path.
+  recovered script path. `args` is the normalized immutable run input; its
+  digest and the compiled tree fingerprint make invocation identity explicit.
   """
-  def run_started(%Workflow.Tree{} = tree, budget \\ nil, script_path \\ nil, workspace_root \\ nil) do
+  def run_started(
+        %Workflow.Tree{} = tree,
+        budget \\ nil,
+        script_path \\ nil,
+        workspace_root \\ nil,
+        args \\ %{},
+        tree_fingerprint \\ nil
+      ) do
+    {:ok, args} = Input.normalize(args)
+
     event(%P.RunStarted{
       tree_name: tree.name,
       tree_version: tree.version,
       node_count: length(tree.nodes),
       budget: budget,
       script_path: script_path,
-      workspace_root: workspace_root
+      workspace_root: workspace_root,
+      args: args,
+      args_digest: Input.digest(args),
+      tree_fingerprint: tree_fingerprint || PlanIdentity.fingerprint(tree)
     })
   end
 

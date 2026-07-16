@@ -25,6 +25,7 @@ defmodule Workflow.ExamplesTest do
   @examples_dir Path.expand("../../examples", __DIR__)
 
   @manifest [
+    {"parameterized_scope_review.exs", "parameterized-scope-review", Emit},
     {"change_risk_report.exs", "change-risk-report", Emit},
     {"current_diff_refine.exs", "current-diff-refine", EmitResult},
     {"storage_architecture_decision.exs", "storage-architecture-decision", Emit},
@@ -75,6 +76,12 @@ defmodule Workflow.ExamplesTest do
         assert tree.name == expected_name
         assert List.last(tree.nodes).__struct__ == expected_terminal
         refute contains_function?(tree), "#{file} compiled to a tree containing a closure"
+
+        if tree.input_schema do
+          tree.input_schema
+          |> Schema.to_map()
+          |> assert_string_keyed_schema!(file)
+        end
 
         tree
         |> structs()
@@ -180,6 +187,24 @@ defmodule Workflow.ExamplesTest do
              bind: :work,
              on_zero: :fail
            } = Enum.find(onboarding_nodes, &match?(%GenericFanout{}, &1))
+  end
+
+  test "the parameterized example binds immutable args into nested and top-level prompts" do
+    %Tree{input_schema: input_schema, nodes: nodes} =
+      load_example!("parameterized_scope_review.exs")
+
+    assert Schema.to_map(input_schema)["required"] == ["scope", "files", "replicas"]
+
+    assert %GenericFanout{
+             width: %FanoutPathCount{binding: :args, ref: :run_input, pointer: "/replicas", max: 8},
+             lanes: {:repeat, [%Agent{bindings: %{args: :run_input}}]},
+             bind: :reviews
+           } = Enum.find(nodes, &match?(%GenericFanout{}, &1))
+
+    assert Enum.any?(nodes, fn
+             %Agent{bindings: %{args: :run_input, reviews: {:fanout, _address, :global}}} -> true
+             _node -> false
+           end)
   end
 
   test "change-risk review preserves blind finders until a single adjudication barrier" do

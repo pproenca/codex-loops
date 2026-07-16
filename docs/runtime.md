@@ -182,6 +182,12 @@ Runs are stored in SQLite at `~/.codex/workflows/runs_1.sqlite` by default, or
 at `CODEX_LOOPS_JOURNAL_PATH` when set. Events are keyed by `{run_id, seq}` and
 folded to reconstruct status, summaries, and resume decisions.
 
+`run_started` records the normalized non-secret JSON args, their digest, and a
+deterministic fingerprint of the compiled tree. Start validates args before
+registering a writer. Resume reuses the recorded value and rejects a changed
+compiled tree before replaying address-keyed events; legacy events without a
+fingerprint remain readable and resumable.
+
 The supervised journal process owns one serialized write connection. Status,
 inspection, and LiveView folds open short-lived read-only SQLite connections,
 so concurrent readers do not queue through the journal process's mailbox. Event

@@ -365,6 +365,8 @@ defmodule Workflow.Predicate do
   defp binding_ref?({kind, address}) when kind in @binding_ref_kinds and is_list(address),
     do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
 
+  defp binding_ref?(:run_input), do: true
+
   defp binding_ref?({:fanout, address, :global}) when is_list(address),
     do: Enum.all?(address, &(is_integer(&1) and &1 >= 0))
 

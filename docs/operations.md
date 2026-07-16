@@ -160,8 +160,8 @@ The archive installer starts the service. If an operator stopped it, run
 root with every relative workflow path:
 
 ```text
-workflow_validate script_path=.codex/workflows/example.exs workspace_root=/absolute/path/to/repo
-workflow_start    script_path=.codex/workflows/example.exs workspace_root=/absolute/path/to/repo run_id=run_example provider=mock
+workflow_validate script_path=.codex/workflows/example.exs workspace_root=/absolute/path/to/repo args={"scope":"auth"}
+workflow_start    script_path=.codex/workflows/example.exs workspace_root=/absolute/path/to/repo run_id=run_example provider=mock args={"scope":"auth"}
 workflow_status   run_id=run_example
 workflow_inspect  run_id=run_example
 workflow_open_ui  run_id=run_example
@@ -179,6 +179,9 @@ workflow_inspect run_id=run_example_live
 `workflow_status` polls the current run projection. `workflow_inspect` returns
 durable journal summaries and ordered raw refs. `workflow_open_ui` returns the
 Phoenix LiveView URL for realtime watching.
+
+`args` is structured JSON, not an encoded string. It is validated before the
+run starts, journaled as non-secret data, and immutable for the `run_id`.
 
 ## Workspace Paths
 
@@ -251,6 +254,10 @@ Resume reuses settled work. It never redelivers an attempt whose durable start
 has no settlement, because the provider may already have completed or charged.
 Such a run terminates with `outcome_unknown`; inspect it and start a new run
 only as an explicit operator decision.
+
+Resume also reuses the journaled args and checks the recompiled workflow's
+fingerprint before it acquires a writer lease. A changed workflow fails with
+`scheduler.run.workflow_changed`; resume never accepts replacement args.
 
 ## Runtime Artifacts
 

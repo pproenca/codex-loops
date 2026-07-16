@@ -65,8 +65,8 @@ defmodule Workflow.Script do
   def load_tree(path) when is_binary(path) do
     with {:ok, source} <- read(path),
          {:ok, ast} <- quoted(path, source),
-         {:ok, name, block, line} <- workflow_form(path, ast) do
-      compile(path, name, block, line)
+         {:ok, name, workflow_opts, block, line} <- workflow_form(path, ast) do
+      compile(path, name, workflow_opts, block, line)
     end
   end
 
@@ -157,10 +157,14 @@ defmodule Workflow.Script do
   end
 
   defp workflow_form(_path, {:workflow, meta, [name, [do: block]]}) when is_binary(name) do
-    {:ok, name, block, Keyword.get(meta, :line, 1)}
+    {:ok, name, [], block, Keyword.get(meta, :line, 1)}
   end
 
-  defp workflow_form(path, {:workflow, _meta, [name, _block]}) do
+  defp workflow_form(_path, {:workflow, meta, [name, opts, [do: block]]}) when is_binary(name) and is_list(opts) do
+    {:ok, name, opts, block, Keyword.get(meta, :line, 1)}
+  end
+
+  defp workflow_form(path, {:workflow, _meta, [name | _rest]}) do
     {:error,
      Error.new(
        :workflow_dsl,
@@ -189,10 +193,10 @@ defmodule Workflow.Script do
      )}
   end
 
-  defp compile(path, name, block, line) do
+  defp compile(path, name, workflow_opts, block, line) do
     env = :elixir.env_for_eval(file: path, line: line)
 
-    case Compiler.compile(name, block, env) do
+    case Compiler.compile(name, block, env, workflow_opts) do
       {:ok, tree} ->
         {:ok, tree}
 

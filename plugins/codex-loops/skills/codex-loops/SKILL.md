@@ -76,10 +76,15 @@ Before writing files, classify what the user means by "workflow":
 Author executable workflows as Elixir `.exs` files:
 
 ```elixir
-workflow "example" do
+workflow "example",
+  inputs: %{
+    "type" => "object",
+    "properties" => %{"scope" => %{"type" => "string"}},
+    "required" => ["scope"]
+  } do
   phase "scout"
   log "starting"
-  agent "Inspect README.md and summarize the project goal."
+  agent ~P|Inspect <%= path(@args, "/scope") %>.|
   return :ok
 end
 ```
@@ -107,6 +112,7 @@ Use a scout-first authoring loop:
 Useful DSL forms:
 
 - `workflow "name" do ... end`
+- `workflow "name", inputs: %{...} do ... end`
 - `phase "title"`
 - `log "message"`
 - `agent "prompt"`
@@ -115,6 +121,8 @@ Useful DSL forms:
 - `let :name = synthesize(...)`
 - `let :name = refine(...)`
 - `agent(~P"... <%= @name %> ...")`
+- `@args` for immutable invocation JSON; use `path(@args, "/pointer")` in
+  templates and `path_count(:args, "/pointer", max: n)` for bounded fanout.
 - `emit(~P"... <%= @name %> ...")`
 - `emit_result(:name)`
 - `return value`
@@ -160,17 +168,25 @@ producer's journaled output, `agent(~P...)` to inject earlier bindings into a
 later top-level agent prompt, `emit(~P...)` as a final rendered text terminal,
 and `emit_result(:name)` as a final structured terminal for a result-capable
 binding. The shipped result-capable producer is `refine`. Template holes use the
-closed `~P` surface, such as `<%= @draft %>`; do not use Elixir interpolation,
-helper calls, or nested template prompts in `parallel`, `pipeline`, `fanout`,
-`fan_out`, or loop bodies.
+closed `~P` surface, such as `<%= @draft %>`; do not use Elixir interpolation or
+arbitrary helper calls. Nested template prompts are permitted only when every
+hole reads the predefined `@args` binding; templates over prior agent results
+remain top-level only.
+
+Workflow arguments are actual JSON values passed as `args` to
+`workflow_validate` or `workflow_start`, not JSON-encoded strings. They default
+to `{}` when omitted, are limited to 64 KiB, are validated before provider
+work, and are journaled and visible—never use them for secrets. Resume accepts
+no replacement args and rejects a workflow whose compiled fingerprint differs
+from the start event.
 
 ## Testing Gate
 
 Before live Codex execution:
 
 ```bash
-workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo
-workflow_start script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock
+workflow_validate script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo args={"scope":"auth"}
+workflow_start script_path=.codex/workflows/<name>.exs workspace_root=/absolute/path/to/repo run_id=<id> provider=mock args={"scope":"auth"}
 workflow_status run_id=<id>
 ```
 

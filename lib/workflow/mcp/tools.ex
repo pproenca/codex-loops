@@ -33,6 +33,7 @@ defmodule Workflow.MCP.Tools do
   @projection_fields ~w[
     runId state treeName phase logs agentCount eventCount usage result failure
     agents rejected verifications judgments refines toolActivity journalEvents rawRefs
+    args argsDigest treeFingerprint
   ]
 
   @type call_result :: map()
@@ -47,7 +48,8 @@ defmodule Workflow.MCP.Tools do
         schema(
           %{
             "script_path" => @path_schema,
-            "workspace_root" => @workspace_root_schema
+            "workspace_root" => @workspace_root_schema,
+            "args" => %{}
           },
           ["script_path"]
         )
@@ -61,7 +63,8 @@ defmodule Workflow.MCP.Tools do
             "workspace_root" => @workspace_root_schema,
             "run_id" => @run_id_schema,
             "provider" => @provider_schema,
-            "budget" => %{"type" => "integer", "minimum" => 0}
+            "budget" => %{"type" => "integer", "minimum" => 0},
+            "args" => %{}
           },
           ["script_path"]
         )
@@ -192,14 +195,14 @@ defmodule Workflow.MCP.Tools do
   defp conform_projection(data), do: Map.take(data, @projection_fields)
 
   defp validate_arguments("workflow_validate", arguments) do
-    with :ok <- known_fields(arguments, ~w[script_path workspace_root]),
+    with :ok <- known_fields(arguments, ~w[script_path workspace_root args]),
          :ok <- required_string(arguments, "script_path") do
       optional_workspace_root(arguments)
     end
   end
 
   defp validate_arguments("workflow_start", arguments) do
-    with :ok <- known_fields(arguments, ~w[script_path workspace_root run_id provider budget]),
+    with :ok <- known_fields(arguments, ~w[script_path workspace_root run_id provider budget args]),
          :ok <- required_string(arguments, "script_path"),
          :ok <- optional_workspace_root(arguments),
          :ok <- optional_run_id(arguments),

@@ -34,6 +34,54 @@ defmodule Workflow.Scheduler.Error do
     })
   end
 
+  @spec invalid_run_args(term()) :: t()
+  def invalid_run_args({:too_large, actual_bytes, max_bytes}) do
+    new(413, "scheduler.run.args_too_large", "Workflow arguments exceed the size limit.", %{
+      field: "args",
+      actual_bytes: actual_bytes,
+      max_bytes: max_bytes
+    })
+  end
+
+  def invalid_run_args({:schema, reason}) do
+    new(422, "scheduler.run.args_schema_mismatch", "Workflow arguments do not match the declared inputs.", %{
+      field: "args",
+      reason: inspect(reason)
+    })
+  end
+
+  def invalid_run_args(reason) do
+    new(400, "scheduler.run.invalid_args", "Workflow arguments must be JSON data.", %{
+      field: "args",
+      reason: inspect(reason)
+    })
+  end
+
+  @spec resume_args_immutable() :: t()
+  def resume_args_immutable do
+    new(409, "scheduler.run.args_immutable", "Workflow arguments cannot be changed during resume.", %{
+      field: "args"
+    })
+  end
+
+  @spec workflow_changed(String.t(), String.t(), String.t()) :: t()
+  def workflow_changed(run_id, recorded, current) do
+    new(409, "scheduler.run.workflow_changed", "The compiled workflow has changed since this run started.", %{
+      run_id: run_id,
+      recorded_tree_fingerprint: recorded,
+      current_tree_fingerprint: current
+    })
+  end
+
+  @spec run_args_mismatch(String.t(), String.t(), String.t()) :: t()
+  def run_args_mismatch(run_id, recorded, supplied) do
+    new(409, "scheduler.run.args_mismatch", "The supplied arguments differ from this run's immutable arguments.", %{
+      run_id: run_id,
+      recorded_args_digest: recorded,
+      supplied_args_digest: supplied
+    })
+  end
+
   @spec invalid_workspace_root(term(), term()) :: t()
   def invalid_workspace_root(root, reason) do
     new(

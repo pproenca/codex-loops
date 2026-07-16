@@ -23,7 +23,8 @@ alone.
 
 The Workflow DSL is a **declarative, closed-vocabulary language with Elixir surface
 syntax**. A script contains exactly one bare, top-level
-`workflow "name" do … end` block. When the script path is validated or started,
+`workflow "name" do … end` block, optionally with a literal `inputs:` contract.
+When the script path is validated or started,
 `Workflow.Script` parses the source as AST data and lowers it into an inert
 `%Workflow.Tree{}` — an ordered list of plain `%Workflow.Node.*{}` structs that contain no
 functions, closures, or captured runtime state. The workflow source is never compiled or
@@ -121,8 +122,9 @@ readings are possible, the reading that upholds these principles is correct.
 
 The Workflow DSL **defines no lexer of its own**. A workflow's source text is ordinary
 Elixir source. Elixir's own tokenizer and parser turn that text into a quoted abstract
-syntax tree (`Macro.t()`), and the DSL compiler (`Workflow.Compiler.compile/3`) operates on
-that AST — not on a character stream. Consequently:
+syntax tree (`Macro.t()`), and the DSL compiler (`Workflow.Compiler.compile/3`, or
+`compile/4` for the top-level options form) operates on that AST — not on a
+character stream. Consequently:
 
 - **Character set, encoding, whitespace, line terminators, and comments** are exactly
   Elixir's. Source is UTF-8 Elixir; whitespace is insignificant except as a token
@@ -248,7 +250,9 @@ between terminals. Parentheses around call arguments are optional per Elixir (`p
 ≡ `phase("p")`); the productions show the parenthesized form.
 
 ```
-WorkflowDefinition : `workflow` StringLiteral `do` WorkflowBody `end`
+WorkflowDefinition : `workflow` StringLiteral WorkflowOptions? `do` WorkflowBody `end`
+WorkflowOptions : `,` `inputs:` SchemaLiteral
+SchemaLiteral : Literal constrained to a JSON-object map
 
 WorkflowBody : Statement*
 
@@ -278,6 +282,8 @@ LibrarySugarStmt :
 
 `WorkflowDefinition` is the entire file, not a form nested inside a module. The
 file MUST contain exactly one such definition and no sibling top-level forms.
+`inputs:` MAY appear at most once and MUST be a literal JSON Schema map. No
+other top-level workflow option is accepted.
 
 TerminalStmt :
   - ReturnStmt
@@ -286,6 +292,28 @@ TerminalStmt :
 
 `collect` is not in `Statement`: it appears only in `BodyStatement` (§3.7). A top-level
 `collect` parses syntactically as a call but is rejected by validation (§5.6).
+
+### 3.0 Workflow inputs
+
+`inputs:` is a declaration, not an executable statement. The compiler normalizes
+its literal map through the same `Workflow.Schema` structured-output subset used
+for agent schemas and stores it in `tree.input_schema`. The compiler seeds the
+top-level `BindingEnv` with `:args → :run_input`; authors MUST NOT shadow the
+reserved `:args` name with `let` or `fanout bind:`.
+
+The run entry point supplies `args` as an actual JSON value. Omission defaults to
+the empty object `%{}`; explicit JSON `null` remains `nil`. The value MUST contain
+only JSON scalars, arrays, and string-keyed objects and its canonical JSON
+encoding MUST NOT exceed 64 KiB. It is validated against `tree.input_schema`
+before a writer is registered or a provider is called. Inputs are deliberately
+non-secret: the normalized value is journaled and exposed in scheduler status.
+
+`@args` may appear in `~P` template holes anywhere an agent is accepted. The
+otherwise top-level-only template rule is relaxed for a nested agent only when
+every resolved binding in that template is `:run_input`; a nested template over
+an agent, refine, fanout, or future map result remains invalid. Closed path
+predicates and `path_count(:args, pointer, max: M)` resolve `:run_input` through
+the same pure journal fold.
 
 ### 3.1 Simple statements
 
@@ -601,6 +629,7 @@ workflow module, reflection callback, or generated accessor.
 |---|---|---|---|
 | `name` | `String.t() \| nil` | `nil` | Set by `Workflow.Compiler.compile/3` from the top-level string literal. |
 | `version` | `pos_integer()` | `1` | Structural version, independent of the journal schema version. |
+| `input_schema` | `Workflow.Schema.t() \| nil` | `nil` | Normalized literal `inputs:` contract; `nil` accepts any bounded JSON args value. |
 | `nodes` | `[struct()]` | `[]` (enforced key) | Ordered list of node structs. |
 
 ### 4.2 Node addressing
@@ -1429,7 +1458,23 @@ either completed (with a value) or halted (at a specific node address).
 ### 6.2 Entry and resume
 
 ```
-ExecuteRun(run_id, tree, provider, budget, script_path):
+PrepareInvocation(run_id, tree, supplied_args):
+  - Let {fingerprint} be PlanFingerprint(tree).
+  - Let {started} be the first run_started in Journal.Fold(run_id), if any.
+  - If {started} is absent:
+    - Let {args} be `%{}` when supplied_args is omitted, else NormalizeJSON(supplied_args).
+    - Validate tree.input_schema against {args}; on failure return invalid_run_args.
+    - Return {args, fingerprint}.
+  - If started.tree_fingerprint is non-nil and differs from {fingerprint}:
+    - Return tree_fingerprint_mismatch before acquiring the writer lease.
+  - Let {recorded_args} be NormalizeJSON(started.args), defaulting to `%{}` for legacy events.
+  - If supplied_args is present and InputDigest(supplied_args) differs from
+    started.args_digest (or InputDigest(recorded_args) for a legacy event):
+    - Return run_args_mismatch before acquiring the writer lease.
+  - Validate tree.input_schema against {recorded_args}; on failure return invalid_run_args.
+  - Return {recorded_args, fingerprint}.
+
+ExecuteRun(run_id, tree, provider, budget, script_path, args, tree_fingerprint):
   - Let {prior} be Journal.Fold(run_id).
   - Let {status} be Status.of(prior, run_id).       ; = Workflow.Status.of, §7.3
   - If {status.state} is `:completed`:
@@ -1442,7 +1487,7 @@ ExecuteRun(run_id, tree, provider, budget, script_path):
   - If UnsettledAttempt(prior) returns {:ok, attempt}:
     - Commit Event.run_failed({:outcome_unknown, attempt}).
     - Return {:error, {:outcome_unknown, attempt}}.
-  - Return {RunTree(run_id, tree, provider, budget, script_path, prior)}.
+  - Return {RunTree(run_id, tree, provider, budget, script_path, args, tree_fingerprint, prior)}.
 
 FailureReturn(failure):
   - If failure.reason is {:outcome_unknown, attempt}:
@@ -1463,10 +1508,10 @@ FailureReturn(failure):
 ```
 
 ```
-RunTree(run_id, tree, provider, budget, script_path, prior):
+RunTree(run_id, tree, provider, budget, script_path, args, tree_fingerprint, prior):
   - Let {seq} be Journal.LastSeq(run_id) + 1.
   - If {prior} is empty:
-    - Commit Event.run_started(tree, budget, script_path); advance {seq}.
+    - Commit Event.run_started(tree, budget, script_path, args, tree_fingerprint); advance {seq}.
   - Let {ctx} be {seq: seq, return: nil, last_result: nil, iteration: 0, seen_by: []}.
   - Let {outcome} be RunNodes(tree.nodes, run_id, provider, prior, ctx).
   - If {outcome} is {:cont, ctx'}:
@@ -1521,22 +1566,18 @@ activity entry is synchronously appended before its post-commit notification. Th
 assigns monotonically increasing `activity_index` values within an attempt; distinct
 repeated entries remain visible even when their fields are byte-identical.
 
-**Resume recompiles the tree (no identity check).** The inert `%Tree{}` is **not** carried
-across process death; a resume is handed a tree **recompiled from the (mutable) workflow
-script** — from the journaled `run_started.script_path`, or an explicitly passed path (§7.6).
-The reference performs **no** structural comparison between that recompiled tree and the tree
-the journaled, address-keyed events were written against: `ExecuteRun` folds the journal,
-short-circuits on a terminal `:completed`/`:failed` fold (above), and otherwise runs the
-recompiled tree directly through `RunTree`. Journaled **decisions** (committed agent turns,
-`loop_decision`, `fanout_started.width`, panel settlements) are still replayed by address
-rather than recomputed (Principle 3). But resume is address-safe **only to the extent the
-script file is unchanged**: if the script was edited between the original run and the resume (a
-single inserted top-level statement shifts every subsequent `[i]` address, §4.2), the
-recompiled tree may not line up with the journaled events, and the reference does **not**
-detect this. Operators MUST resume against the same script the run was started with. (A
-structural tree-identity check that rejects a divergent script — journaling a fingerprint in
-`run_started` and comparing it on resume — is a plausible future hardening; it is **not**
-implemented and is **not** required for conformance.)
+**Resume recompiles and verifies the tree.** The inert `%Tree{}` is **not** carried
+across process death; a resume is handed a tree recompiled from the mutable workflow
+script — from the journaled `run_started.script_path`, or an explicitly passed path
+(§7.6). `PrepareInvocation` computes a deterministic, domain-versioned SHA-256
+fingerprint over the full compiled tree and compares it with
+`run_started.tree_fingerprint` before acquiring a writer lease. A mismatch fails
+closed; no address-keyed event is replayed and no provider call occurs. Journaled
+decisions (committed agent turns, `loop_decision`, `fanout_started.width`, panel
+settlements) are then replayed by address rather than recomputed (Principle 3).
+Legacy `run_started` events without a fingerprint remain resumable for backward
+compatibility; their journaled args are still validated against the current input
+contract.
 
 **Resume with no resolvable script path.** Because `:script_path` is OPTIONAL (§7.6), a run
 started programmatically from a `%Tree{}` may journal `run_started.script_path == nil`.
@@ -2880,7 +2921,7 @@ additive log policy in §7.1.
 
 | `type` | Payload keys |
 |---|---|
-| `:run_started` | `tree_name, tree_version, node_count, budget, script_path` (no address) |
+| `:run_started` | `tree_name, tree_version, node_count, budget, script_path, workspace_root, args, args_digest, tree_fingerprint` (no address) |
 | `:phase_entered` | `address, name` |
 | `:log_emitted` | `address, message` |
 | `:agent_started` | `address, iteration, attempt, idempotency_key, label, prompt` |
@@ -2927,12 +2968,15 @@ Payload-value pins (each is observable output, so it is normative):
   into branches, lanes, voters, scorers, loop bodies, or fan-out lanes, and it does **not**
   count the pre-expanded grid/lane `%Agent{}` templates of §4.4. For the canonical minimal
   run (`phase; log; agent; return`) `node_count` is `4`.
-- **`run_started` carries no `tree_fingerprint`.** The journaled `run_started` payload is
-  exactly `tree_name, tree_version, node_count, budget, script_path` (the table above). The
-  reference computes **no** structural fingerprint of the tree, and resume performs no
-  tree-identity comparison (§6.2, "Resume recompiles the tree"). `tree_name`/`tree_version`
-  are the tree's `name`/`version`; `script_path` is the file a resume recompiles from
-  (mutable, and trusted as-is).
+- **`run_started` pins invocation identity.** `args` is the normalized immutable
+  JSON invocation value; `args_digest` is its domain-versioned SHA-256 digest;
+  `tree_fingerprint` is the domain-versioned deterministic SHA-256 digest of the
+  complete compiled `%Tree{}`. `tree_name`/`tree_version` are the tree's
+  `name`/`version`; `script_path` and `workspace_root` identify its canonical
+  source and execution directory. Resume reuses `args` and rejects a non-nil
+  fingerprint mismatch before provider work (§6.2). For additive compatibility,
+  older events hydrate `workspace_root`/digests/fingerprint to `nil` and `args`
+  to `%{}`; a nil legacy fingerprint skips only the plan comparison.
 - **`run_started.budget`** is `non_neg_integer() | nil`, in **total tokens** (§6.7.1). `nil`
   means an unbounded run (`Ledger.Remaining` = `:infinity`).
 - **`phase_entered` / `log_emitted` carry no `iteration` key.** Both are positional markers
@@ -3180,7 +3224,9 @@ streams, or malformed usage/activity — are `{:run_crashed, reason}` (exit 1, �
 The run projection envelope (for `run`/`test`/`resume`/`status`/`inspect`) carries
 **exactly** these fields: `runId, state, treeName, phase, logs, agentCount, eventCount,
 usage, result, failure, agents, rejected, verifications, judgments, refines, toolActivity,
-rawRefs`, plus a `command` field added by the caller. Here `logs` is the §7.3 `logs`
+rawRefs, args, argsDigest, treeFingerprint`, plus a `command` field added by the
+caller. `args` is non-secret journaled invocation data; the two identity fields
+are lowercase hexadecimal SHA-256 digests. Here `logs` is the §7.3 `logs`
 projection verbatim — an ordered (seq-order) JSON array of the `log_emitted` **message
 strings** — and `agentCount` is `length(agents)` (the §7.3 `agents` list); `usage` is
 `%{"inputTokens", "outputTokens", "totalTokens"}` including expected-failure usage; `failure`
@@ -3249,15 +3295,19 @@ the budget is **not** part of the workflow source; it is supplied here.
   - `:run_id` — OPTIONAL, `String.t()`; a fresh id is generated when omitted. Reusing an id
     resumes/attaches to that run (§6.2); a second live writer for the same `run_id` is
     refused with `{:error, {:already_running, pid}}` (§6.2.1).
+  - `:args` — OPTIONAL, JSON data with string-keyed objects, bounded to 64 KiB.
+    Omission on a fresh run means `%{}`; an explicit `nil` is JSON `null`.
+    The normalized value MUST validate against `workflow.input_schema` before a
+    writer lease or provider effect. A supplied value on an existing `run_id`
+    MUST have the same digest as the journaled value; public scheduler resume
+    does not accept `args` and reuses the journaled value.
   - `:script_path` — OPTIONAL, `String.t()`; recorded in `run_started.script_path` so
     `resume` can **recompile** the tree from that file (or from a path passed explicitly to
-    `resume`). That file is **mutable** and the recompiled tree is trusted **as-is**: the
-    reference performs **no** structural identity check between the recompiled tree and the
-    journaled events (§6.2, "Resume recompiles the tree"). Journaled **decisions** are still
-    replayed by address rather than recomputed (Principle 3), but resume is address-safe only
-    if the script is unchanged since the run started; editing the script (which shifts `[i]`
-    addresses, §4.2) can desynchronize the recompiled tree from the journal, undetected.
-    Operators MUST resume against the same script the run was started with.
+    `resume`). That file is mutable, but the recompiled tree MUST match the
+    journaled `tree_fingerprint` before address-keyed replay (§6.2). Editing the
+    script or its input contract therefore yields a typed plan-mismatch error
+    before the writer or provider starts. Legacy runs with no fingerprint retain
+    the earlier compatibility behavior.
 
 **Precondition — `budget_slices` REQUIRES a budget.** A workflow containing a
 generic `fanout` width of `budget_slices(...)`, including source written with
@@ -3303,10 +3353,10 @@ Normative requirements a conforming implementation MUST satisfy:
 - **C4 (journal as truth).** All read surfaces (status/inspect/resume/live views) MUST be
   pure folds over the journal. Runtime decisions MUST inspect only journaled values, and
   resume MUST replay journaled decisions, not recompute them.
-  Resume recompiles the tree from the (mutable) journaled `script_path` and trusts it as-is;
-  the reference does **not** journal a tree fingerprint or verify tree identity on resume
-  (§6.2, §7.6). (A structural tree-identity check is a possible future hardening, not a
-  conformance requirement.)
+  Resume recompiles the tree from the mutable journaled `script_path` and MUST
+  verify it against the non-nil `run_started.tree_fingerprint` before replay
+  (§6.2, §7.6). It MUST reuse journaled args. Legacy events with a nil
+  fingerprint MAY resume without the plan comparison for backward compatibility.
   - **C4b (multi-failure result exception).** For a concurrent region in which 2+ lanes
     commit `agent_failed`, the initial `run` returns the **first** failing lane's reason
     while resume/status return the **last** (last-wins Status fold). A conforming
@@ -5269,7 +5319,7 @@ agent acts on an upstream journaled result.
 AgentStmt : `agent` `(` Prompt AgentOpts? `)`
 Prompt :
   - StringLiteral            ; the existing literal form (§3.2) — unchanged
-  - TemplateLiteral          ; a ~P template (§10.4) — implemented only for top-level agents; future map-lane position is DEFER (Rule P.1)
+  - TemplateLiteral          ; a ~P template (§10.4) — top-level, or nested when every binding is @args (Rule P.1)
 ```
 
 `TemplateLiteral` is a **syntactic** symbol (single colon) denoting a `~P` sigil token whose raw
@@ -5295,7 +5345,8 @@ value-free: `(run_id, address, iteration, attempt)`; the **rendered** prompt is 
 **10.6.3 Validation rules.** Assigns resolve (Rules T.4/T.5); interpolation is still rejected (a
 literal `"…#{}…"` is a call form, not a binary). **Rule P.1 — closed whitelist:** in the
 implemented core, a `%Template{}` prompt is admissible on a **top-level `agent`** and a
-top-level `emit` template. "Top-level" includes a `let`-bound producer, because implemented
+top-level `emit` template. A nested agent template is also admissible when every
+binding resolves to the predefined `:run_input` ref. "Top-level" includes a `let`-bound producer, because implemented
 `let` lowers to the producer at the same top-level address (§10.5.2), so `let :x =
 agent(~P…)` is admissible exactly as the unbound top-level agent form is. The deferred future
 whitelist would add `map`-lane `agent` and top-level `gather` positions when those idioms are
@@ -5303,7 +5354,8 @@ promoted. A `%Template{}` prompt is rejected in two families, each by an **activ
 matching `{:sigil_P, meta, _}`: (1) observational/literal-only positions (`verify`/`judge`
 subject/candidate, `return`, `phase`/`log`, and a `synthesize` prompt or inputs — a `let`-bound
 `synthesize` stays literal-only) — panels stay literal-only (Principles 2 and 6); (2) nested
-agent positions (`parallel` branch, `pipeline` stage, `fanout` body, loop body). The guard emits
+agent positions (`parallel` branch, `pipeline` stage, `fanout` body, loop body)
+whose template references anything other than `@args`. The guard emits
 a precise diagnostic ("templates are not admissible in a `parallel` branch"; for a `synthesize`,
 "templates are not admissible in a `synthesize` prompt — use `gather` (§10.9.1) to fold journaled
 inputs") rather than a misleading "unbound assign". So although §10.5.1 lists `synthesize` among
@@ -5349,8 +5401,9 @@ host/version caveat under a cross-version resume). This is admitted by the amend
 
 - **DF-P1.** An `agent` prompt MUST be either a literal string or an inert `%Template{}` over
   in-scope bindings, rendered per §6.4.1′; interpolation and computed prompts remain rejected. A
-  `%Template{}` prompt is admissible **only** on a top-level agent in the implemented core; the
-  `map`-lane position is reserved for the deferred `map` proposal (Rule P.1).
+  `%Template{}` prompt is admissible on a top-level agent or on a nested agent
+  whose resolved binding set contains only `:run_input`; the `map`-lane position
+  is otherwise reserved for the deferred `map` proposal (Rule P.1).
 - **DF-P2.** The rendered prompt MUST be a deterministic `RenderTemplate` fold over the journal,
   materialized before the call and journaled verbatim at commit in the `prompt` payload of **every**
   prompt-bearing agent event (`agent_committed.prompt` **and** `agent_attempt_rejected.prompt`),
@@ -5713,11 +5766,13 @@ reduce(:n, over: :items, with: :count)   # an in-language reducer — REJECTED (
 
 ### 10.11 Shared machinery, output & error format
 
-**Binding resolution (shared by every idiom).** `BindingRef` is `{:node, address}` |
+**Binding resolution (shared by every idiom).** `BindingRef` is `:run_input` | `{:node, address}` |
 `{:refine, address}` | `{:fanout, address, fanout_scope}` | `{:map, address}` |
 `{:element, over_ref}`, where `fanout_scope` is `:global` or `{:loop_local, loop_address}`.
 `BindingEnv` is a load-time ordered map `name(atom) → BindingRef` threaded through parsing so
 only lexically-preceding bindings are in scope (Rule T.5); there is **no** runtime name→value map.
+The compiler initializes it with `:args → :run_input`; all other bindings are
+introduced by lexically preceding producers.
 The implemented core emits `{:node, address}` refs for `agent`/`synthesize` producers and
 `{:refine, address}` refs for `refine` producers. Top-level `fanout bind: :name` emits
 `{:fanout, address, :global}`; a loop-body `fanout bind: :name` emits
@@ -5732,6 +5787,7 @@ ResolveAssign(name, bindings, run_id, lane):   ; bindings :: %{atom() => Binding
   - Return ResolveRef(ref, run_id, lane).
 
 ResolveRef(ref, run_id, lane):
+  - If ref is :run_input: Return the args field from the first run_started event.
   - If ref is {:node, address}: Return BoundValue(run_id, address).
   - If ref is {:refine, address}: Return BoundRefineArtifact(run_id, address).
   - If ref is {:fanout, address, :global}: Return BoundFanoutList(run_id, address, nil).
@@ -5915,7 +5971,7 @@ body `log`; read the per-pass events instead — `iteration_started`, `loop_deci
 |---|---|---|
 | Interpolated prompt `agent("do #{x}")` | interpolation is not allowed | Bind a previous producer with `let`, then render it with `agent(~P"do <%= @x %>")` or `emit(~P"do <%= @x %>")`. |
 | Unbound dataflow assign `emit(~P"Report: <%= @draft %>")` with no previous `let :draft` | unbound template assign | Add `let :draft = agent("Draft the report.")` before the template, or use a literal `return`. |
-| Template in a nested position `parallel([agent(~P"Improve <%= @draft %>")])` | template prompts are only allowed on top-level agents | Move the template agent to top level and bind its result with `let`, or keep nested agents literal-only. |
+| Template in a nested position over a prior result `parallel([agent(~P"Improve <%= @draft %>")])` | template prompts over prior results are only allowed on top-level agents | Move the template agent to top level. A nested agent may template only over predefined `@args`. |
 | Calling a helper `agent(build_prompt())` | external module call raises | Inline the literal prompt. |
 | `agent("go", retries: 1)` with no schema | requires a `schema:` | Add `schema: %{…}` or drop the options. |
 | `agent("go", label: :bad)` | label must be a string literal | Use a display string such as `label: "read:docs"`. |

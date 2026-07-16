@@ -49,7 +49,7 @@ end
 defmodule Workflow.Event.Payload.RunStarted do
   @moduledoc false
   @enforce_keys [:tree_name, :tree_version, :node_count, :budget, :script_path]
-  defstruct @enforce_keys ++ [workspace_root: nil]
+  defstruct @enforce_keys ++ [workspace_root: nil, args: %{}, args_digest: nil, tree_fingerprint: nil]
   @type t :: %__MODULE__{}
 end
 

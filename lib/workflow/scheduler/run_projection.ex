@@ -51,6 +51,9 @@ defmodule Workflow.Scheduler.RunProjection do
     :refines,
     :tool_activity,
     :raw_refs,
+    :args,
+    :args_digest,
+    :tree_fingerprint,
     :lifecycle_action,
     :ui_path,
     :ui_url
@@ -74,6 +77,9 @@ defmodule Workflow.Scheduler.RunProjection do
     :refines,
     :tool_activity,
     :raw_refs,
+    :args,
+    :args_digest,
+    :tree_fingerprint,
     :lifecycle_action,
     :ui_path,
     :ui_url,
@@ -99,6 +105,9 @@ defmodule Workflow.Scheduler.RunProjection do
           refines: [Refine.t()],
           tool_activity: [ToolActivity.t()],
           raw_refs: RawRefs.t(),
+          args: term(),
+          args_digest: String.t() | nil,
+          tree_fingerprint: String.t() | nil,
           workspace_root: String.t() | nil,
           lifecycle_action: LifecycleAction.t(),
           ui_path: String.t(),
@@ -109,6 +118,8 @@ defmodule Workflow.Scheduler.RunProjection do
   @spec from_status(Status.t(), keyword()) :: t()
   def from_status(%Status{} = status, opts \\ []) do
     ui_path = "/runs/#{status.run_id}"
+    events = Keyword.get(opts, :events, [])
+    {args, args_digest, tree_fingerprint} = invocation_identity(events)
 
     %__MODULE__{
       run_id: status.run_id,
@@ -129,7 +140,10 @@ defmodule Workflow.Scheduler.RunProjection do
       refines: status.refines,
       tool_activity: status.tool_activity,
       raw_refs: status.raw_refs,
-      workspace_root: workspace_root(Keyword.get(opts, :events, [])),
+      args: args,
+      args_digest: args_digest,
+      tree_fingerprint: tree_fingerprint,
+      workspace_root: workspace_root(events),
       lifecycle_action: lifecycle_action(status, opts),
       ui_path: ui_path,
       ui_url: ui_path
@@ -202,6 +216,9 @@ defmodule Workflow.Scheduler.RunProjection do
       "refines" => Enum.map(projection.refines, &refine_map/1),
       "toolActivity" => Enum.map(projection.tool_activity, &tool_activity_map/1),
       "rawRefs" => raw_refs_map(projection.raw_refs),
+      "args" => JSONValue.public(projection.args),
+      "argsDigest" => projection.args_digest,
+      "treeFingerprint" => projection.tree_fingerprint,
       "workspaceRoot" => projection.workspace_root,
       "workflowName" => projection.workflow_name,
       "lifecycleAction" => lifecycle_action_map(projection.lifecycle_action),
@@ -238,6 +255,16 @@ defmodule Workflow.Scheduler.RunProjection do
       %Event{payload: %Payload.RunStarted{workspace_root: root}}
       when is_binary(root) and root != "" ->
         root
+
+      _event ->
+        nil
+    end)
+  end
+
+  defp invocation_identity(events) do
+    Enum.find_value(events, {%{}, nil, nil}, fn
+      %Event{payload: %Payload.RunStarted{} = started} ->
+        {started.args, started.args_digest, started.tree_fingerprint}
 
       _event ->
         nil

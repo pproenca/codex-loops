@@ -517,7 +517,7 @@ useful target is its orchestration discipline, not its JavaScript VM.
 | Verification | authored from agent/parallel primitives | keep typed `verify`/`refine`, but teach adversarial and diverse-lens prompts |
 | Resume | rolling prompt/options cache; unsettled calls respawn | keep address/journal replay and `outcome_unknown` |
 | Metadata | pure literal description/phase details | consider an inert metadata header without evaluating source |
-| Inputs | arbitrary JSON `args` | add explicit run inputs if workflows need reusable parameterization |
+| Inputs | arbitrary JSON `args` | shipped: optional literal `inputs:` schema plus immutable, validated, journaled JSON `args` through `@args` |
 | Failure slots | `null` plus logs | preserve typed failed/unverified outcomes in journal and results |
 | Budget | shared hard output-token pool | keep deterministic finite budgets and make dropped coverage visible |
 
@@ -558,11 +558,17 @@ The recovered design suggests these additive, inert features:
    `index`, expanded into inert templates rather than closures.
 3. Dynamic map over a prior structured binding with an author-time maximum.
 4. First-class lane outcome states instead of collapsing absence into a value.
-5. Workflow inputs as validated journaled JSON available through closed
-   templates.
-6. Literal workflow metadata with description and phase detail.
-7. A selection/merge terminal that takes stable candidate ids and performs
+5. Literal workflow metadata with description and phase detail.
+6. A selection/merge terminal that takes stable candidate ids and performs
    host-side validated assembly, preventing synthesis loss.
 
 None of these requires evaluating arbitrary JavaScript. They can compile to the
 same closure-free tree and retain Codex Loops' stronger durability semantics.
+
+Workflow inputs from the original gap list are now implemented. `args` is a
+bounded JSON value validated against the optional `inputs:` contract before any
+provider effect, journaled for replay, and exposed through the closed `@args`
+binding. The run also records argument and tree identities so a resume cannot
+silently switch arguments or execute a changed compiled plan. This is stricter
+than Ultracode's rolling prompt/options resume cache and preserves the existing
+at-most-once journal model.

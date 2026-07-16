@@ -246,6 +246,7 @@ defmodule Workflow.Web.SchedulerAPITest do
                "status" => "ok",
                "version" => version,
                "checks" => %{
+                 "execution" => "available",
                  "otp_app" => "available",
                  "journal" => "available",
                  "pubsub" => "available"

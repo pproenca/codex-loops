@@ -49,6 +49,11 @@ That single action completes the installation:
 6. Waits for the exact scheduler health contract.
 7. Registers `http://127.0.0.1:47125/mcp` through `codex mcp add`.
 
+Reactor is compiled into the same OTP release and starts inside the existing
+BEAM. It adds no executable, login service, listener, MCP registration,
+installer argument, or macOS signing boundary. The installer's existing health
+wait now also requires execution readiness.
+
 The corresponding reconciliation command is:
 
 ```sh

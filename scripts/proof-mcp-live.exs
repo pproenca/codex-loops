@@ -83,6 +83,24 @@ defmodule ProofMCPLive do
         status = poll_completed_status!(scheduler_url, run_id)
         assert_completed_status_with_usage!(status, run_id)
 
+        resume =
+          call_tool!(scheduler_url, "workflow_resume", %{
+            "run_id" => run_id,
+            "script_path" => workflow_path,
+            "workspace_root" => temp_root,
+            "provider" => "codex"
+          })
+
+        assert_started_run!(resume, run_id)
+        resumed_status = poll_completed_status!(scheduler_url, run_id)
+        assert_completed_status_with_usage!(resumed_status, run_id)
+
+        assert!(
+          get_in(resumed_status, ["data", "usage", "totalTokens"]) ==
+            get_in(status, ["data", "usage", "totalTokens"]),
+          "completed resume should not spend another Codex turn"
+        )
+
         inspection = call_tool!(scheduler_url, "workflow_inspect", %{"run_id" => run_id})
         assert_inspected_live_events!(inspection, run_id)
 
@@ -459,7 +477,7 @@ defmodule ProofMCPLive do
       {"CODEX_LOOPS_JOURNAL_PATH", journal_path},
       {"CODEX_LOOPS_CODEX_BIN", binding.codex_path},
       {"CODEX_LOOPS_BINDING_PATH", binding.path},
-      {"CODEX_LOOPS_CODEX_MODEL", false},
+      {"CODEX_LOOPS_CODEX_MODEL", System.get_env("CODEX_LOOPS_CODEX_MODEL") || false},
       {"CODEX_LOOPS_CODEX_SANDBOX", false},
       {"CODEX_LOOPS_CODEX_WORKDIR", false},
       {"CODEX_HOME", codex_home},
@@ -692,7 +710,7 @@ defmodule ProofMCPLive do
     workflow "mcp-live-proof" do
       phase "prove live Codex through Streamable HTTP MCP"
       log "live MCP proof started"
-      agent "Reply with exactly LIVE-MCP-PROOF-OK and no other text."
+      pipeline ["only"], [agent("Reply with exactly LIVE-MCP-PROOF-OK and no other text.")]
       return :ok
     end
     """

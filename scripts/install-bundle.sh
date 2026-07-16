@@ -50,6 +50,7 @@ validate_bundle() {
     test -x "$root/libexec/scheduler/bin/agent_loops" &&
     test -x "$root/libexec/scheduler/bin/codex-loops-server" &&
     test -f "$root/share/skills/codex-loops/SKILL.md" &&
+    test -f "$root/share/codex-loops/THIRD_PARTY_NOTICES.md" &&
     test -f "$root/share/codex-loops/runtime.json"
 }
 

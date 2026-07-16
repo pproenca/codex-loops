@@ -170,6 +170,7 @@ defmodule Workflow.SchedulerTest do
     assert health.version == Workflow.PackageVersion.version()
 
     assert health.checks == %{
+             execution: :available,
              otp_app: :available,
              journal: :available,
              pubsub: :available

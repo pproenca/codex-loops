@@ -115,6 +115,7 @@ artifact layout is:
 bin/codex-loops
 libexec/scheduler/
 share/skills/codex-loops/
+share/codex-loops/THIRD_PARTY_NOTICES.md
 share/codex-loops/runtime.json
 install
 VERSION

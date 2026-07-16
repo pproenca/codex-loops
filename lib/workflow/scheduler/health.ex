@@ -10,6 +10,7 @@ defmodule Workflow.Scheduler.Health do
           status: :ok,
           version: String.t(),
           checks: %{
+            execution: availability(),
             otp_app: availability(),
             journal: availability(),
             pubsub: availability()

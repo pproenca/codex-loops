@@ -36,6 +36,8 @@ defmodule Workflow.Run.Writer do
   alias Workflow.BoundValue
   alias Workflow.Event
   alias Workflow.Event.Payload, as: P
+  alias Workflow.Execution.Concurrent
+  alias Workflow.Execution.Result, as: ExecutionResult
   alias Workflow.Idempotency
   alias Workflow.IdempotencyKey
   alias Workflow.Journal
@@ -66,6 +68,7 @@ defmodule Workflow.Run.Writer do
   alias Workflow.Node.Verify
   alias Workflow.Predicate
   alias Workflow.Provider.Activity
+  alias Workflow.Provider.Codex
   alias Workflow.Provider.Usage
   alias Workflow.PubSub
   alias Workflow.Refine.ColdRead
@@ -649,6 +652,7 @@ defmodule Workflow.Run.Writer do
   defp run_refine_reviewers(%Refine{} = node, round, artifact, run_id, provider, prior, seq) do
     cap = node.max_concurrency || max(length(node.reviewers), 1)
     timeout = node.reviewer_timeout_ms || refine_reviewer_timeout()
+    {provider, execution_timeout} = refine_provider_timeout(provider, timeout)
 
     outcomes =
       run_refine_reviewers_concurrently(
@@ -656,6 +660,7 @@ defmodule Workflow.Run.Writer do
         node.reviewers,
         cap,
         timeout,
+        execution_timeout,
         round,
         fn %Reviewer{agent: agent, prompt: base_prompt} = reviewer ->
           agent = %{agent | prompt: reviewer_prompt(base_prompt, round, artifact)}
@@ -1010,6 +1015,7 @@ defmodule Workflow.Run.Writer do
          attempt
        ) do
     timeout = refine.reviewer_timeout_ms || refine_reviewer_timeout()
+    {provider, execution_timeout} = refine_provider_timeout(provider, timeout)
 
     task =
       Task.Supervisor.async_nolink(Workflow.TaskSupervisor, fn ->
@@ -1025,7 +1031,7 @@ defmodule Workflow.Run.Writer do
         )
       end)
 
-    case Task.yield(task, timeout) do
+    case Task.yield(task, execution_timeout) do
       {:ok, {:ok, events, review}} ->
         {:ok, commit_all(run_id, seq, events), review}
 
@@ -2162,55 +2168,53 @@ defmodule Workflow.Run.Writer do
   # --- Bounded, ordered concurrent fan-out (shared by parallel/pipeline) ---
 
   defp run_concurrently(inputs, cap, fun) do
-    Workflow.TaskSupervisor
-    |> Task.Supervisor.async_stream_nolink(inputs, fun,
-      max_concurrency: concurrency_cap(cap),
-      ordered: true,
-      timeout: @fanout_timeout,
-      on_timeout: :kill_task
-    )
-    |> Enum.map(fn
-      {:ok, result} -> result
-      {:exit, :timeout} -> raise "concurrent workflow branch exceeded #{@fanout_timeout} ms"
-      {:exit, {%_{} = exception, stacktrace}} when is_list(stacktrace) -> reraise exception, stacktrace
-      {:exit, reason} -> exit({:concurrent_workflow_branch_crashed, reason})
-    end)
+    Concurrent.run(inputs, concurrency_cap(cap), @fanout_timeout, fun)
   end
 
-  defp run_refine_reviewers_concurrently(%Refine{} = refine, reviewers, cap, timeout, iteration, fun) do
-    Workflow.TaskSupervisor
-    |> Task.Supervisor.async_stream_nolink(
-      reviewers,
-      fn reviewer -> safe_refine_reviewer(reviewer, iteration, fun) end,
-      max_concurrency: concurrency_cap(cap),
-      ordered: true,
-      timeout: timeout,
-      on_timeout: :kill_task
-    )
+  defp run_refine_reviewers_concurrently(%Refine{} = refine, reviewers, cap, timeout, execution_timeout, iteration, fun) do
+    reviewers
+    |> Concurrent.outcomes(concurrency_cap(cap), execution_timeout, fun, fatal?: &fatal_refine_outcome?/1)
     |> Enum.zip(reviewers)
-    |> Enum.map(fn
-      {{:ok, result}, _reviewer} ->
-        result
+    |> Enum.map(fn {outcome, reviewer} ->
+      ExecutionResult.fold(
+        outcome,
+        fn result -> result end,
+        fn exception, stacktrace -> reraise exception, stacktrace end,
+        fn
+          {:codex_turn_outcome_unknown, detail} ->
+            exit({:codex_turn_outcome_unknown, detail})
 
-      {{:exit, :timeout}, reviewer} ->
-        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_timeout, timeout}, detail: timeout)
-
-      {{:exit, {:codex_turn_outcome_unknown, detail}}, _reviewer} ->
-        exit({:codex_turn_outcome_unknown, detail})
-
-      {{:exit, {%_{} = exception, stacktrace}}, _reviewer} when is_list(stacktrace) ->
-        reraise exception, stacktrace
-
-      {{:exit, reason}, reviewer} ->
-        failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_crashed, reason}, detail: reason)
+          reason ->
+            failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_crashed, reason}, detail: reason)
+        end,
+        fn -> failed_refine_reviewer(refine, reviewer, iteration, {:reviewer_timeout, timeout}, detail: timeout) end
+      )
     end)
   end
 
   defp concurrency_cap(requested), do: requested |> max(1) |> min(@max_concurrency)
 
-  defp safe_refine_reviewer(reviewer, _iteration, fun) do
-    fun.(reviewer)
+  defp fatal_refine_outcome?(outcome) do
+    ExecutionResult.fold(
+      outcome,
+      fn _result -> false end,
+      fn _exception, _stacktrace -> true end,
+      fn
+        {:codex_turn_outcome_unknown, _detail} -> true
+        _reason -> false
+      end,
+      fn -> false end
+    )
   end
+
+  defp refine_provider_timeout({Codex, opts}, timeout) when is_list(opts) do
+    # The app-server owns the absolute paid-turn deadline and cancellation. A
+    # second task deadline cannot safely include admission plus every bounded
+    # synchronous journal write around streamed activity.
+    {{Codex, Keyword.put(opts, :timeout, timeout)}, :infinity}
+  end
+
+  defp refine_provider_timeout(provider, timeout), do: {provider, timeout}
 
   defp failed_refine_reviewer(%Refine{} = refine, %Reviewer{agent: %Agent{}} = reviewer, iteration, reason, opts) do
     {:role_failed, [], reviewer_role_failure(refine, reviewer, iteration, 1, reason, opts)}

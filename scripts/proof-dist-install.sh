@@ -32,6 +32,7 @@ chmod 755 "$archive_stage/install"
 # logger replacement below belongs only to the separate outer-forwarding tests.
 cmp "$bundle/bin/codex-loops" "$archive_stage/bin/codex-loops"
 grep -Fq 'Workflow.CLI.main(System.argv())' "$archive_stage/bin/codex-loops"
+test -f "$archive_stage/share/codex-loops/THIRD_PARTY_NOTICES.md"
 
 if [ "$(uname -s)" = Linux ]; then
   for command in curl python3; do

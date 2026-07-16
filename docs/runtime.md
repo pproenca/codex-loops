@@ -7,6 +7,21 @@ scripts compile into inert trees. A per-run writer process walks the tree,
 invokes the selected provider, commits ordered journal events to SQLite, and
 exits. Read surfaces are run projections folded from the journal.
 
+The writer retains tree traversal and durable decisions. At a resolved
+concurrent frontier—parallel branches, pipeline or fanout lanes, quality
+voters/candidates, or refine reviewers—it builds one ephemeral flat Reactor
+DAG. Reactor owns the bounded worker steps and ordered join; a supervised FIFO
+admission process preserves input-order dispatch. A per-run atomic fatal latch
+closes admission at the branch-result boundary instead of relying on message
+order between lanes. The writer remains the journal, provider-effect, and
+settlement authority.
+
+Each frontier has one linked per-run task supervisor containing its runner,
+FIFO, cancellation token, report broker, guarded branch workers, and guardians.
+Terminal failure synchronously stops that scope before returning. Reactor's
+globally supervised step wrappers never execute provider work directly, and
+their late reports cannot escape the stopped broker into the writer mailbox.
+
 ```text
 Codex -> Streamable HTTP POST /mcp -> scheduler context -> supervised run writer
                                                    -> mock turn, or one shared Codex app-server
@@ -90,6 +105,7 @@ The bundle layout is fixed:
 bin/codex-loops
 libexec/scheduler/
 share/skills/codex-loops/
+share/codex-loops/THIRD_PARTY_NOTICES.md
 share/codex-loops/runtime.json
 ```
 
@@ -153,9 +169,12 @@ conformance variants, status, inspection, resume, and UI opening. It also
 asserts that client disconnects have no effect on the service. User-service
 lifecycle has its own proof surface.
 
-The health projection checks the OTP application, journal owner, and PubSub.
-`Workflow.Web.Endpoint` is intentionally not repeated as a component check:
-receiving `/api/health` already proves that the endpoint is serving requests.
+The health projection checks the OTP application, Reactor execution readiness,
+journal owner, and PubSub. Execution is available only while Reactor's task
+supervisor, every task partition, concurrency tracker, and tracker-owned ETS
+table are live and responsive. `Workflow.Web.Endpoint` is intentionally not
+repeated as a component check: receiving `/api/health` already proves that the
+endpoint is serving requests.
 
 ## Journal Model
 

@@ -34,6 +34,7 @@ defmodule Workflow.Scheduler do
   def health do
     checks = %{
       otp_app: available?(application_started?(@app)),
+      execution: available?(Workflow.Execution.available?()),
       journal: available?(process_alive?(Journal)),
       pubsub: available?(process_alive?(Workflow.PubSub))
     }

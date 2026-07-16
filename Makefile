@@ -67,15 +67,17 @@ release: setup package-version-check assets-build
 
 dev-bundle: release
 	rm -rf "$(DEV_BUNDLE_DIR)"
-	mkdir -p "$(DEV_BUNDLE_DIR)/bin" "$(DEV_BUNDLE_DIR)/libexec/scheduler" "$(DEV_BUNDLE_DIR)/share/skills"
+	mkdir -p "$(DEV_BUNDLE_DIR)/bin" "$(DEV_BUNDLE_DIR)/libexec/scheduler" "$(DEV_BUNDLE_DIR)/share/skills" "$(DEV_BUNDLE_DIR)/share/codex-loops"
 	cp "_build/prod/rel/$(RELEASE_NAME)/bin/codex-loops" "$(DEV_BUNDLE_DIR)/bin/codex-loops"
 	cp -R "_build/prod/rel/$(RELEASE_NAME)/." "$(DEV_BUNDLE_DIR)/libexec/scheduler/"
 	cp -R plugins/codex-loops/skills/codex-loops "$(DEV_BUNDLE_DIR)/share/skills/codex-loops"
+	cp THIRD_PARTY_NOTICES.md "$(DEV_BUNDLE_DIR)/share/codex-loops/THIRD_PARTY_NOTICES.md"
 	scripts/write-runtime-manifest.sh "$(DEV_BUNDLE_DIR)/share/codex-loops/runtime.json" "$$(tr -d '[:space:]' < VERSION)" "$$(scripts/distribution-target.sh)"
 	test -x "$(DEV_BUNDLE_DIR)/bin/codex-loops"
 	test -x "$(DEV_BUNDLE_DIR)/libexec/scheduler/bin/agent_loops"
 	test -x "$(DEV_BUNDLE_DIR)/libexec/scheduler/bin/codex-loops-server"
 	test -f "$(DEV_BUNDLE_DIR)/share/skills/codex-loops/SKILL.md"
+	test -f "$(DEV_BUNDLE_DIR)/share/codex-loops/THIRD_PARTY_NOTICES.md"
 	test -f "$(DEV_BUNDLE_DIR)/share/codex-loops/runtime.json"
 
 dist: dev-bundle
